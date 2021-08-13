@@ -3,7 +3,7 @@
 version = 3
 
 [[package]]
-name = "file_search_tool"
+name = "code-search"
 version = "0.1.0"
 dependencies = [
  "term_size",
