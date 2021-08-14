@@ -67,11 +67,11 @@ fn main() {
                         match fzf_proc.stdin.as_ref().unwrap()
                             .write_all(line.as_bytes()) {
                                 // TODO:
-                                // If someone broke the fzf process by select
+                                // If someone broke the fzf process by selecting
                                 // one pattern (or other operations) before rg
                                 // searching is fininshed, the pipe will be
                                 // broken. Perhaps, we can assume one user has
-                                // got his/her result who stopped the process.
+                                // got his/her result after stopping the process.
 
                                 // Well, leave it panics now and figure out a
                                 // better solution later.
@@ -110,7 +110,7 @@ fn main() {
             // --print-query option.
             fzf_query = String::from(split_fzf_out[0]);
 
-            // Users can multi-select function of fzf, and all
+            // Users can use multi-select function of fzf, and all
             // selected patterns will be opened by nvim one by one.
             for pat in split_fzf_out[1..].into_iter() {
                 if !pat.is_empty() {
