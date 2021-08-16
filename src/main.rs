@@ -4,13 +4,20 @@ use std::env;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
 
+///
+/// The code search tool
+///
+/// This tool is implemented upon ripgrep, fzf, bat and neovim
+/// which is very useful for reading code. You must install
+/// these dependencies in your pc (currently, it only supports
+/// linux).
+///
+
 fn previewer(args: &[String]) {
     if args.len() < 1 {
         eprintln!("Usage: fzf-previewer <rgout> <termnal hight>");
         return;
     }
-
-    println!("args: {:?}", args);
 
     let rgout = &args[0];
     let termh = args[1].parse::<i32>().unwrap();
