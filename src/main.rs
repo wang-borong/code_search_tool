@@ -4,8 +4,54 @@ use std::env;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
 
+fn previewer(args: &[String]) {
+    if args.len() < 1 {
+        eprintln!("Usage: fzf-previewer <rgout> <termnal hight>");
+        return;
+    }
+
+    println!("args: {:?}", args);
+
+    let rgout = &args[0];
+    let termh = args[1].parse::<i32>().unwrap();
+    let rgarr: Vec<&str> = rgout.splitn(3, ":").collect();
+    let filname = rgarr[0];
+    let linum = rgarr[1].parse::<i32>().unwrap();
+    let rem_termh = termh * 3 / 4;
+    let startline;
+    let stopline;
+    if linum > rem_termh {
+        startline = linum - rem_termh;
+    } else {
+        startline = 0;
+    }
+    stopline = startline + termh * 3;
+
+    let view_cmd = format!("bat -n --color=always -H {} -r {}:{} {}",
+                       linum, startline, stopline, filname);
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(&view_cmd)
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap()
+        .success();
+}
+
 fn main() {
+    let app_path = String::from(env::current_exe().unwrap()
+                            .to_str().unwrap());
     let args: Vec<String> = env::args().collect();
+
+    // We will implement the previewer command for fzf at here
+    // we check the second argument, if it is "--PREVIEWER" then
+    // it is used to preview the selected file in fzf.
+    if args[1] == "--PREVIEWER".to_owned() {
+        previewer(&args[2..]);
+        return;
+    }
 
     let rg_proc = match Command::new("rg")
                                 // Set some default options for rg command
@@ -41,11 +87,22 @@ fn main() {
         // the preview command.
         // the options used here can be read from the fzf man.
         let fzf_cmd = &format!(r#"fzf --ansi -e --tac -0 --cycle -m \
-                               --min-height=20 -d ':' --print-query \
-                               --preview="echo '\033[1;32m {{1}}\033[0m'; \
-                               fspreview {{}} {}" {} \
-                               --preview-window=right:60%"#,
-                               term_hight, fzf_query_opt);
+                        --min-height=20 -d ':' --print-query \
+                        --preview-window=right:59% \
+                        --color fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33 \
+                        --color info:136,prompt:136,pointer:230 \
+                        --color marker:230,spinner:136 \
+                        --bind "ctrl-u:half-page-up" \
+                        --bind "ctrl-d:half-page-down" \
+                        --bind "alt-u:preview-page-up" \
+                        --bind "alt-d:preview-page-down" \
+                        --bind "alt-j:preview-down" \
+                        --bind "alt-k:preview-up" \
+                        --bind "ctrl-v:toggle-preview" \
+                        --bind "ctrl-r:kill-line" \
+                        --preview="echo '\033[1;32m {{1}}\033[0m'; \
+                        {} --PREVIEWER "{{}}" "{}"" {} \
+                        "#, app_path, term_hight, fzf_query_opt);
         let fzf_proc = match Command::new("bash")
             .arg("-c")
             .arg(fzf_cmd)
