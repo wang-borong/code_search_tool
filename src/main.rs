@@ -3,6 +3,8 @@ use term_size;
 use std::env;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::path::Path;
+use path_clean::clean;
 
 ///
 /// The code search tool
@@ -50,7 +52,7 @@ fn previewer(args: &[String]) {
 fn main() {
     let app_path = String::from(env::current_exe().unwrap()
                             .to_str().unwrap());
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
 
     // We will implement the previewer command for fzf at here
     // we check the second argument, if it is "--PREVIEWER" then
@@ -58,6 +60,14 @@ fn main() {
     if args[1] == "--PREVIEWER".to_owned() {
         previewer(&args[2..]);
         return;
+    }
+
+    // clean path
+    let assume_path = args.pop().unwrap();
+    if !Path::new(&assume_path).exists() {
+        args.push(assume_path);
+    } else {
+        args.push(clean(&assume_path));
     }
 
     let rg_proc = match Command::new("rg")
