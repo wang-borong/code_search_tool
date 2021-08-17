@@ -65,6 +65,8 @@ fn main() {
         return;
     }
 
+    // TODO: history function
+    // save all search command history to a history file if needed.
     let rg_proc = match Command::new("rg")
                                 // Set some default options for rg command
                                 .args(&[
@@ -104,17 +106,17 @@ fn main() {
                         --color fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33 \
                         --color info:136,prompt:136,pointer:230 \
                         --color marker:230,spinner:136 \
-                        --bind "ctrl-u:half-page-up" \
-                        --bind "ctrl-d:half-page-down" \
-                        --bind "alt-u:preview-page-up" \
-                        --bind "alt-d:preview-page-down" \
-                        --bind "alt-j:preview-down" \
-                        --bind "alt-k:preview-up" \
-                        --bind "ctrl-v:toggle-preview" \
-                        --bind "ctrl-r:kill-line" \
+                        --bind ctrl-u:half-page-up \
+                        --bind ctrl-d:half-page-down \
+                        --bind alt-u:preview-page-up \
+                        --bind alt-d:preview-page-down \
+                        --bind alt-j:preview-down \
+                        --bind alt-k:preview-up \
+                        --bind ctrl-v:toggle-preview \
+                        --bind ctrl-r:kill-line \
                         --preview="echo '\033[1;32m {{1}}\033[0m'; \
-                        {} --PREVIEWER "{{}}" "{}"" {} \
-                        "#, app_path, term_hight, fzf_query_opt);
+                        {} --PREVIEWER "{{}}" "{}"" {}"#,
+                        app_path, term_hight, fzf_query_opt);
         let fzf_proc = match Command::new("bash")
             .arg("-c")
             .arg(fzf_cmd)
@@ -148,6 +150,15 @@ fn main() {
                                     "couldn't write to fzf stdin: {}", why),
                                 Ok(_) => {},
                             }
+                        // TODO:
+                        // If search result is too big, the memory will be over
+                        // using. But in common use case, this condition is rare.
+                        // However, we can't assume all users will miss using it.
+                        // Thus, we should avoid saving all the search results
+                        // to the string buffer.
+                        //
+                        // Perhaps, we can save the results to a temporary file
+                        // if the big result searching occured.
                         rg_output_str.push_str(&line);
                     },
                     Err(why) => panic!("get wrong line: {}", why),
@@ -162,7 +173,6 @@ fn main() {
                     Err(why) => panic!("couldn't write to fzf stdin: {}", why),
                     Ok(_) => {},
                 }
-
         }
 
         let fzf_out = fzf_proc.wait_with_output().unwrap();
