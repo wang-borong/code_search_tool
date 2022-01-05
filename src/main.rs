@@ -3,6 +3,7 @@ use term_size;
 use std::env;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::fs;
 
 ///
 /// The code search tool
@@ -43,8 +44,31 @@ fn previewer(args: &[String]) {
         .spawn()
         .unwrap()
         .wait()
-        .unwrap()
-        .success();
+        .expect("run bash command failed!");
+}
+
+// only works on unix*
+fn check_if_command_exists(cmd: &str) -> bool {
+    if let Ok(path) = env::var("PATH") {
+        for p in path.split(":") {
+            let p_str = format!("{}/{}", p, cmd);
+            if fs::metadata(p_str).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn check_if_commands_exist(cmds: &[&str]) -> bool {
+    for cmd in cmds {
+        if !check_if_command_exists(cmd) {
+            eprint!("\"{}\" is not installed in your PATH, ", cmd);
+            return false;
+        }
+    }
+
+    true
 }
 
 fn main() {
@@ -54,6 +78,13 @@ fn main() {
 
     if args.len() < 2 {
         eprintln!("fs [rg options] <search pattern> [search path]");
+        return;
+    }
+
+    // check the commands
+    let apps = ["rg", "fzf", "bat", "nvim"];
+    if !check_if_commands_exist(&apps) {
+        eprintln!("please install it!");
         return;
     }
 
@@ -78,7 +109,7 @@ fn main() {
                                 .args(&args[1..])
                                 .stdout(Stdio::piped())
                                 .spawn() {
-        Err(why) => panic!("couldn't spawn shell: {}", why),
+        Err(why) => panic!("couldn't spawn rg: {}", why),
         Ok(rg_proc) => rg_proc,
     };
 
@@ -112,8 +143,7 @@ fn main() {
                         app_path, term_hight);
 
     loop {
-        // NOTE: eliminate the warning of unused variables by add a slash to the fzf_cmd variable.
-        let mut _fzf_cmd = String::new();
+        let fzf_cmd: String;
         let mut fzf_query_opt = String::new();
         // feed the last query string in current fzf selecting.
         if !fzf_query.is_empty() {
@@ -121,16 +151,16 @@ fn main() {
         }
 
         if term_width > 120 {
-            _fzf_cmd = format!("{} {} {}",
+            fzf_cmd = format!("{} {} {}",
                                fzf_part_cmd, fzf_preview_append, fzf_query_opt);
         } else {
-            _fzf_cmd = format!("{} {}",
+            fzf_cmd = format!("{} {}",
                                fzf_part_cmd, fzf_query_opt);
         }
 
         let fzf_proc = match Command::new("bash")
             .arg("-c")
-            .arg(_fzf_cmd)
+            .arg(fzf_cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn() {
