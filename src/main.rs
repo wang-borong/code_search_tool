@@ -88,38 +88,49 @@ fn main() {
     // feed to fzf multi-times. It just works now.
     let mut rg_output_str = String::new();
 
-    let (_, term_hight) = term_size::dimensions().unwrap();
+    let (term_width, term_hight) = term_size::dimensions().unwrap();
     let mut fzf_query = String::new();
 
-    loop {
-        let mut fzf_query_opt = String::new();
-        // feed the last query string in current fzf selecting.
-        if !fzf_query.is_empty() {
-            fzf_query_opt = format!(r#"-q "{}""#, fzf_query);
-        }
-        // fzf is start with bash now, oherwise it can not spawn
-        // the preview command.
-        // the options used here can be read from the fzf man.
-        let fzf_cmd = &format!(r#"fzf --ansi -e --tac -0 --cycle -m \
+    // the options used here can be read from the fzf man.
+    let fzf_part_cmd = r#"fzf --ansi -e --tac -0 --cycle -m \
                         --min-height=20 -d ':' --print-query \
-                        --preview-window=right:59% \
                         --color fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33 \
                         --color info:136,prompt:136,pointer:230 \
                         --color marker:230,spinner:136 \
                         --bind ctrl-u:half-page-up \
                         --bind ctrl-d:half-page-down \
+                        --bind ctrl-r:kill-line"#;
+
+    let fzf_preview_append = &format!(r#"--preview-window=right:59% \
+                        --bind ctrl-v:toggle-preview \
                         --bind alt-u:preview-page-up \
                         --bind alt-d:preview-page-down \
                         --bind alt-j:preview-down \
                         --bind alt-k:preview-up \
-                        --bind ctrl-v:toggle-preview \
-                        --bind ctrl-r:kill-line \
                         --preview="echo '\033[1;32m {{1}}\033[0m'; \
-                        {} --PREVIEWER "{{}}" "{}"" {}"#,
-                        app_path, term_hight, fzf_query_opt);
+                        {} --PREVIEWER "{{}}" "{}"""#,
+                        app_path, term_hight);
+
+    loop {
+        // NOTE: eliminate the warning of unused variables by add a slash to the fzf_cmd variable.
+        let mut _fzf_cmd = String::new();
+        let mut fzf_query_opt = String::new();
+        // feed the last query string in current fzf selecting.
+        if !fzf_query.is_empty() {
+            fzf_query_opt = format!(r#"-q "{}""#, fzf_query);
+        }
+
+        if term_width > 120 {
+            _fzf_cmd = format!("{} {} {}",
+                               fzf_part_cmd, fzf_preview_append, fzf_query_opt);
+        } else {
+            _fzf_cmd = format!("{} {}",
+                               fzf_part_cmd, fzf_query_opt);
+        }
+
         let fzf_proc = match Command::new("bash")
             .arg("-c")
-            .arg(fzf_cmd)
+            .arg(_fzf_cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn() {
