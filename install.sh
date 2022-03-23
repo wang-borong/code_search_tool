@@ -19,12 +19,15 @@ function install_apps() {
             echo "downloading $appname..."
             curl -O -L --output-dir /tmp $r
             if [[ $(echo $appname | grep ".tar.") != "" ]]; then
-                if [[ $(tar tf /tmp/$appname | head -1 | grep '/') != "" ]]; then
+                if [[ $(tar tf /tmp/$appname | head -2 | grep '/') != "" ]]; then
                     mkdir -p ~/.opt
-                    sudo tar xvf /tmp/$appname -C ~/.opt
+                    tar xvf /tmp/$appname -C ~/.opt
+                elif [[ $(tar tf /tmp/$appname | head -1 | grep '/') != "" ]]; then
+                    mkdir -p ~/.local/bin
+                    mv /tmp/$(tar xvf /tmp/$appname) ~/.local/bin
                 else
                     mkdir -p ~/.local/bin
-                    sudo tar xvf /tmp/$appname -C ~/.local/bin
+                    tar xvf /tmp/$appname -C ~/.local/bin
                 fi
             elif [[ $(echo $appname | grep ".deb") != "" ]]; then
                 # left the error exist on non-debian distribution
@@ -38,24 +41,54 @@ function install_apps() {
     done
 }
 
-echo "installing neovim ripgrep bat fzf"
-dist=$(lsb_release -a | grep "Distributor ID" | awk -F ' ' '{print $3}')
+function check_if_apps_exist() {
+    for app in $@; do
+        which $app >/dev/null
+        if [[ $? != 0 ]]; then
+            echo $app
+        fi
+    done
+}
+
+dist=$(lsb_release -a 2>&1 | grep "Distributor ID" | awk -F ' ' '{print $3}')
 if [[ $(echo $dist | grep "Arch") != "" \
     || $(echo $dist | grep "Manjaro") != "" ]]; then
-    yay -S neovim ripgrep bat fzf
+    apps=()
+    [[ $(check_if_apps_exist "nvim") == "nvim" ]] &&
+        apps+=" neovim "
+    [[ $(check_if_apps_exist "rg") == "rg" ]] &&
+        apps+=" ripgrep "
+    apps+=$(check_if_apps_exist "bat" "fzf")
+
+    yay -S $apps
 else
-    install_apps neovim/neovim BurntSushi/ripgrep sharkdp/bat junegunn/fzf
-    # add neovim path, bash and zsh
+    apps=()
     shrc=.$(echo $SHELL|awk -F'/bin/' '{print $2}')rc
-    if [[ $(echo $PATH | grep ".local/bin") == "" ]]; then
-        echo "PATH=$PATH:~/.local/bin" >> ~/$shrc
+
+    if [[ $(check_if_apps_exist "nvim") == "nvim" ]]; then
+        install_apps "neovim/neovim"
+        if [[ $(echo $PATH | grep "\.opt/nvim-linux64/bin") == "" ]]; then
+            echo "PATH=\$PATH:~/.opt/nvim-linux64/bin" >> ~/$shrc
+            echo "try NvChad configuration for neovim!"
+        fi
     fi
-    echo "PATH=$PATH:~/.opt/nvim-linux64/bin" >> ~/$shrc
-    source ~/$shrc
-    echo "try NvChad configuration for neovim!"
+    [[ $(check_if_apps_exist "rg") == "rg" ]] &&
+        apps+=" BurntSushi/ripgrep "
+    [[ $(check_if_apps_exist "bat") == "bat" ]] &&
+        apps+=" sharkdp/bat "
+    [[ $(check_if_apps_exist "fzf") == "fzf" ]] &&
+        apps+=" junegunn/fzf "
+    install_apps $apps
+
+    if [[ $(echo $PATH | grep "\.local/bin") == "" ]]; then
+        echo "PATH=\$PATH:~/.local/bin" >> ~/$shrc
+    fi
 fi
 
-echo "installing fs (code_search_tool)"
-install_apps wang-borong/code_search_tool
+if [[ $(check_if_apps_exist "fs") == "fs" ]]; then
+    install_apps wang-borong/code_search_tool
+    mv ~/.local/bin/code-search ~/.local/bin/fs
+fi
 
 echo "you can use \"fs\" to hack your code now!"
+echo "open a new terminal to use it!"
