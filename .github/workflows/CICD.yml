@@ -200,7 +200,7 @@ jobs:
         pushd "${PKG_STAGING}/" >/dev/null
         case ${{ matrix.job.target }} in
           *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
-          *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
+          *) echo tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
         esac;
         popd >/dev/null
 
@@ -315,7 +315,7 @@ jobs:
         #
         #        # build dpkg
         #        fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
-        #
+
     - name: "Artifact upload: tarball"
       uses: actions/upload-artifact@master
       with:
