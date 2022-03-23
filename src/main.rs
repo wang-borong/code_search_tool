@@ -137,7 +137,7 @@ fn main() {
                         --bind alt-d:preview-page-down \
                         --bind alt-j:preview-down \
                         --bind alt-k:preview-up \
-                        --preview="echo '\033[1;32m {{1}}\033[0m'; \
+                        --preview="echo -e '\033[1;32m {{1}}\033[0m'; \
                         {} --PREVIEWER "{{}}" "{}"""#,
         app_path, term_hight
     );
