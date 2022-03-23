@@ -101,7 +101,14 @@ fn main() {
     // save all search command history to a history file if needed.
     let rg_proc = match Command::new("rg")
         // Set some default options for rg command
-        .args(&["-n", "--with-filename", "--color=always"])
+        .args(&[
+            "-n",
+            "--with-filename",
+            "--color=always",
+            "--sort=path",
+            "--max-columns=150",
+            "--max-columns-preview",
+        ])
         // Input args
         .args(&args[1..])
         .stdout(Stdio::piped())
