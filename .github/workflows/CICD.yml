@@ -141,7 +141,7 @@ jobs:
         #BIN_PATH="${BIN_DIR}/fs"
 
         # Copy the release build binary to the result location
-        ls target/${{ matrix.job.target }}/release/*
+        tree target/${{ matrix.job.target }}/release/
         cp "target/${{ matrix.job.target }}/release/${BIN_NAME}" "${BIN_DIR}/"
 
         # Also strip if possible
