@@ -69,7 +69,19 @@ else
     if [[ $(check_if_apps_exist "nvim") == "nvim" ]]; then
         install_apps "neovim/neovim"
         if [[ $(echo $PATH | grep "\.opt/nvim-linux64/bin") == "" ]]; then
-            echo "PATH=\$PATH:~/.opt/nvim-linux64/bin" >> ~/$shrc
+            cat << EOF >> ~/$shrc
+for appd in ~/.opt/*; do
+    if [[ -d \$appd ]]; then
+        for bp in \$(find \$appd -maxdepth 2 -name "bin*" -type d 2>/dev/null) \\
+            \$appd; do
+            if [[ -n "\$(find \$bp -maxdepth 1 -type f -executable \\
+                2>/dev/null | grep -v ".sh")" ]]; then
+                export PATH=\$PATH:\$bp
+            fi
+        done
+    fi
+done
+EOF
             echo "try NvChad configuration for neovim!"
         fi
     fi
@@ -82,7 +94,7 @@ else
     install_apps $apps
 
     if [[ $(echo $PATH | grep "\.local/bin") == "" ]]; then
-        echo "PATH=\$PATH:~/.local/bin" >> ~/$shrc
+        echo "export PATH=\$PATH:~/.local/bin" >> ~/$shrc
     fi
 fi
 
