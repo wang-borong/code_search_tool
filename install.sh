@@ -17,7 +17,7 @@ function install_apps() {
         select r in $releases; do
             appname=$(echo $r | awk -F 'download' '{print $2}' | awk -F '/' '{print $3}')
             echo "downloading $appname..."
-            curl -O -L --output-dir /tmp $r
+            curl -L -o /tmp/$appname $r
             if [[ $(echo $appname | grep ".tar.") != "" ]]; then
                 if [[ $(tar tf /tmp/$appname | awk "NR==2" | grep '/') != "" ]]; then
                     mkdir -p ~/.opt
