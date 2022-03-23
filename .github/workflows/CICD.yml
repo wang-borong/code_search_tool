@@ -134,14 +134,13 @@ jobs:
         esac;
 
         # Setup paths
-        BIN_DIR="${{ env.CICD_INTERMEDIATES_DIR }}/stripped-release-bin/"
+        BIN_DIR="${{ env.CICD_INTERMEDIATES_DIR }}/stripped-release-bin"
         mkdir -p "${BIN_DIR}"
-        BIN_NAME="${{ env.PROJECT_NAME }}${EXE_suffix}"
-        #BIN_PATH="${BIN_DIR}/${BIN_NAME}"
-        BIN_PATH="${BIN_DIR}/fs"
+        BIN_NAME="code-search${EXE_suffix}"
+        BIN_PATH="${BIN_DIR}/${BIN_NAME}"
 
         # Copy the release build binary to the result location
-        cp "target/${{ matrix.job.target }}/release/${BIN_NAME}" "${BIN_DIR}/"
+        cp "target/${{ matrix.job.target }}/release/${BIN_NAME}" "${BIN_DIR}"
 
         # Also strip if possible
         if [ -n "${STRIP}" ]; then
@@ -201,7 +200,7 @@ jobs:
         pushd "${PKG_STAGING}/" >/dev/null
         case ${{ matrix.job.target }} in
           *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
-          *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
+          *) echo tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
         esac;
         popd >/dev/null
 
@@ -316,7 +315,7 @@ jobs:
         #
         #        # build dpkg
         #        fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
-        #
+
     - name: "Artifact upload: tarball"
       uses: actions/upload-artifact@master
       with:
