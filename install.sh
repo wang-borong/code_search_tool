@@ -19,12 +19,13 @@ function install_apps() {
             echo "downloading $appname..."
             curl -O -L --output-dir /tmp $r
             if [[ $(echo $appname | grep ".tar.") != "" ]]; then
-                if [[ $(tar tf /tmp/$appname | head -2 | grep '/') != "" ]]; then
+                if [[ $(tar tf /tmp/$appname | awk "NR==2" | grep '/') != "" ]]; then
                     mkdir -p ~/.opt
                     tar xvf /tmp/$appname -C ~/.opt
                 elif [[ $(tar tf /tmp/$appname | head -1 | grep '/') != "" ]]; then
                     mkdir -p ~/.local/bin
-                    mv /tmp/$(tar xvf /tmp/$appname) ~/.local/bin
+                    echo mv /tmp/$(tar xvf /tmp/$appname -C /tmp) ~/.local/bin
+                    mv /tmp/$(tar xvf /tmp/$appname -C /tmp) ~/.local/bin
                 else
                     mkdir -p ~/.local/bin
                     tar xvf /tmp/$appname -C ~/.local/bin
