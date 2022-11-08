@@ -1,4 +1,6 @@
 pub mod searcher;
+pub mod previewer;
+pub mod ignore;
 
 use std::env;
 use std::fs;

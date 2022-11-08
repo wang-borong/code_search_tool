@@ -4,41 +4,6 @@ use std::io::BufReader;
 use std::process::{Command, Stdio};
 use term_size;
 
-fn previewer(args: &[String]) {
-    if args.len() < 1 {
-        eprintln!("Usage: fzf-previewer <rgout> <termnal hight>");
-        return;
-    }
-
-    let rgout = &args[0];
-    let termh = args[1].parse::<i32>().unwrap();
-    let rgarr: Vec<&str> = rgout.splitn(3, ":").collect();
-    let filname = rgarr[0];
-    let linum = rgarr[1].parse::<i32>().unwrap();
-    let rem_termh = termh * 3 / 4;
-    let startline;
-    let stopline;
-    if linum > rem_termh {
-        startline = linum - rem_termh;
-    } else {
-        startline = 0;
-    }
-    stopline = startline + termh * 3;
-
-    let view_cmd = format!(
-        "bat -n --color=always -H {} -r {}:{} {}",
-        linum, startline, stopline, filname
-    );
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(&view_cmd)
-        .spawn()
-        .unwrap()
-        .wait()
-        .expect("run bash command failed!");
-}
-
 ///
 /// The code search tool
 ///
@@ -50,15 +15,6 @@ fn previewer(args: &[String]) {
 
 pub fn search(args: &[String]) {
     let app_path = String::from(env::current_exe().unwrap().to_str().unwrap());
-
-    // We will implement the previewer command for fzf at here
-    // we check the second argument, if it is "--PREVIEWER" then
-    // it is used to preview the selected file in fzf.
-    if args[1] == "--PREVIEWER".to_owned() {
-        previewer(&args[2..]);
-        return;
-    }
-
     // TODO: history function
     // save all search command history to a history file if needed.
     let rg_proc = match Command::new("rg")
@@ -72,7 +28,7 @@ pub fn search(args: &[String]) {
             "--max-columns-preview",
         ])
         // Input args
-        .args(&args[1..])
+        .args(&args[0..])
         .stdout(Stdio::piped())
         .spawn()
     {
@@ -107,9 +63,7 @@ pub fn search(args: &[String]) {
                         --bind alt-j:preview-down \
                         --bind alt-k:preview-up \
                         --preview="echo -e '\033[1;32m {{1}}\033[0m'; \
-                        {} --PREVIEWER "{{}}" "{}"""#,
-        app_path, term_hight
-    );
+                        {} -p "{{}}" -p {}""#, app_path, term_hight);
 
     loop {
         let fzf_cmd: String;
