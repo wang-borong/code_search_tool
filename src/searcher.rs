@@ -2,6 +2,7 @@ use std::env;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::io::{self, Write};
 use term_size;
 
 ///
@@ -13,10 +14,22 @@ use term_size;
 /// linux).
 ///
 
-pub fn search(args: &[String]) {
+pub fn search(opts: &[String], args: &[String], dir: Option<&String>) {
     let app_path = String::from(env::current_exe().unwrap().to_str().unwrap());
     // TODO: history function
     // save all search command history to a history file if needed.
+
+    if args.len() == 0 && opts.len() > 0 {
+        println!("opts: {:?}", opts);
+        let output = Command::new("rg")
+            .args(opts)
+            .output()
+            .expect("failed to execute rg");
+        io::stdout().write_all(&output.stdout).unwrap();
+        io::stderr().write_all(&output.stderr).unwrap();
+        return;
+    }
+
     let rg_proc = match Command::new("rg")
         // Set some default options for rg command
         .args(&[
@@ -28,7 +41,9 @@ pub fn search(args: &[String]) {
             "--max-columns-preview",
         ])
         // Input args
-        .args(&args[0..])
+        .args(opts)
+        .args(args)
+        .args(dir)
         .stdout(Stdio::piped())
         .spawn()
     {

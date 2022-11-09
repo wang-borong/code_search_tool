@@ -33,6 +33,19 @@ fn get_ignore_file(args: &Args) -> String {
     ignore_file
 }
 
+fn get_opts(args: &Args) -> Vec<String> {
+    let mut opts = Vec::new();
+    let opts_esc = &args.option;
+    for opt in opts_esc {
+        if opt.starts_with('\\') {
+            opts.push(opt.strip_prefix('\\').unwrap().to_string());
+        } else {
+            opts.push(opt.to_string());
+        }
+    }
+    opts
+}
+
 fn main() {
     // check the dependent commands
     let apps = ["rg", "fzf", "bat", "nvim"];
@@ -53,7 +66,7 @@ fn main() {
     if args.remove_ignore.len() > 0 {
         let ignore_file = get_ignore_file(&args);
         let pats = args.remove_ignore.as_ref();
-        remove_ignore(&ignore_file, pats);
+        remove_ignore(&ignore_file, &pats);
         return;
     }
 
@@ -69,10 +82,9 @@ fn main() {
         return;
     }
 
-    if args.search.len() > 0 {
-        let ss = args.search.as_ref();
-        search(ss);
-        // search(opts, ss, dir)
-        return;
-    }
+    let ss = args.search.as_ref();
+    let dir = args.directory.as_ref();
+    let opts = get_opts(&args);
+
+    search(&opts, ss, dir);
 }
