@@ -7,9 +7,9 @@ use code_search::ignore::{add_ignore, remove_ignore, list_ignore};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long)]
+    #[arg(short, long, value_name = "SEARCH STRING")]
     search: Vec<String>,
-    #[arg(short, long, value_name = "RIPGREP OPTION WITHOUT '--' OR '-'")]
+    #[arg(short, long, value_name = "RIPGREP OPTION")]
     option: Vec<String>,
     #[arg(short, long)]
     add_ignore: Vec<String>,
@@ -17,7 +17,7 @@ struct Args {
     list_ignore: bool,
     #[arg(short, long)]
     remove_ignore: Vec<String>,
-    #[arg(short, long)]
+    #[arg(short, long, value_name = "INTER PREVIEW")]
     preview: Vec<String>,
     directory: Option<String>,
 }
