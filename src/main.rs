@@ -17,7 +17,9 @@ struct Args {
     list_ignore: bool,
     #[arg(short, long)]
     remove_ignore: Vec<String>,
-    #[arg(short, long, value_name = "INTER PREVIEW")]
+    #[arg(short, help = "search all files without ignore")]
+    no_ignore: bool,
+    #[arg(short, long, help = "internal previewer")]
     preview: Vec<String>,
     search: Option<String>,
     directory: Option<String>,
@@ -86,15 +88,17 @@ fn main() {
         return;
     }
 
+    let ss_blank = "".to_owned();
     let ss = match args.search.as_ref() {
         Some(ss) => ss,
-        None => {
-            eprintln!("No search string specified for searching!");
-            return;
-        }
+        None => &ss_blank,
     };
     let dir = args.directory.as_ref();
-    let opts = get_opts(&args);
+    let mut opts = get_opts(&args);
+
+    if args.no_ignore {
+        opts.push("--no-ignore".to_owned());
+    }
 
     search(&opts, &ss, dir);
 }
