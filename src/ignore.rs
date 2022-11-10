@@ -8,6 +8,23 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
+pub fn create_ignore(f: &str, init: bool) {
+    let fp = Path::new(f);
+    let path = Path::new(f).parent().unwrap();
+    if fp.exists() {
+        return;
+    }
+    // create ignore file
+    let mut _file = match File::create(&fp) {
+        Err(why) => panic!("couldn't create {}: {}", f, why),
+        Ok(file) => file,
+    };
+    if init {
+        return;
+    }
+    // several conditions
+}
+
 pub fn add_ignore(f: &str, pats: &[String]) {
     if Path::new(f).exists() {
         if let Ok(mut lines) = read_lines(f) {
@@ -30,7 +47,7 @@ pub fn add_ignore(f: &str, pats: &[String]) {
         }
     } else {
         // create file and add default ignore patterns
-
+        create_ignore(f, false);
     }
 }
 

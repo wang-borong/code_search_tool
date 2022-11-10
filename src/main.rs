@@ -2,11 +2,13 @@ use clap::Parser;
 use code_search::check_if_commands_exist;
 use code_search::searcher::search;
 use code_search::previewer::preview;
-use code_search::ignore::{add_ignore, remove_ignore, list_ignore};
+use code_search::ignore::{create_ignore, add_ignore, remove_ignore, list_ignore};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(long)]
+    init: bool,
     #[arg(short, long, value_name = "SEARCH STRING")]
     search: Vec<String>,
     #[arg(short, long, value_name = "RIPGREP OPTION")]
@@ -56,22 +58,25 @@ fn main() {
 
     let args = Args::parse();
 
+    let ignore_file = get_ignore_file(&args);
+    if args.init {
+        create_ignore(&ignore_file, args.init);
+        return;
+    }
+
     if args.add_ignore.len() > 0 {
-        let ignore_file = get_ignore_file(&args);
         let pats = args.add_ignore.as_ref();
         add_ignore(&ignore_file, &pats);
         return;
     }
 
     if args.remove_ignore.len() > 0 {
-        let ignore_file = get_ignore_file(&args);
         let pats = args.remove_ignore.as_ref();
         remove_ignore(&ignore_file, &pats);
         return;
     }
 
     if args.list_ignore {
-        let ignore_file = get_ignore_file(&args);
         list_ignore(&ignore_file);
         return;
     }
