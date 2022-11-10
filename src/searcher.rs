@@ -14,7 +14,7 @@ use term_size;
 /// linux).
 ///
 
-pub fn search(opts: &[String], args: &[String], dir: Option<&String>) {
+pub fn search(opts: &[String], args: &str, dir: Option<&String>) {
     let app_path = String::from(env::current_exe().unwrap().to_str().unwrap());
     // TODO: history function
     // save all search command history to a history file if needed.
@@ -42,7 +42,7 @@ pub fn search(opts: &[String], args: &[String], dir: Option<&String>) {
         ])
         // Input args
         .args(opts)
-        .args(args)
+        .args(&[args])
         .args(dir)
         .stdout(Stdio::piped())
         .spawn()

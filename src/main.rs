@@ -9,8 +9,6 @@ use code_search::ignore::{create_ignore, add_ignore, remove_ignore, list_ignore}
 struct Args {
     #[arg(long)]
     init: bool,
-    #[arg(short, long, value_name = "SEARCH STRING")]
-    search: Vec<String>,
     #[arg(short, long, value_name = "RIPGREP OPTION")]
     option: Vec<String>,
     #[arg(short, long)]
@@ -21,6 +19,7 @@ struct Args {
     remove_ignore: Vec<String>,
     #[arg(short, long, value_name = "INTER PREVIEW")]
     preview: Vec<String>,
+    search: Option<String>,
     directory: Option<String>,
 }
 
@@ -87,9 +86,15 @@ fn main() {
         return;
     }
 
-    let ss = args.search.as_ref();
+    let ss = match args.search.as_ref() {
+        Some(ss) => ss,
+        None => {
+            eprintln!("No search string specified for searching!");
+            return;
+        }
+    };
     let dir = args.directory.as_ref();
     let opts = get_opts(&args);
 
-    search(&opts, ss, dir);
+    search(&opts, &ss, dir);
 }
