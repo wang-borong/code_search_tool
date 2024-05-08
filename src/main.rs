@@ -1,8 +1,26 @@
+
 use clap::Parser;
-use code_search::check_if_commands_exist;
-use code_search::searcher::search;
-use code_search::previewer::preview;
-use code_search::ignore::{create_ignore, add_ignore, remove_ignore, list_ignore};
+use fcs::check_if_commands_exist;
+// use fcs::searcher::search;
+use fcs::previewer::preview;
+use fcs::ignore::{create_ignore, add_ignore, remove_ignore, list_ignore};
+
+/// A program that prints its own source code using the bat library
+use bat::{PagingMode, PrettyPrinter, WrappingMode};
+use skim::prelude::*;
+
+use std::{env, error::Error, ffi::OsString, io::IsTerminal, process};
+
+use {
+    grep::{
+        cli,
+        printer::{ColorSpecs, StandardBuilder},
+        regex::RegexMatcher,
+        searcher::{BinaryDetection, SearcherBuilder},
+    },
+    termcolor::ColorChoice,
+    walkdir::WalkDir,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -47,7 +65,7 @@ fn get_opts(args: &Args) -> Vec<String> {
     opts
 }
 
-fn main() {
+fn main1() {
     // check the dependent commands
     let apps = ["rg", "fzf", "bat", "nvim"];
     if !check_if_commands_exist(&apps) {
@@ -96,5 +114,90 @@ fn main() {
     let dir = args.directory.as_ref();
     let opts = get_opts(&args);
 
-    search(&opts, &ss, dir);
+    // search(&opts, &ss, dir);
+}
+
+fn main_bat() {
+    PrettyPrinter::new()
+        .header(true)
+        .grid(true)
+        .line_numbers(true)
+        .use_italics(true)
+        // The following line will be highlighted in the output:
+        .highlight(line!() as usize)
+        .theme("1337")
+        .wrapping_mode(WrappingMode::Character)
+        .paging_mode(PagingMode::QuitIfOneScreen)
+        .input_file(file!())
+        .print()
+        .unwrap();
+}
+
+pub fn main_skim() {
+    let options = SkimOptions::default();
+
+    let selected_items = Skim::run_with(&options, None)
+        .map(|out| out.selected_items)
+        .unwrap_or_else(Vec::new);
+
+    for item in selected_items.iter() {
+        println!("{}", item.output());
+    }
+}
+
+fn main() {
+    if let Err(err) = try_main() {
+        eprintln!("{}", err);
+        process::exit(1);
+    }
+}
+
+fn try_main() -> Result<(), Box<dyn Error>> {
+    let mut args: Vec<OsString> = env::args_os().collect();
+    if args.len() < 2 {
+        return Err("Usage: simplegrep <pattern> [<path> ...]".into());
+    }
+    if args.len() == 2 {
+        args.push(OsString::from("./"));
+    }
+    search(cli::pattern_from_os(&args[1])?, &args[2..])
+}
+
+fn search(pattern: &str, paths: &[OsString]) -> Result<(), Box<dyn Error>> {
+    let matcher = RegexMatcher::new_line_matcher(&pattern)?;
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .line_number(false)
+        .build();
+    let mut printer = StandardBuilder::new()
+        .color_specs(ColorSpecs::default_with_color())
+        .build(cli::stdout(if std::io::stdout().is_terminal() {
+            ColorChoice::Auto
+        } else {
+            ColorChoice::Never
+        }));
+
+    for path in paths {
+        for result in WalkDir::new(path) {
+            let dent = match result {
+                Ok(dent) => dent,
+                Err(err) => {
+                    eprintln!("{}", err);
+                    continue;
+                }
+            };
+            if !dent.file_type().is_file() {
+                continue;
+            }
+            let result = searcher.search_path(
+                &matcher,
+                dent.path(),
+                printer.sink_with_path(&matcher, dent.path()),
+            );
+            if let Err(err) = result {
+                eprintln!("{}: {}", dent.path().display(), err);
+            }
+        }
+    }
+    Ok(())
 }
