@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
 use skim::prelude::*;
 
 use fcs::errors::AppError;
@@ -14,13 +14,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Initialize a .ignore file with default patterns
-    Init {
-        /// Target directory (default: current directory)
-        #[arg(short, long)]
-        directory: Option<String>,
-    },
-
     /// Manage ignore patterns
     Ignore {
         #[command(subcommand)]
@@ -49,10 +42,18 @@ enum Commands {
         #[arg(short, long)]
         option: Vec<String>,
     },
+
+    /// Generate shell completion script
+    Complete {
+        /// Target shell (bash, elvish, fish, powershell, zsh)
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum IgnoreAction {
+    /// Initialize a .ignore file with default patterns
+    Init,
     /// Add patterns to .ignore
     Add {
         /// Patterns to add
@@ -185,14 +186,13 @@ fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { directory } => {
-            let ignore_file = IgnoreFile::new(&get_ignore_file(directory.as_ref()));
-            ignore_file.init(true)?;
-            println!("Initialized .ignore file");
-        }
         Commands::Ignore { action, directory } => {
             let ignore_file = IgnoreFile::new(&get_ignore_file(directory.as_ref()));
             match action {
+                IgnoreAction::Init => {
+                    ignore_file.init(true)?;
+                    println!("Initialized .ignore file");
+                }
                 IgnoreAction::Add { patterns } => {
                     if patterns.is_empty() {
                         return Err(AppError::General("No patterns specified to add".to_string()));
@@ -230,6 +230,11 @@ fn run() -> Result<(), AppError> {
             option,
         } => {
             handle_search(&pattern, directory.as_ref(), &option)?;
+        }
+        Commands::Complete { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
     }
 

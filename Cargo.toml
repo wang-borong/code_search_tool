@@ -6,6 +6,7 @@ description = "Fuzzy code search tool using ripgrep, fzf, bat, and neovim as Rus
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 regex = "1"
 ignore = "0.4"
 skim = "4"
