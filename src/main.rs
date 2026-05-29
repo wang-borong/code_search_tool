@@ -1,203 +1,236 @@
-
-use clap::Parser;
-use fcs::check_if_commands_exist;
-// use fcs::searcher::search;
-use fcs::previewer::preview;
-use fcs::ignore::{create_ignore, add_ignore, remove_ignore, list_ignore};
-
-/// A program that prints its own source code using the bat library
-use bat::{PagingMode, PrettyPrinter, WrappingMode};
+use clap::{Parser, Subcommand};
 use skim::prelude::*;
 
-use std::{env, error::Error, ffi::OsString, io::IsTerminal, process};
-
-use {
-    grep::{
-        cli,
-        printer::{ColorSpecs, StandardBuilder},
-        regex::RegexMatcher,
-        searcher::{BinaryDetection, SearcherBuilder},
-    },
-    termcolor::ColorChoice,
-    walkdir::WalkDir,
-};
+use fcs::errors::AppError;
+use fcs::ignore::IgnoreFile;
+use fcs::search::{self, SearchResult};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(long)]
-    init: bool,
-    #[arg(short, long, value_name = "RIPGREP OPTION")]
-    option: Vec<String>,
-    #[arg(short, long)]
-    add_ignore: Vec<String>,
-    #[arg(short, long)]
-    list_ignore: bool,
-    #[arg(short, long)]
-    remove_ignore: Vec<String>,
-    #[arg(short, long, value_name = "INTER PREVIEW")]
-    preview: Vec<String>,
-    search: Option<String>,
-    directory: Option<String>,
+#[command(name = "fcs", author, version, about = "Fuzzy code search tool", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn get_ignore_file(args: &Args) -> String {
-    let mut ignore_file = String::new();
-    if let Some(dir) = args.directory.as_ref() {
-        ignore_file.push_str(&format!("{}/.ignore", dir));
-    } else {
-        ignore_file.push_str(".ignore");
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Initialize a .ignore file with default patterns
+    Init {
+        /// Target directory (default: current directory)
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Manage ignore patterns
+    Ignore {
+        #[command(subcommand)]
+        action: IgnoreAction,
+
+        /// Target directory (default: current directory)
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Preview a file at a specific line
+    Preview {
+        /// Format: "path:line" or "path:line:height"
+        target: String,
+    },
+
+    /// Search patterns in files
+    Search {
+        /// Search pattern (regex)
+        pattern: String,
+
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
+        #[arg(short, long)]
+        option: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IgnoreAction {
+    /// Add patterns to .ignore
+    Add {
+        /// Patterns to add
+        patterns: Vec<String>,
+    },
+    /// Remove patterns from .ignore
+    Remove {
+        /// Patterns to remove
+        patterns: Vec<String>,
+    },
+    /// List patterns in .ignore
+    List,
+}
+
+fn get_ignore_file(directory: Option<&String>) -> String {
+    directory
+        .map(|d| format!("{d}/.ignore"))
+        .unwrap_or_else(|| ".ignore".to_string())
+}
+
+fn parse_preview_arg(s: &str) -> Result<(String, usize, usize), AppError> {
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Err(AppError::InvalidPreview(
+            "Usage: fcs preview <path>:<line>[:height]".to_string(),
+        ));
+    }
+    let path = parts[0].to_string();
+    let line: usize = parts[1]
+        .parse()
+        .map_err(|e| AppError::InvalidPreview(format!("Invalid line number: {e}")))?;
+    let height: usize = parts
+        .get(2)
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(24);
+    Ok((path, line, height))
+}
+
+fn make_result(path: &str, line: usize, text: &str) -> SearchResult {
+    SearchResult {
+        path: path.to_string(),
+        line_num: line,
+        line_text: text.to_string(),
+        display: format!("{path}:{line}:{text}"),
+    }
+}
+
+fn handle_search(
+    pattern: &str,
+    directory: Option<&String>,
+    options: &[String],
+) -> Result<(), AppError> {
+    // Step 1: Search using regex + ignore crates
+    let results = search::search(pattern, directory, options)?;
+    let flat = results.flat();
+
+    if flat.is_empty() {
+        println!("No matches found");
+        return Ok(());
     }
 
-    ignore_file
-}
+    loop {
+        // Step 2: Interactive select using Skim
+        let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+        let items: Vec<Arc<dyn SkimItem>> = flat
+            .iter()
+            .map(|result| std::sync::Arc::new(result.clone()) as std::sync::Arc<dyn SkimItem>)
+            .collect();
+        let _ = tx.send(items);
+        drop(tx);
 
-fn get_opts(args: &Args) -> Vec<String> {
-    let mut opts = Vec::new();
-    let opts_esc = &args.option;
-    for opt in opts_esc {
-        if opt.starts_with('\\') {
-            opts.push(opt.strip_prefix('\\').unwrap().to_string());
-        } else {
-            opts.push(opt.to_string());
+        let bind_opts = vec![
+            "ctrl-u:half-page-up".to_string(),
+            "ctrl-d:half-page-down".to_string(),
+            "ctrl-r:kill-line".to_string(),
+            "ctrl-v:toggle-preview".to_string(),
+            "alt-u:preview-page-up".to_string(),
+            "alt-d:preview-page-down".to_string(),
+            "alt-j:preview-down".to_string(),
+            "alt-k:preview-up".to_string(),
+        ];
+
+        let skim_options = SkimOptionsBuilder::default()
+            .height("100%")
+            .min_height("20")
+            .multi(true)
+            .delimiter(regex::Regex::new(":").unwrap())
+            .color(
+                "fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33,info:136,prompt:136,pointer:230,marker:230,spinner:136",
+            )
+            .exact(true)
+            .tac(true)
+            .cycle(true)
+            .bind(bind_opts)
+            .preview("")
+            .preview_window("right:59%")
+            .build()
+            .map_err(|e| AppError::Skim(e.to_string()))?;
+
+        let output = Skim::run_with(skim_options, Some(rx)).ok();
+        if output.is_none() {
+            break;
+        }
+        let output = output.unwrap();
+        if output.is_abort {
+            break;
+        }
+
+        // Step 3: Open selected results in editor
+        for item in output.selected_items.iter() {
+            let display = item.output().to_string();
+            if let Some(result) = flat.iter().find(|r| r.display == display) {
+                search::open_file(&result.path, Some(result.line_num))?;
+            }
         }
     }
-    opts
-}
 
-fn main1() {
-    // check the dependent commands
-    let apps = ["rg", "fzf", "bat", "nvim"];
-    if !check_if_commands_exist(&apps) {
-       eprintln!("please install it!");
-       return;
-    }
-
-    let args = Args::parse();
-
-    let ignore_file = get_ignore_file(&args);
-    if args.init {
-        create_ignore(&ignore_file, args.init);
-        return;
-    }
-
-    if args.add_ignore.len() > 0 {
-        let pats = args.add_ignore.as_ref();
-        add_ignore(&ignore_file, &pats);
-        return;
-    }
-
-    if args.remove_ignore.len() > 0 {
-        let pats = args.remove_ignore.as_ref();
-        remove_ignore(&ignore_file, &pats);
-        return;
-    }
-
-    if args.list_ignore {
-        list_ignore(&ignore_file);
-        return;
-    }
-
-    if args.preview.len() > 0 {
-        let pargs = args.preview.as_ref();
-        preview(pargs);
-        return;
-    }
-
-    let ss = match args.search.as_ref() {
-        Some(ss) => ss,
-        None => {
-            eprintln!("No search string specified for searching!");
-            return;
-        }
-    };
-    let dir = args.directory.as_ref();
-    let opts = get_opts(&args);
-
-    // search(&opts, &ss, dir);
-}
-
-fn main_bat() {
-    PrettyPrinter::new()
-        .header(true)
-        .grid(true)
-        .line_numbers(true)
-        .use_italics(true)
-        // The following line will be highlighted in the output:
-        .highlight(line!() as usize)
-        .theme("1337")
-        .wrapping_mode(WrappingMode::Character)
-        .paging_mode(PagingMode::QuitIfOneScreen)
-        .input_file(file!())
-        .print()
-        .unwrap();
-}
-
-pub fn main_skim() {
-    let options = SkimOptions::default();
-
-    let selected_items = Skim::run_with(&options, None)
-        .map(|out| out.selected_items)
-        .unwrap_or_else(Vec::new);
-
-    for item in selected_items.iter() {
-        println!("{}", item.output());
-    }
+    Ok(())
 }
 
 fn main() {
-    if let Err(err) = try_main() {
-        eprintln!("{}", err);
-        process::exit(1);
+    if let Err(err) = run() {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
     }
 }
 
-fn try_main() -> Result<(), Box<dyn Error>> {
-    let mut args: Vec<OsString> = env::args_os().collect();
-    if args.len() < 2 {
-        return Err("Usage: simplegrep <pattern> [<path> ...]".into());
-    }
-    if args.len() == 2 {
-        args.push(OsString::from("./"));
-    }
-    search(cli::pattern_from_os(&args[1])?, &args[2..])
-}
+fn run() -> Result<(), AppError> {
+    let cli = Cli::parse();
 
-fn search(pattern: &str, paths: &[OsString]) -> Result<(), Box<dyn Error>> {
-    let matcher = RegexMatcher::new_line_matcher(&pattern)?;
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(b'\x00'))
-        .line_number(false)
-        .build();
-    let mut printer = StandardBuilder::new()
-        .color_specs(ColorSpecs::default_with_color())
-        .build(cli::stdout(if std::io::stdout().is_terminal() {
-            ColorChoice::Auto
-        } else {
-            ColorChoice::Never
-        }));
-
-    for path in paths {
-        for result in WalkDir::new(path) {
-            let dent = match result {
-                Ok(dent) => dent,
-                Err(err) => {
-                    eprintln!("{}", err);
-                    continue;
+    match cli.command {
+        Commands::Init { directory } => {
+            let ignore_file = IgnoreFile::new(&get_ignore_file(directory.as_ref()));
+            ignore_file.init(true)?;
+            println!("Initialized .ignore file");
+        }
+        Commands::Ignore { action, directory } => {
+            let ignore_file = IgnoreFile::new(&get_ignore_file(directory.as_ref()));
+            match action {
+                IgnoreAction::Add { patterns } => {
+                    if patterns.is_empty() {
+                        return Err(AppError::General("No patterns specified to add".to_string()));
+                    }
+                    ignore_file.add(&patterns)?;
+                    println!("Added patterns to .ignore");
                 }
-            };
-            if !dent.file_type().is_file() {
-                continue;
-            }
-            let result = searcher.search_path(
-                &matcher,
-                dent.path(),
-                printer.sink_with_path(&matcher, dent.path()),
-            );
-            if let Err(err) = result {
-                eprintln!("{}: {}", dent.path().display(), err);
+                IgnoreAction::Remove { patterns } => {
+                    if patterns.is_empty() {
+                        return Err(AppError::General("No patterns specified to remove".to_string()));
+                    }
+                    ignore_file.remove(&patterns)?;
+                    println!("Removed patterns from .ignore");
+                }
+                IgnoreAction::List => {
+                    let patterns = ignore_file.list()?;
+                    if patterns.is_empty() {
+                        println!("No ignore patterns");
+                    } else {
+                        for p in &patterns {
+                            println!("{p}");
+                        }
+                    }
+                }
             }
         }
+        Commands::Preview { target } => {
+            let (path, line, height) = parse_preview_arg(&target)?;
+            let result = make_result(&path, line, "");
+            fcs::preview::preview(&result, height)?;
+        }
+        Commands::Search {
+            pattern,
+            directory,
+            option,
+        } => {
+            handle_search(&pattern, directory.as_ref(), &option)?;
+        }
     }
+
     Ok(())
 }
