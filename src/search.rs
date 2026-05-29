@@ -5,6 +5,7 @@ use ignore::WalkBuilder;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{Searcher, sinks::UTF8};
 use skim::prelude::*;
+use ratatui::text::Line;
 
 use crate::errors::{AppError, Result};
 
@@ -16,11 +17,99 @@ pub struct SearchResult {
     pub line_text: String,
     /// Full "path:line:text" string for display
     pub display: String,
+    /// Match ranges of the search term in line_text (char start, char end)
+    pub match_ranges: Vec<(usize, usize)>,
 }
 
 impl SkimItem for SearchResult {
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.display)
+    }
+
+    fn display(&self, context: DisplayContext) -> Line<'_> {
+        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::text::{Line, Span};
+
+        let path_len = self.path.chars().count();
+        let line_str = self.line_num.to_string();
+        let line_len = line_str.chars().count();
+        let char_text_offset = path_len + 2 + line_len;
+
+        // Define base styles for different parts
+        let path_style = Style::default().fg(Color::Cyan);
+        let separator_style = Style::default().fg(Color::DarkGray);
+        let line_style = Style::default().fg(Color::Green);
+        let match_term_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let text_style = Style::default();
+
+        // Get highlighted positions from context matches
+        let highlight_positions: std::collections::HashSet<usize> = match context.matches {
+            Matches::CharIndices(ref indices) => indices.iter().copied().collect(),
+            Matches::CharRange(start, end) => (start..end).collect(),
+            Matches::ByteRange(start, end) => {
+                let char_start = self.display.get(0..start).map_or(0, |s| s.chars().count());
+                let char_end = self.display.get(0..end).map_or(self.display.chars().count(), |s| s.chars().count());
+                (char_start..char_end).collect()
+            }
+            Matches::None => std::collections::HashSet::new(),
+        };
+
+        let mut spans = Vec::new();
+        let mut current_text = String::new();
+        let mut current_style = Style::default();
+        let mut style_initialized = false;
+
+        for (i, ch) in self.display.chars().enumerate() {
+            let is_match_term = if i >= char_text_offset {
+                let j = i - char_text_offset;
+                self.match_ranges.iter().any(|&(start, end)| start <= j && j < end)
+            } else {
+                false
+            };
+
+            // Determine the style of this character based on its position
+            let mut char_style = if i < path_len {
+                path_style
+            } else if i == path_len {
+                separator_style
+            } else if i < path_len + 1 + line_len {
+                line_style
+            } else if i == path_len + 1 + line_len {
+                separator_style
+            } else if is_match_term {
+                match_term_style
+            } else {
+                text_style
+            };
+
+            // Merge with context styles (patch)
+            if highlight_positions.contains(&i) {
+                char_style = char_style.patch(context.matched_style);
+            } else {
+                char_style = char_style.patch(context.base_style);
+            }
+
+            if !style_initialized {
+                current_style = char_style;
+                style_initialized = true;
+            }
+
+            if char_style != current_style {
+                // Push the accumulated span
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(current_text.clone(), current_style));
+                    current_text.clear();
+                }
+                current_style = char_style;
+            }
+            current_text.push(ch);
+        }
+
+        if !current_text.is_empty() {
+            spans.push(Span::styled(current_text, current_style));
+        }
+
+        Line::from(spans)
     }
 
     fn preview(&self, context: PreviewContext) -> ItemPreview {
@@ -58,6 +147,11 @@ pub fn search(
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(case_insensitive)
         .build(pattern)
+        .map_err(|e| AppError::General(e.to_string()))?;
+
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
         .map_err(|e| AppError::General(e.to_string()))?;
 
     let root = dir
@@ -108,11 +202,20 @@ pub fn search(
                 // strip trailing newlines
                 let clean_line = line_text.trim_end_matches(&['\r', '\n'][..]).to_string();
                 let display = format!("{rel_path_clone}:{line_num}:{clean_line}");
+
+                let mut match_ranges = Vec::new();
+                for m in re.find_iter(&clean_line) {
+                    let char_start = clean_line[..m.start()].chars().count();
+                    let char_end = char_start + clean_line[m.start()..m.end()].chars().count();
+                    match_ranges.push((char_start, char_end));
+                }
+
                 file_results.push(SearchResult {
                     path: rel_path_clone.clone(),
                     line_num,
                     line_text: clean_line,
                     display,
+                    match_ranges,
                 });
                 Ok(true)
             }),

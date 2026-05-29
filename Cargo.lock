@@ -921,6 +921,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "ratatui",
  "regex",
  "skim",
  "thiserror 2.0.18",

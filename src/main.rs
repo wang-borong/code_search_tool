@@ -97,6 +97,7 @@ fn make_result(path: &str, line: usize, text: &str) -> SearchResult {
         line_num: line,
         line_text: text.to_string(),
         display: format!("{path}:{line}:{text}"),
+        match_ranges: Vec::new(),
     }
 }
 
