@@ -1,6 +1,6 @@
 [package]
 name = "fcs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Fuzzy code search tool using ripgrep, fzf, bat, and neovim as Rust libraries"
 
