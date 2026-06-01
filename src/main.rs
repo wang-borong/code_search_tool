@@ -42,7 +42,7 @@ enum Commands {
         directory: Option<String>,
 
         /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
-        #[arg(short, long)]
+        #[arg(short, long, allow_hyphen_values = true)]
         option: Vec<String>,
     },
 

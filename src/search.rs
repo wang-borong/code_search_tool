@@ -3,7 +3,7 @@ use std::borrow::Cow;
 
 use ignore::WalkBuilder;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{Searcher, sinks::UTF8};
+use grep_searcher::{SearcherBuilder, sinks::UTF8};
 use skim::prelude::*;
 use ratatui::text::Line;
 
@@ -144,15 +144,233 @@ pub fn search(
     default_ignore: &[String],
     ignore_file: &Path,
 ) -> Result<SearchResults> {
-    let case_insensitive = rg_opts.iter().any(|o| o == "-i" || o == "--ignore-case");
-    
-    let matcher = RegexMatcherBuilder::new()
+    let mut case_insensitive = false;
+    let mut smart_case = false;
+    let mut fixed_strings = false;
+    let mut word_regexp = false;
+    let mut line_regexp = false;
+    let mut invert_match = false;
+    let mut max_count = None;
+    let mut follow_links = false;
+    let mut max_depth = None;
+    let mut no_ignore = false;
+
+    let mut i = 0;
+    while i < rg_opts.len() {
+        let opt = &rg_opts[i];
+        if opt.starts_with("--") {
+            let (name, val) = if let Some(pos) = opt.find('=') {
+                (&opt[2..pos], Some(&opt[pos + 1..]))
+            } else {
+                (&opt[2..], None)
+            };
+
+            match name {
+                "ignore-case" => {
+                    case_insensitive = true;
+                    smart_case = false;
+                }
+                "case-sensitive" => {
+                    case_insensitive = false;
+                    smart_case = false;
+                }
+                "smart-case" => {
+                    smart_case = true;
+                    case_insensitive = false;
+                }
+                "fixed-strings" => {
+                    fixed_strings = true;
+                }
+                "word-regexp" => {
+                    word_regexp = true;
+                }
+                "line-regexp" => {
+                    line_regexp = true;
+                }
+                "invert-match" => {
+                    invert_match = true;
+                }
+                "follow" => {
+                    follow_links = true;
+                }
+                "no-ignore" => {
+                    no_ignore = true;
+                }
+                "max-count" => {
+                    if let Some(v) = val {
+                        if let Ok(num) = v.parse::<usize>() {
+                            max_count = Some(num);
+                        }
+                    } else if i + 1 < rg_opts.len() {
+                        i += 1;
+                        if let Ok(num) = rg_opts[i].parse::<usize>() {
+                            max_count = Some(num);
+                        }
+                    }
+                }
+                "max-depth" => {
+                    if let Some(v) = val {
+                        if let Ok(num) = v.parse::<usize>() {
+                            max_depth = Some(num);
+                        }
+                    } else if i + 1 < rg_opts.len() {
+                        i += 1;
+                        if let Ok(num) = rg_opts[i].parse::<usize>() {
+                            max_depth = Some(num);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if opt.starts_with('-') && opt.len() > 1 {
+            let mut chars = opt.chars().skip(1).peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    'i' => {
+                        case_insensitive = true;
+                        smart_case = false;
+                    }
+                    's' => {
+                        case_insensitive = false;
+                        smart_case = false;
+                    }
+                    'S' => {
+                        smart_case = true;
+                        case_insensitive = false;
+                    }
+                    'F' => {
+                        fixed_strings = true;
+                    }
+                    'w' => {
+                        word_regexp = true;
+                    }
+                    'x' => {
+                        line_regexp = true;
+                    }
+                    'v' => {
+                        invert_match = true;
+                    }
+                    'L' => {
+                        follow_links = true;
+                    }
+                    'm' => {
+                        let mut rest = String::new();
+                        while let Some(&c) = chars.peek() {
+                            if c.is_ascii_digit() {
+                                rest.push(chars.next().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                        if !rest.is_empty() {
+                            if let Ok(num) = rest.parse::<usize>() {
+                                max_count = Some(num);
+                            }
+                        } else if i + 1 < rg_opts.len() {
+                            i += 1;
+                            if let Ok(num) = rg_opts[i].parse::<usize>() {
+                                max_count = Some(num);
+                            }
+                        }
+                    }
+                    'd' => {
+                        let mut rest = String::new();
+                        while let Some(&c) = chars.peek() {
+                            if c.is_ascii_digit() {
+                                rest.push(chars.next().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                        if !rest.is_empty() {
+                            if let Ok(num) = rest.parse::<usize>() {
+                                max_depth = Some(num);
+                            }
+                        } else if i + 1 < rg_opts.len() {
+                            i += 1;
+                            if let Ok(num) = rg_opts[i].parse::<usize>() {
+                                max_depth = Some(num);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            match opt.as_str() {
+                "no-ignore" => {
+                    no_ignore = true;
+                }
+                "ignore-case" => {
+                    case_insensitive = true;
+                    smart_case = false;
+                }
+                "case-sensitive" => {
+                    case_insensitive = false;
+                    smart_case = false;
+                }
+                "smart-case" => {
+                    smart_case = true;
+                    case_insensitive = false;
+                }
+                "fixed-strings" => {
+                    fixed_strings = true;
+                }
+                "word-regexp" => {
+                    word_regexp = true;
+                }
+                "line-regexp" => {
+                    line_regexp = true;
+                }
+                "invert-match" => {
+                    invert_match = true;
+                }
+                "follow" => {
+                    follow_links = true;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    let escaped_pattern = if fixed_strings {
+        regex::escape(pattern)
+    } else {
+        pattern.to_string()
+    };
+
+    let mut matcher_pattern = escaped_pattern.clone();
+    if line_regexp {
+        matcher_pattern = format!(r"^(?:{})$", matcher_pattern);
+    }
+
+    let mut matcher_builder = RegexMatcherBuilder::new();
+    matcher_builder
         .case_insensitive(case_insensitive)
-        .build(pattern)
+        .case_smart(smart_case)
+        .word(word_regexp);
+
+    let matcher = matcher_builder
+        .build(&matcher_pattern)
         .map_err(|e| AppError::General(e.to_string()))?;
 
-    let re = regex::RegexBuilder::new(pattern)
-        .case_insensitive(case_insensitive)
+    let re_case_insensitive = if smart_case {
+        !escaped_pattern.chars().any(|c| c.is_uppercase())
+    } else {
+        case_insensitive
+    };
+
+    let mut re_pattern = escaped_pattern;
+    if word_regexp {
+        re_pattern = format!(r"\b({})\b", re_pattern);
+    }
+    if line_regexp {
+        re_pattern = format!(r"^({})$", re_pattern);
+    }
+
+    let re = regex::RegexBuilder::new(&re_pattern)
+        .case_insensitive(re_case_insensitive)
         .build()
         .map_err(|e| AppError::General(e.to_string()))?;
 
@@ -166,11 +384,18 @@ pub fn search(
         .standard_filters(true)
         .ignore(true)
         .git_ignore(true)
-        .git_global(true);
+        .git_global(true)
+        .follow_links(follow_links);
 
-    if rg_opts.iter().any(|o| o == "--no-ignore") {
+    if let Some(depth) = max_depth {
+        builder.max_depth(Some(depth));
+    }
+
+    if no_ignore {
         builder.ignore(false);
-        builder.hidden(false);
+        builder.git_ignore(false);
+        builder.git_global(false);
+        builder.parents(false);
     } else {
         if ignore_file.exists() {
             if let Some(err) = builder.add_ignore(ignore_file) {
@@ -197,7 +422,9 @@ pub fn search(
     let mut by_file: std::collections::BTreeMap<String, Vec<SearchResult>> =
         std::collections::BTreeMap::new();
 
-    let mut searcher = Searcher::new();
+    let mut searcher = SearcherBuilder::new()
+        .invert_match(invert_match)
+        .build();
 
     for entry in walker {
         let entry = match entry {
@@ -219,6 +446,12 @@ pub fn search(
             &matcher,
             path,
             UTF8(|line_num, line_text| {
+                if let Some(limit) = max_count {
+                    if limit == 0 {
+                        return Ok(false);
+                    }
+                }
+
                 let line_num = line_num as usize;
                 // strip trailing newlines
                 let clean_line = line_text.trim_end_matches(&['\r', '\n'][..]).to_string();
@@ -238,6 +471,13 @@ pub fn search(
                     display,
                     match_ranges,
                 });
+
+                if let Some(limit) = max_count {
+                    if file_results.len() >= limit {
+                        return Ok(false);
+                    }
+                }
+
                 Ok(true)
             }),
         );
@@ -297,4 +537,119 @@ fn path_to_relative(path: &Path) -> String {
     path.strip_prefix(".")
         .map(|s| s.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn test_search_options() {
+        let temp_dir = std::env::temp_dir().join("fcs_search_test_dir");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let file_path = temp_dir.join("test.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "Hello World").unwrap();
+        writeln!(file, "hello rust").unwrap();
+        writeln!(file, "case SENSITIVE line").unwrap();
+        writeln!(file, "exact pattern.* here").unwrap();
+        writeln!(file, "word boundary").unwrap();
+        writeln!(file, "wholeline").unwrap();
+        drop(file);
+
+        let dir_str = temp_dir.to_string_lossy().to_string();
+        let ignore_file = temp_dir.join("nonexistent.ignore");
+
+        // 1. Test case sensitive (default or -s)
+        let res = search("hello", Some(&dir_str), &["-s".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1); // Only "hello rust" should match, not "Hello World"
+
+        // 2. Test case insensitive (-i)
+        let res = search("hello", Some(&dir_str), &["-i".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 2); // Both "Hello World" and "hello rust"
+
+        // 3. Test smart-case (-S)
+        // lowercase pattern -> case insensitive
+        let res = search("hello", Some(&dir_str), &["-S".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 2);
+        // uppercase pattern -> case sensitive
+        let res = search("Hello", Some(&dir_str), &["-S".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1);
+
+        // 4. Test fixed strings (-F)
+        // without -F, "pattern.+" matches "pattern" followed by one or more characters (e.g. pattern.*)
+        let res = search("pattern.+", Some(&dir_str), &[], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1);
+        // With -F, it should match the literal "pattern.+" which does not exist in the file (only "pattern.*" exists)
+        let res = search("pattern.+", Some(&dir_str), &["-F".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 0);
+
+        // 5. Test word regexp (-w)
+        let res = search("bound", Some(&dir_str), &["-w".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 0); // "bound" is part of "boundary", so no word match
+        let res = search("boundary", Some(&dir_str), &["-w".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1); // matches "word boundary"
+
+        // 6. Test line regexp (-x)
+        let res = search("whole", Some(&dir_str), &["-x".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 0); // "whole" is substring of "wholeline"
+        let res = search("wholeline", Some(&dir_str), &["-x".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1); // exact line match
+
+        // 7. Test invert match (-v)
+        let res = search("hello", Some(&dir_str), &["-v".to_string(), "-i".to_string()], &[], &ignore_file).unwrap();
+        // hello matches 2 lines, total lines = 6, so inverted matches = 4 lines.
+        assert_eq!(res.flat().len(), 4);
+
+        // 8. Test max count (-m)
+        let res = search("l", Some(&dir_str), &["-m".to_string(), "2".to_string()], &[], &ignore_file).unwrap();
+        // "l" matches: Hello World (2 l's), hello rust, case SENSITIVE line, wholeline (total 4 lines). With -m 2, it should limit to 2.
+        assert_eq!(res.flat().len(), 2);
+
+        // 9. Test max depth (-d)
+        let nested_dir = temp_dir.join("nested").join("deep");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let deep_file = nested_dir.join("deep.txt");
+        let mut f = File::create(&deep_file).unwrap();
+        writeln!(f, "deep matches").unwrap();
+        drop(f);
+
+        // With depth limit 1, we should NOT find "deep matches"
+        let res = search("deep matches", Some(&dir_str), &["-d".to_string(), "1".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 0);
+
+        // With depth limit 3, we should find it
+        let res = search("deep matches", Some(&dir_str), &["-d".to_string(), "3".to_string()], &[], &ignore_file).unwrap();
+        assert_eq!(res.flat().len(), 1);
+
+        // 10. Test follow symlinks (-L)
+        let ext_temp_dir = std::env::temp_dir().join("fcs_search_test_ext");
+        let _ = std::fs::remove_dir_all(&ext_temp_dir);
+        std::fs::create_dir_all(&ext_temp_dir).unwrap();
+        let ext_file = ext_temp_dir.join("ext.txt");
+        let mut f = File::create(&ext_file).unwrap();
+        writeln!(f, "external file content").unwrap();
+        drop(f);
+
+        let symlink_path = temp_dir.join("symlink_dir");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&ext_temp_dir, &symlink_path).unwrap();
+
+            // Without -L, should not follow link
+            let res = search("external file content", Some(&dir_str), &[], &[], &ignore_file).unwrap();
+            assert_eq!(res.flat().len(), 0);
+
+            // With -L, should follow link
+            let res = search("external file content", Some(&dir_str), &["-L".to_string()], &[], &ignore_file).unwrap();
+            assert_eq!(res.flat().len(), 1);
+        }
+        let _ = std::fs::remove_dir_all(&ext_temp_dir);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
