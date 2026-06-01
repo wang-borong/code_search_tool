@@ -141,6 +141,7 @@ pub fn search(
     pattern: &str,
     dir: Option<&String>,
     rg_opts: &[String],
+    default_ignore: &[String],
 ) -> Result<SearchResults> {
     let case_insensitive = rg_opts.iter().any(|o| o == "-i" || o == "--ignore-case");
     
@@ -169,6 +170,18 @@ pub fn search(
     if rg_opts.iter().any(|o| o == "--no-ignore") {
         builder.ignore(false);
         builder.hidden(false);
+    } else if !default_ignore.is_empty() {
+        let mut ovr = ignore::overrides::OverrideBuilder::new(&root);
+        for pat in default_ignore {
+            let pat = if pat.starts_with('!') {
+                pat.clone()
+            } else {
+                format!("!{}", pat)
+            };
+            ovr.add(&pat).map_err(|e| AppError::General(e.to_string()))?;
+        }
+        let overrides = ovr.build().map_err(|e| AppError::General(e.to_string()))?;
+        builder.overrides(overrides);
     }
 
     let walker = builder.build();

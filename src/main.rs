@@ -106,9 +106,13 @@ fn handle_search(
     pattern: &str,
     directory: Option<&String>,
     options: &[String],
+    config: &fcs::config::Config,
 ) -> Result<(), AppError> {
-    // Step 1: Search using regex + ignore crates
-    let results = search::search(pattern, directory, options)?;
+    // Step 1: Search using regex + ignore crates + default ignore patterns
+    let mut final_options = config.search.rg_options.clone();
+    final_options.extend(options.iter().cloned());
+
+    let results = search::search(pattern, directory, &final_options, &config.search.ignore)?;
     let flat = results.flat();
 
     if flat.is_empty() {
@@ -129,31 +133,20 @@ fn handle_search(
         let _ = tx.send(items);
         drop(tx);
 
-        let bind_opts = vec![
-            "ctrl-u:half-page-up".to_string(),
-            "ctrl-d:half-page-down".to_string(),
-            "ctrl-r:kill-line".to_string(),
-            "ctrl-v:toggle-preview".to_string(),
-            "alt-u:preview-page-up".to_string(),
-            "alt-d:preview-page-down".to_string(),
-            "alt-j:preview-down".to_string(),
-            "alt-k:preview-up".to_string(),
-        ];
+        let bind_opts = config.skim.binds.clone();
 
         let skim_options = SkimOptionsBuilder::default()
-            .height("100%")
-            .min_height("20")
+            .height(config.skim.height.as_str())
+            .min_height(config.skim.min_height.as_str())
             .multi(true)
             .delimiter(delimiter.clone())
-            .color(
-                "fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33,info:136,prompt:136,pointer:230,marker:230,spinner:136",
-            )
-            .exact(true)
-            .tac(true)
-            .cycle(true)
+            .color(config.skim.color.as_str())
+            .exact(config.skim.exact)
+            .tac(config.skim.tac)
+            .cycle(config.skim.cycle)
             .bind(bind_opts)
             .preview("")
-            .preview_window("right:59%")
+            .preview_window(config.skim.preview_window.as_str())
             .query(current_pattern.clone())
             .build()
             .map_err(|e| AppError::Skim(e.to_string()))?;
@@ -189,6 +182,7 @@ fn main() {
 
 fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
+    let config = fcs::config::Config::load_or_create()?;
 
     match cli.command {
         Commands::Ignore { action, directory } => {
@@ -234,7 +228,7 @@ fn run() -> Result<(), AppError> {
             directory,
             option,
         } => {
-            handle_search(&pattern, directory.as_ref(), &option)?;
+            handle_search(&pattern, directory.as_ref(), &option, &config)?;
         }
         Commands::Complete { shell } => {
             let mut cmd = Cli::command();
