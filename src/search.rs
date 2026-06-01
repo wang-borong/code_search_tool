@@ -1,11 +1,11 @@
-use std::path::Path;
 use std::borrow::Cow;
+use std::path::Path;
 
-use ignore::WalkBuilder;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{SearcherBuilder, sinks::UTF8};
-use skim::prelude::*;
+use grep_searcher::{sinks::UTF8, SearcherBuilder};
+use ignore::WalkBuilder;
 use ratatui::text::Line;
+use skim::prelude::*;
 
 use crate::errors::{AppError, Result};
 
@@ -27,7 +27,7 @@ impl SkimItem for SearchResult {
     }
 
     fn display(&self, context: DisplayContext) -> Line<'_> {
-        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
 
         let path_len = self.path.chars().count();
@@ -48,7 +48,10 @@ impl SkimItem for SearchResult {
             Matches::CharRange(start, end) => (start..end).collect(),
             Matches::ByteRange(start, end) => {
                 let char_start = self.display.get(0..start).map_or(0, |s| s.chars().count());
-                let char_end = self.display.get(0..end).map_or(self.display.chars().count(), |s| s.chars().count());
+                let char_end = self
+                    .display
+                    .get(0..end)
+                    .map_or(self.display.chars().count(), |s| s.chars().count());
                 (char_start..char_end).collect()
             }
             Matches::None => std::collections::HashSet::new(),
@@ -129,10 +132,7 @@ pub struct SearchResults {
 impl SearchResults {
     /// Flatten into a single list with a "path:line:text" display string.
     pub fn flat(&self) -> Vec<SearchResult> {
-        self.by_file
-            .iter()
-            .flat_map(|(_, results)| results.clone())
-            .collect()
+        self.by_file.iter().flat_map(|(_, results)| results.clone()).collect()
     }
 }
 
@@ -419,12 +419,9 @@ pub fn search(
 
     let walker = builder.build();
 
-    let mut by_file: std::collections::BTreeMap<String, Vec<SearchResult>> =
-        std::collections::BTreeMap::new();
+    let mut by_file: std::collections::BTreeMap<String, Vec<SearchResult>> = std::collections::BTreeMap::new();
 
-    let mut searcher = SearcherBuilder::new()
-        .invert_match(invert_match)
-        .build();
+    let mut searcher = SearcherBuilder::new().invert_match(invert_match).build();
 
     for entry in walker {
         let entry = match entry {
@@ -504,12 +501,13 @@ pub fn open_file(path: &str, line: Option<usize>) -> Result<()> {
     let old_editor = std::env::var("EDITOR").ok();
 
     if let Some(line_num) = line {
-        let current_editor = old_visual.clone()
+        let current_editor = old_visual
+            .clone()
             .or_else(|| old_editor.clone())
             .unwrap_or_else(|| "nvim".to_string());
         // Extract the editor binary (strip any pre-existing arguments)
         let editor_bin = current_editor.split_whitespace().next().unwrap_or("nvim");
-        
+
         let editor_cmd = format!("{} +{}", editor_bin, line_num);
         std::env::set_var("VISUAL", &editor_cmd);
         std::env::set_var("EDITOR", &editor_cmd);
@@ -601,12 +599,26 @@ mod tests {
         assert_eq!(res.flat().len(), 1); // exact line match
 
         // 7. Test invert match (-v)
-        let res = search("hello", Some(&dir_str), &["-v".to_string(), "-i".to_string()], &[], &ignore_file).unwrap();
+        let res = search(
+            "hello",
+            Some(&dir_str),
+            &["-v".to_string(), "-i".to_string()],
+            &[],
+            &ignore_file,
+        )
+        .unwrap();
         // hello matches 2 lines, total lines = 6, so inverted matches = 4 lines.
         assert_eq!(res.flat().len(), 4);
 
         // 8. Test max count (-m)
-        let res = search("l", Some(&dir_str), &["-m".to_string(), "2".to_string()], &[], &ignore_file).unwrap();
+        let res = search(
+            "l",
+            Some(&dir_str),
+            &["-m".to_string(), "2".to_string()],
+            &[],
+            &ignore_file,
+        )
+        .unwrap();
         // "l" matches: Hello World (2 l's), hello rust, case SENSITIVE line, wholeline (total 4 lines). With -m 2, it should limit to 2.
         assert_eq!(res.flat().len(), 2);
 
@@ -619,11 +631,25 @@ mod tests {
         drop(f);
 
         // With depth limit 1, we should NOT find "deep matches"
-        let res = search("deep matches", Some(&dir_str), &["-d".to_string(), "1".to_string()], &[], &ignore_file).unwrap();
+        let res = search(
+            "deep matches",
+            Some(&dir_str),
+            &["-d".to_string(), "1".to_string()],
+            &[],
+            &ignore_file,
+        )
+        .unwrap();
         assert_eq!(res.flat().len(), 0);
 
         // With depth limit 3, we should find it
-        let res = search("deep matches", Some(&dir_str), &["-d".to_string(), "3".to_string()], &[], &ignore_file).unwrap();
+        let res = search(
+            "deep matches",
+            Some(&dir_str),
+            &["-d".to_string(), "3".to_string()],
+            &[],
+            &ignore_file,
+        )
+        .unwrap();
         assert_eq!(res.flat().len(), 1);
 
         // 10. Test follow symlinks (-L)
@@ -645,7 +671,14 @@ mod tests {
             assert_eq!(res.flat().len(), 0);
 
             // With -L, should follow link
-            let res = search("external file content", Some(&dir_str), &["-L".to_string()], &[], &ignore_file).unwrap();
+            let res = search(
+                "external file content",
+                Some(&dir_str),
+                &["-L".to_string()],
+                &[],
+                &ignore_file,
+            )
+            .unwrap();
             assert_eq!(res.flat().len(), 1);
         }
         let _ = std::fs::remove_dir_all(&ext_temp_dir);

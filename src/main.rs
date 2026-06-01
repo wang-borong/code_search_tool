@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, CommandFactory};
+use clap::{CommandFactory, Parser, Subcommand};
 use skim::prelude::*;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -74,9 +74,7 @@ enum IgnoreAction {
 fn resolve_ignore_file(directory: Option<&String>) -> PathBuf {
     // 1. Determine target directory absolute path
     let target_dir = match directory {
-        Some(d) => Path::new(d)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(d)),
+        Some(d) => Path::new(d).canonicalize().unwrap_or_else(|_| PathBuf::from(d)),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
 
@@ -87,10 +85,7 @@ fn resolve_ignore_file(directory: Option<&String>) -> PathBuf {
     }
 
     // Determine basename (fallback to "root")
-    let basename = target_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("root");
+    let basename = target_dir.file_name().and_then(|name| name.to_str()).unwrap_or("root");
 
     // Compute stable 8-character hex hash of absolute path
     let mut hasher = DefaultHasher::new();
@@ -99,9 +94,7 @@ fn resolve_ignore_file(directory: Option<&String>) -> PathBuf {
     let hash_str = format!("{:08x}", hash_val as u32);
 
     // Fall back to $XDG_CACHE_HOME/fcs/[basename]-[hash].ignore
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
-        .join("fcs");
+    let cache_dir = dirs::cache_dir().unwrap_or_else(|| std::env::temp_dir()).join("fcs");
 
     cache_dir.join(format!("{}-{}.ignore", basename, hash_str))
 }
@@ -117,10 +110,7 @@ fn parse_preview_arg(s: &str) -> Result<(String, usize, usize), AppError> {
     let line: usize = parts[1]
         .parse()
         .map_err(|e| AppError::InvalidPreview(format!("Invalid line number: {e}")))?;
-    let height: usize = parts
-        .get(2)
-        .and_then(|h| h.parse().ok())
-        .unwrap_or(24);
+    let height: usize = parts.get(2).and_then(|h| h.parse().ok()).unwrap_or(24);
     Ok((path, line, height))
 }
 
@@ -146,13 +136,7 @@ fn handle_search(
 
     let ignore_path = resolve_ignore_file(directory);
 
-    let results = search::search(
-        pattern,
-        directory,
-        &final_options,
-        &config.search.ignore,
-        &ignore_path,
-    )?;
+    let results = search::search(pattern, directory, &final_options, &config.search.ignore, &ignore_path)?;
     let flat = results.flat();
 
     if flat.is_empty() {

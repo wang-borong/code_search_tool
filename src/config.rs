@@ -1,6 +1,6 @@
-use std::fs;
-use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -52,7 +52,9 @@ impl Default for Config {
                 ],
                 height: "100%".to_string(),
                 min_height: "20".to_string(),
-                color: "fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33,info:136,prompt:136,pointer:230,marker:230,spinner:136".to_string(),
+                color:
+                    "fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33,info:136,prompt:136,pointer:230,marker:230,spinner:136"
+                        .to_string(),
                 exact: true,
                 tac: true,
                 cycle: true,
@@ -66,7 +68,7 @@ impl Config {
     pub fn load_or_create() -> Result<Self> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| AppError::General("Could not find configuration directory".to_string()))?;
-        
+
         let fcs_dir = config_dir.join("fcs");
         let config_path = fcs_dir.join("fcs.toml");
 
@@ -82,7 +84,7 @@ impl Config {
         let contents = fs::read_to_string(&config_path)?;
         let config: Config = toml::from_str(&contents)
             .map_err(|e| AppError::General(format!("Failed to parse config at {}: {e}", config_path.display())))?;
-        
+
         Ok(config)
     }
 }

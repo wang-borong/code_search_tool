@@ -1,5 +1,5 @@
-use crate::search::SearchResult;
 use crate::errors::Result;
+use crate::search::SearchResult;
 use bat::line_range::{LineRange, LineRanges};
 
 pub fn preview_to_string(result: &SearchResult, height: usize) -> Result<String> {
