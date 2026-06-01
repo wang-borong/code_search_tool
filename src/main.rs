@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand, CommandFactory};
 use skim::prelude::*;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use fcs::errors::AppError;
 use fcs::ignore::IgnoreFile;
@@ -68,10 +71,39 @@ enum IgnoreAction {
     List,
 }
 
-fn get_ignore_file(directory: Option<&String>) -> String {
-    directory
-        .map(|d| format!("{d}/.ignore"))
-        .unwrap_or_else(|| ".ignore".to_string())
+fn resolve_ignore_file(directory: Option<&String>) -> PathBuf {
+    // 1. Determine target directory absolute path
+    let target_dir = match directory {
+        Some(d) => Path::new(d)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(d)),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+
+    // Check if legacy local .ignore file exists
+    let local_ignore = target_dir.join(".ignore");
+    if local_ignore.exists() {
+        return local_ignore;
+    }
+
+    // Determine basename (fallback to "root")
+    let basename = target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("root");
+
+    // Compute stable 8-character hex hash of absolute path
+    let mut hasher = DefaultHasher::new();
+    target_dir.hash(&mut hasher);
+    let hash_val = hasher.finish();
+    let hash_str = format!("{:08x}", hash_val as u32);
+
+    // Fall back to $XDG_CACHE_HOME/fcs/[basename]-[hash].ignore
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::env::temp_dir())
+        .join("fcs");
+
+    cache_dir.join(format!("{}-{}.ignore", basename, hash_str))
 }
 
 fn parse_preview_arg(s: &str) -> Result<(String, usize, usize), AppError> {
@@ -112,7 +144,15 @@ fn handle_search(
     let mut final_options = config.search.rg_options.clone();
     final_options.extend(options.iter().cloned());
 
-    let results = search::search(pattern, directory, &final_options, &config.search.ignore)?;
+    let ignore_path = resolve_ignore_file(directory);
+
+    let results = search::search(
+        pattern,
+        directory,
+        &final_options,
+        &config.search.ignore,
+        &ignore_path,
+    )?;
     let flat = results.flat();
 
     if flat.is_empty() {
@@ -186,30 +226,31 @@ fn run() -> Result<(), AppError> {
 
     match cli.command {
         Commands::Ignore { action, directory } => {
-            let ignore_file = IgnoreFile::new(&get_ignore_file(directory.as_ref()));
+            let ignore_path = resolve_ignore_file(directory.as_ref());
+            let ignore_file = IgnoreFile::new(ignore_path.clone());
             match action {
                 IgnoreAction::Init => {
                     ignore_file.init(true)?;
-                    println!("Initialized .ignore file");
+                    println!("Initialized ignore file at: {}", ignore_path.display());
                 }
                 IgnoreAction::Add { patterns } => {
                     if patterns.is_empty() {
                         return Err(AppError::General("No patterns specified to add".to_string()));
                     }
                     ignore_file.add(&patterns)?;
-                    println!("Added patterns to .ignore");
+                    println!("Added patterns to ignore file at: {}", ignore_path.display());
                 }
                 IgnoreAction::Remove { patterns } => {
                     if patterns.is_empty() {
                         return Err(AppError::General("No patterns specified to remove".to_string()));
                     }
                     ignore_file.remove(&patterns)?;
-                    println!("Removed patterns from .ignore");
+                    println!("Removed patterns from ignore file at: {}", ignore_path.display());
                 }
                 IgnoreAction::List => {
                     let patterns = ignore_file.list()?;
                     if patterns.is_empty() {
-                        println!("No ignore patterns");
+                        println!("No ignore patterns in: {}", ignore_path.display());
                     } else {
                         for p in &patterns {
                             println!("{p}");

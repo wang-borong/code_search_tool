@@ -1,29 +1,31 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 
 pub struct IgnoreFile {
-    path: String,
+    path: PathBuf,
 }
 
 impl IgnoreFile {
-    pub fn new(path: &str) -> Self {
-        Self {
-            path: path.to_string(),
-        }
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn ensure_parent(&self) -> Result<()> {
-        if let Some(parent) = Path::new(&self.path).parent() {
+        if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
         Ok(())
     }
 
     pub fn init(&self, defaults: bool) -> Result<()> {
-        if Path::new(&self.path).exists() {
+        if self.path.exists() {
             return Ok(());
         }
 
@@ -64,7 +66,7 @@ impl IgnoreFile {
         }
 
         if existing.is_empty() {
-            if Path::new(&self.path).exists() {
+            if self.path.exists() {
                 fs::remove_file(&self.path)?;
             }
         } else {
@@ -82,11 +84,10 @@ impl IgnoreFile {
     }
 
     fn read_lines(&self) -> Result<Vec<String>> {
-        let path = Path::new(&self.path);
-        if !path.exists() {
+        if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let file = File::open(path)?;
+        let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         let mut lines = Vec::new();
         for line in reader.lines() {
