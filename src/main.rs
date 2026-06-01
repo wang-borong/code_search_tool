@@ -116,6 +116,9 @@ fn handle_search(
         return Ok(());
     }
 
+    let mut current_pattern = "".to_string();
+    let delimiter = regex::Regex::new(":").unwrap();
+
     loop {
         // Step 2: Interactive select using Skim
         let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
@@ -141,7 +144,7 @@ fn handle_search(
             .height("100%")
             .min_height("20")
             .multi(true)
-            .delimiter(regex::Regex::new(":").unwrap())
+            .delimiter(delimiter.clone())
             .color(
                 "fg:-1,bg:-1,hl:33,fg+:254,bg+:235,hl+:33,info:136,prompt:136,pointer:230,marker:230,spinner:136",
             )
@@ -151,6 +154,7 @@ fn handle_search(
             .bind(bind_opts)
             .preview("")
             .preview_window("right:59%")
+            .query(current_pattern.clone())
             .build()
             .map_err(|e| AppError::Skim(e.to_string()))?;
 
@@ -159,6 +163,7 @@ fn handle_search(
             break;
         }
         let output = output.unwrap();
+        current_pattern = output.query.clone();
         if output.is_abort {
             break;
         }
