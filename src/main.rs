@@ -94,7 +94,7 @@ fn resolve_ignore_file(directory: Option<&String>) -> PathBuf {
     let hash_str = format!("{:08x}", hash_val as u32);
 
     // Fall back to $XDG_CACHE_HOME/fcs/[basename]-[hash].ignore
-    let cache_dir = dirs::cache_dir().unwrap_or_else(|| std::env::temp_dir()).join("fcs");
+    let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("fcs");
 
     cache_dir.join(format!("{}-{}.ignore", basename, hash_str))
 }

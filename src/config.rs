@@ -103,7 +103,5 @@ pub fn init_global(config: Config) {
 }
 
 pub fn get_global() -> &'static Config {
-    CONFIG.get_or_init(|| {
-        Config::load_or_create().unwrap_or_else(|_| Config::default())
-    })
+    CONFIG.get_or_init(|| Config::load_or_create().unwrap_or_else(|_| Config::default()))
 }

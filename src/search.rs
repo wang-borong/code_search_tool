@@ -158,11 +158,11 @@ pub fn search(
     let mut i = 0;
     while i < rg_opts.len() {
         let opt = &rg_opts[i];
-        if opt.starts_with("--") {
-            let (name, val) = if let Some(pos) = opt.find('=') {
-                (&opt[2..pos], Some(&opt[pos + 1..]))
+        if let Some(stripped) = opt.strip_prefix("--") {
+            let (name, val) = if let Some(pos) = stripped.find('=') {
+                (&stripped[..pos], Some(&stripped[pos + 1..]))
             } else {
-                (&opt[2..], None)
+                (stripped, None)
             };
 
             match name {
