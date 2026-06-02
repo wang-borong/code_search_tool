@@ -24,6 +24,12 @@ pub struct SkimConfig {
     pub tac: bool,
     pub cycle: bool,
     pub preview_window: String,
+    #[serde(default = "default_tab_width")]
+    pub tab_width: usize,
+}
+
+fn default_tab_width() -> usize {
+    4
 }
 
 impl Default for Config {
@@ -59,6 +65,7 @@ impl Default for Config {
                 tac: true,
                 cycle: true,
                 preview_window: "right:59%".to_string(),
+                tab_width: 4,
             },
         }
     }
@@ -87,4 +94,16 @@ impl Config {
 
         Ok(config)
     }
+}
+
+static CONFIG: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
+
+pub fn init_global(config: Config) {
+    let _ = CONFIG.set(config);
+}
+
+pub fn get_global() -> &'static Config {
+    CONFIG.get_or_init(|| {
+        Config::load_or_create().unwrap_or_else(|_| Config::default())
+    })
 }

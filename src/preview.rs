@@ -13,6 +13,9 @@ pub fn preview_to_string(result: &SearchResult, height: usize) -> Result<String>
     let range = LineRange::new(start, end);
     let ranges = LineRanges::from(vec![range]);
 
+    let config = crate::config::get_global();
+    let tab_width = config.skim.tab_width;
+
     let mut output_str = String::new();
     let mut printer = bat::PrettyPrinter::new();
     printer
@@ -24,6 +27,7 @@ pub fn preview_to_string(result: &SearchResult, height: usize) -> Result<String>
         .colored_output(true)
         .true_color(true)
         .term_width(100)
+        .tab_width(Some(tab_width))
         .print_with_writer(Some(&mut output_str))
         .map_err(|e| crate::errors::AppError::General(e.to_string()))?;
 
