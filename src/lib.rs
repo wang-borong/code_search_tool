@@ -1,5 +1,22 @@
+mod cache;
+
 pub mod config;
+pub mod core;
+pub mod dap;
+pub mod debugger;
+pub mod editor;
 pub mod errors;
+pub mod files;
+pub mod graph;
+pub mod history;
 pub mod ignore;
+pub mod index;
+pub mod lsp;
+pub mod plugins;
 pub mod preview;
+pub mod project_actions;
 pub mod search;
+pub mod symbols;
+pub mod trace;
+pub mod tui;
+pub mod workspace;

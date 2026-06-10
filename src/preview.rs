@@ -3,8 +3,12 @@ use crate::search::SearchResult;
 use bat::line_range::{LineRange, LineRanges};
 
 pub fn preview_to_string(result: &SearchResult, height: usize) -> Result<String> {
-    let start = if result.line_num > height * 3 / 4 {
-        result.line_num - height * 3 / 4
+    preview_path(&result.path, result.line_num, height)
+}
+
+pub fn preview_path(path: &str, line_num: usize, height: usize) -> Result<String> {
+    let start = if line_num > height * 3 / 4 {
+        line_num - height * 3 / 4
     } else {
         1
     };
@@ -19,9 +23,9 @@ pub fn preview_to_string(result: &SearchResult, height: usize) -> Result<String>
     let mut output_str = String::new();
     let mut printer = bat::PrettyPrinter::new();
     printer
-        .input_file(&result.path)
+        .input_file(path)
         .line_ranges(ranges)
-        .highlight(result.line_num)
+        .highlight(line_num)
         .grid(true)
         .line_numbers(true)
         .colored_output(true)

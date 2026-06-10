@@ -6,6 +6,16 @@ use std::fs;
 pub struct Config {
     pub search: SearchConfig,
     pub skim: SkimConfig,
+    #[serde(default)]
+    pub editor: EditorConfig,
+    #[serde(default)]
+    pub lsp: LspConfig,
+    #[serde(default)]
+    pub tui: TuiConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub actions: Vec<ActionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +36,86 @@ pub struct SkimConfig {
     pub preview_window: String,
     #[serde(default = "default_tab_width")]
     pub tab_width: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditorConfig {
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspConfig {
+    pub clangd_command: String,
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub keymap: TuiKeymapConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    pub cache_probe: bool,
+    pub log_dir: String,
+    pub latency_warn_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiKeymapConfig {
+    pub command_palette: String,
+    pub query: String,
+    pub open: String,
+    pub refresh: String,
+    pub trace: String,
+    pub breakpoint: String,
+    pub debug: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionConfig {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            clangd_command: "clangd".to_string(),
+            request_timeout_ms: 3000,
+        }
+    }
+}
+
+impl Default for TuiKeymapConfig {
+    fn default() -> Self {
+        Self {
+            command_palette: ":".to_string(),
+            query: "/".to_string(),
+            open: "o".to_string(),
+            refresh: "r".to_string(),
+            trace: "a".to_string(),
+            breakpoint: "b".to_string(),
+            debug: "D".to_string(),
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            cache_probe: true,
+            log_dir: ".fcs/logs".to_string(),
+            latency_warn_ms: 500,
+        }
+    }
 }
 
 fn default_tab_width() -> usize {
@@ -67,6 +157,11 @@ impl Default for Config {
                 preview_window: "right:59%".to_string(),
                 tab_width: 4,
             },
+            editor: EditorConfig::default(),
+            lsp: LspConfig::default(),
+            tui: TuiConfig::default(),
+            runtime: RuntimeConfig::default(),
+            actions: Vec::new(),
         }
     }
 }

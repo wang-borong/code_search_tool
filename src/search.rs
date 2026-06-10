@@ -1,5 +1,9 @@
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks::UTF8, SearcherBuilder};
@@ -8,6 +12,21 @@ use ratatui::text::Line;
 use skim::prelude::*;
 
 use crate::errors::{AppError, Result};
+
+#[derive(Debug, Clone, Default)]
+pub struct SearchCancel {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl SearchCancel {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
 
 /// A single search result: file path, line number, matched text.
 #[derive(Debug, Clone)]
@@ -143,6 +162,18 @@ pub fn search(
     rg_opts: &[String],
     default_ignore: &[String],
     ignore_file: &Path,
+) -> Result<SearchResults> {
+    search_with_cancel(pattern, dir, rg_opts, default_ignore, ignore_file, None, None)
+}
+
+pub fn search_with_cancel(
+    pattern: &str,
+    dir: Option<&String>,
+    rg_opts: &[String],
+    default_ignore: &[String],
+    ignore_file: &Path,
+    cancel: Option<&SearchCancel>,
+    max_results: Option<usize>,
 ) -> Result<SearchResults> {
     let mut case_insensitive = false;
     let mut smart_case = false;
@@ -420,10 +451,18 @@ pub fn search(
     let walker = builder.build();
 
     let mut by_file: std::collections::BTreeMap<String, Vec<SearchResult>> = std::collections::BTreeMap::new();
+    let mut total_results = 0usize;
 
     let mut searcher = SearcherBuilder::new().invert_match(invert_match).build();
 
     for entry in walker {
+        if cancel.is_some_and(SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
+        if max_results.is_some_and(|limit| total_results >= limit) {
+            break;
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -443,6 +482,12 @@ pub fn search(
             &matcher,
             path,
             UTF8(|line_num, line_text| {
+                if cancel.is_some_and(SearchCancel::is_cancelled) {
+                    return Ok(false);
+                }
+                if max_results.is_some_and(|limit| total_results >= limit) {
+                    return Ok(false);
+                }
                 if let Some(limit) = max_count {
                     if limit == 0 {
                         return Ok(false);
@@ -468,6 +513,7 @@ pub fn search(
                     display,
                     match_ranges,
                 });
+                total_results += 1;
 
                 if let Some(limit) = max_count {
                     if file_results.len() >= limit {
@@ -483,6 +529,10 @@ pub fn search(
         if search_res.is_ok() && !file_results.is_empty() {
             by_file.insert(rel_path, file_results);
         }
+
+        if cancel.is_some_and(SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
     }
 
     Ok(SearchResults {
@@ -490,45 +540,9 @@ pub fn search(
     })
 }
 
-/// Open a file at a specific line using the `edit` crate, passing line number directly via VISUAL/EDITOR.
+/// Open a file at a specific line using the shared editor adapter.
 pub fn open_file(path: &str, line: Option<usize>) -> Result<()> {
-    let file_path = Path::new(path);
-    if !file_path.exists() {
-        return Err(AppError::FileNotFound(path.to_string()));
-    }
-
-    let old_visual = std::env::var("VISUAL").ok();
-    let old_editor = std::env::var("EDITOR").ok();
-
-    if let Some(line_num) = line {
-        let current_editor = old_visual
-            .clone()
-            .or_else(|| old_editor.clone())
-            .unwrap_or_else(|| "nvim".to_string());
-        // Extract the editor binary (strip any pre-existing arguments)
-        let editor_bin = current_editor.split_whitespace().next().unwrap_or("nvim");
-
-        let editor_cmd = format!("{} +{}", editor_bin, line_num);
-        std::env::set_var("VISUAL", &editor_cmd);
-        std::env::set_var("EDITOR", &editor_cmd);
-    }
-
-    let res = edit::edit_file(file_path);
-
-    // Restore original env vars
-    if let Some(val) = old_visual {
-        std::env::set_var("VISUAL", val);
-    } else {
-        std::env::remove_var("VISUAL");
-    }
-    if let Some(val) = old_editor {
-        std::env::set_var("EDITOR", val);
-    } else {
-        std::env::remove_var("EDITOR");
-    }
-
-    res.map_err(AppError::Io)?;
-    Ok(())
+    crate::editor::open_file(Path::new(path), line, None, None)
 }
 
 fn path_to_relative(path: &Path) -> String {

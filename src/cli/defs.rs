@@ -1,0 +1,1639 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser, Debug)]
+#[command(name = "fcs", author, version, about = "Fuzzy code search tool", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Manage ignore patterns
+    Ignore {
+        #[command(subcommand)]
+        action: IgnoreAction,
+
+        /// Target directory (default: current directory)
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Preview a file at a specific line
+    Preview {
+        /// Format: "path:line" or "path:line:height"
+        target: String,
+    },
+
+    /// Open the ratatui code tracing workspace
+    Tui {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Initial source mode: search, files, symbols, refs, diag, trace, pinned, debug
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Initial query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// Binary used by the TUI debug pane
+        #[arg(long)]
+        debug_binary: Option<String>,
+    },
+
+    /// Inspect or initialize workspace metadata
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+
+    /// Build and inspect the workspace code index cache
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
+
+    /// Build semantic, call, and import graph views
+    Graph {
+        #[command(subcommand)]
+        action: GraphAction,
+    },
+
+    /// List and run configured project actions
+    Actions {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
+    /// Discover and run declarative fcs plugins
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
+    /// Jump to LSP definition for path:line[:column]
+    Def {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP references for path:line[:column]
+    Refs {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Jump to LSP type definition for path:line[:column]
+    TypeDef {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP implementations for path:line[:column]
+    Implementation {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP document symbols for a file
+    DocSymbols {
+        /// Source file to inspect
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP incoming calls for path:line[:column]
+    Incoming {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP outgoing calls for path:line[:column]
+    Outgoing {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP diagnostics for a file
+    Diag {
+        /// Source file to diagnose
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP hover text for path:line[:column]
+    Hover {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show LSP workspace symbols for a query
+    WorkspaceSymbols {
+        /// Symbol query
+        query: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Maximum entries to print or pick
+        #[arg(short, long, default_value_t = 100)]
+        limit: usize,
+    },
+
+    /// Inspect LSP provider health
+    Lsp {
+        #[command(subcommand)]
+        action: LspAction,
+    },
+
+    /// Manage trace history and bookmarks
+    Trace {
+        #[command(subcommand)]
+        action: TraceAction,
+    },
+
+    /// Show or clear query history
+    History {
+        #[command(subcommand)]
+        action: HistoryAction,
+    },
+
+    /// Generate or launch debugger sessions from trace locations
+    Debug {
+        #[command(subcommand)]
+        action: DebugAction,
+    },
+
+    /// Generate and store basic Debug Adapter Protocol launch requests
+    Dap {
+        #[command(subcommand)]
+        action: DapAction,
+    },
+
+    /// Fuzzy-find files in a project
+    Files {
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Initial skim query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// File search options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Fuzzy-find coarse symbols without requiring an LSP server
+    Symbol {
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Initial skim query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// Symbol search file options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Search patterns in files
+    Search {
+        /// Search pattern (regex)
+        pattern: String,
+
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Generate shell completion script
+    Complete {
+        /// Target shell (bash, elvish, fish, powershell, zsh)
+        shell: clap_complete::Shell,
+    },
+
+    /// Generate a simple man page
+    Man {
+        /// Print the generated man page to stdout
+        #[arg(long)]
+        stdout: bool,
+
+        /// Directory where fcs.1 should be written
+        #[arg(long)]
+        out_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TraceAction {
+    /// Add a location to trace history
+    Add {
+        /// Format: "path", "path:line", or "path:line:column"
+        target: String,
+
+        /// Optional label
+        #[arg(short, long)]
+        label: Option<String>,
+
+        /// Entry kind
+        #[arg(short, long, default_value = "bookmark")]
+        kind: String,
+
+        /// Investigation session name
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Parent trace entry id
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Branch name within a trace session
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Tag to attach to the trace entry, repeatable
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+
+    /// List trace history
+    List {
+        /// Filter by session
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Filter by kind
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by priority
+        #[arg(long)]
+        priority: Option<String>,
+    },
+
+    /// Set or clear a trace entry note; use id from list or "latest"
+    Note {
+        /// Trace entry id, or "latest"
+        id: String,
+
+        /// Note text; use "-" to clear
+        note: String,
+    },
+
+    /// Set or clear a trace entry status; use id from list or "latest"
+    Status {
+        /// Trace entry id, or "latest"
+        id: String,
+
+        /// Status value; use "-" to clear
+        status: String,
+    },
+
+    /// Set or clear a trace entry priority; use id from list or "latest"
+    Priority {
+        /// Trace entry id, or "latest"
+        id: String,
+
+        /// Priority value; use "-" to clear
+        priority: String,
+    },
+
+    /// List trace investigation sessions
+    Sessions {
+        /// Include archived sessions
+        #[arg(long)]
+        archived: bool,
+    },
+
+    /// Archive a trace investigation session
+    Archive {
+        /// Trace session name
+        session: String,
+    },
+
+    /// Restore an archived trace investigation session
+    Unarchive {
+        /// Trace session name
+        session: String,
+    },
+
+    /// Export one trace session as markdown or json
+    Report {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Export one trace session timeline as markdown or json
+    Timeline {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Replay one trace session as ordered investigation steps
+    Replay {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Export the structured hypotheses/evidence/conclusions/open questions for one trace session
+    Structured {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Diff two trace sessions as markdown or json
+    Diff {
+        /// Left trace session name
+        left: String,
+
+        /// Right trace session name
+        right: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Open trace history in the picker
+    Open,
+
+    /// Clear trace history
+    Clear,
+
+    /// Export trace history as markdown
+    Export {
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Export trace history as a parent/child graph
+    Graph {
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProjectAction {
+    /// List configured global and project actions
+    List {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// Run a configured action with template variables expanded
+    Run {
+        /// Action name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(long)]
+        directory: Option<String>,
+
+        /// Value for {file}
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Value for {line}
+        #[arg(long)]
+        line: Option<usize>,
+
+        /// Value for {symbol}
+        #[arg(long)]
+        symbol: Option<String>,
+
+        /// Print the expanded command instead of executing it
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Extra arguments appended after configured args
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// List built-in action templates
+    Templates,
+
+    /// Initialize project actions from a built-in template
+    Init {
+        /// Built-in template name
+        template: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Overwrite an existing .fcs.toml
+        #[arg(long)]
+        force: bool,
+
+        /// Print the generated .fcs.toml instead of writing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Validate configured global and project actions
+    Doctor {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// List discovered plugins
+    List {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// Show one plugin manifest summary
+    Show {
+        /// Plugin name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Validate discovered plugin manifests
+    Doctor {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// List plugin project action templates
+    Templates {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// List plugin commands
+    Commands {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// Initialize .fcs.toml from a plugin template
+    Init {
+        /// Template selector, either name or plugin:name
+        template: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Overwrite an existing .fcs.toml
+        #[arg(long)]
+        force: bool,
+
+        /// Print generated .fcs.toml instead of writing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Run or print a plugin command
+    Run {
+        /// Command selector, either name or plugin:name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Value for {file}
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Value for {line}
+        #[arg(long)]
+        line: Option<usize>,
+
+        /// Value for {symbol}
+        #[arg(long)]
+        symbol: Option<String>,
+
+        /// Print the expanded command instead of executing it
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Extra arguments appended after configured args
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LspAction {
+    /// Show provider availability for a workspace or file
+    Health {
+        /// Target workspace directory
+        directory: Option<String>,
+
+        /// Optional source file to select a provider by file type
+        #[arg(short, long)]
+        file: Option<String>,
+    },
+
+    /// Show document highlights for path:line[:column]
+    Highlights {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show grouped references for path:line[:column]
+    Refs {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Preview LSP rename edits without applying them
+    Rename {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Replacement symbol name
+        new_name: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// List code actions for path:line[:column]
+    CodeActions {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show incoming and outgoing calls grouped around path:line[:column]
+    CallTree {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DapAction {
+    /// Print a DAP launch request for an executable
+    Launch {
+        /// Program binary to launch
+        program: String,
+
+        /// DAP adapter type label, e.g. cppdbg or codelldb
+        #[arg(short, long, default_value = "cppdbg")]
+        adapter: String,
+
+        /// Launch profile name; defaults to the program file name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Stop immediately after launch
+        #[arg(long)]
+        stop_on_entry: bool,
+
+        /// Print setBreakpoints requests before the launch request
+        #[arg(long)]
+        bundle: bool,
+
+        /// Program arguments after launch setup
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// Save a named DAP launch profile in the workspace cache
+    SaveProfile {
+        /// Profile name
+        name: String,
+
+        /// Program binary to launch
+        program: String,
+
+        /// DAP adapter type label, e.g. cppdbg or codelldb
+        #[arg(short, long, default_value = "cppdbg")]
+        adapter: String,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Stop immediately after launch
+        #[arg(long)]
+        stop_on_entry: bool,
+
+        /// Program arguments after launch setup
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// List saved DAP launch profiles
+    Profiles {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// Save a DAP launch profile from all line locations in a trace session
+    FromTrace {
+        /// Trace session name
+        session: String,
+
+        /// Program binary to launch
+        program: String,
+
+        /// Saved DAP profile name; defaults to <session>-dap
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// DAP adapter type label, e.g. cppdbg or codelldb
+        #[arg(short, long, default_value = "cppdbg")]
+        adapter: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Stop immediately after launch
+        #[arg(long)]
+        stop_on_entry: bool,
+
+        /// Program arguments after launch setup
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// Print a saved DAP launch request
+    RequestProfile {
+        /// Profile name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Print setBreakpoints requests before the launch request
+        #[arg(long)]
+        bundle: bool,
+    },
+
+    /// Run a non-interactive DAP client session against the built-in mock adapter
+    SessionSmoke {
+        /// Program binary to launch in the mock session
+        program: String,
+
+        /// DAP adapter type label used in initialize arguments
+        #[arg(short, long, default_value = "mock")]
+        adapter: String,
+
+        /// Launch profile name; defaults to the program file name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Stop immediately after launch
+        #[arg(long)]
+        stop_on_entry: bool,
+
+        /// Program arguments after launch setup
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// Run a real DAP initialize/launch/configurationDone session against an adapter process
+    AdapterSession {
+        /// DAP adapter executable command
+        adapter_command: String,
+
+        /// Program binary to launch
+        program: String,
+
+        /// DAP adapter type label used in initialize arguments
+        #[arg(short, long, default_value = "cppdbg")]
+        adapter: String,
+
+        /// Launch profile name; defaults to the program file name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Working directory for the debugged program and adapter process
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Adapter environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "adapter-env")]
+        adapter_env: Vec<String>,
+
+        /// Debuggee environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Stop immediately after launch
+        #[arg(long)]
+        stop_on_entry: bool,
+
+        /// Program arguments after launch setup
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HistoryAction {
+    /// List query history
+    List,
+
+    /// Clear query history
+    Clear,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DebugAction {
+    /// Build a debugger command with explicit breakpoints
+    Command {
+        /// Program binary to debug
+        binary: String,
+
+        /// Debugger backend: gdb or lldb
+        #[arg(short, long, default_value = "gdb")]
+        debugger: String,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Program arguments after debugger setup
+        #[arg(last = true)]
+        args: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Launch the debugger instead of printing the command
+        #[arg(long)]
+        run: bool,
+    },
+
+    /// Build a debugger command using the latest trace entry as breakpoint
+    Last {
+        /// Program binary to debug
+        binary: String,
+
+        /// Debugger backend: gdb or lldb
+        #[arg(short, long, default_value = "gdb")]
+        debugger: String,
+
+        /// Program arguments after debugger setup
+        #[arg(last = true)]
+        args: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Launch the debugger instead of printing the command
+        #[arg(long)]
+        run: bool,
+    },
+
+    /// Save a named debugger profile in the workspace cache
+    SaveProfile {
+        /// Profile name
+        name: String,
+
+        /// Program binary to debug
+        binary: String,
+
+        /// Debugger backend: gdb or lldb
+        #[arg(short, long, default_value = "gdb")]
+        debugger: String,
+
+        /// Breakpoint location, repeatable: path:line[:column]
+        #[arg(short = 'b', long = "break")]
+        breakpoints: Vec<String>,
+
+        /// Target workspace directory
+        #[arg(long)]
+        directory: Option<String>,
+
+        /// Program arguments after debugger setup
+        #[arg(last = true)]
+        args: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+
+    /// List saved debugger profiles
+    Profiles {
+        /// Target workspace directory
+        directory: Option<String>,
+    },
+
+    /// Save a debugger profile from all line locations in a trace session
+    FromTrace {
+        /// Trace session name
+        session: String,
+
+        /// Program binary to debug
+        binary: String,
+
+        /// Saved profile name; defaults to <session>-debug
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Debugger backend: gdb or lldb
+        #[arg(short, long, default_value = "gdb")]
+        debugger: String,
+
+        /// Target workspace directory
+        #[arg(long)]
+        directory: Option<String>,
+
+        /// Program arguments after debugger setup
+        #[arg(last = true)]
+        args: Vec<String>,
+
+        /// Working directory for the debugged program
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Environment assignment, repeatable: KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Launch the debugger after saving the profile
+        #[arg(long)]
+        run: bool,
+    },
+
+    /// Delete a saved debugger profile
+    DeleteProfile {
+        /// Profile name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Enable a saved profile breakpoint by 1-based index
+    EnableBreakpoint {
+        /// Profile name
+        name: String,
+
+        /// 1-based breakpoint index
+        index: usize,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Disable a saved profile breakpoint by 1-based index
+    DisableBreakpoint {
+        /// Profile name
+        name: String,
+
+        /// 1-based breakpoint index
+        index: usize,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Run or print a saved debugger profile
+    RunProfile {
+        /// Profile name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Launch the debugger instead of printing the command
+        #[arg(long)]
+        run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkspaceAction {
+    /// Show workspace readiness for semantic navigation
+    Status {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Create non-intrusive fcs workspace cache metadata
+    Init {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Write a project-level .fcs.toml template
+    Config {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Overwrite existing .fcs.toml
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print project detection and actionable setup advice
+    Advise {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Print detected project profile without advice text
+    Detect {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Run workspace readiness, cache, config, and release health checks
+    Doctor {
+        /// Target directory
+        directory: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexAction {
+    /// Show cached index freshness and counts
+    Status {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Show cached index size and distribution statistics
+    Stats {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Rebuild the cached files/symbols index
+    Build {
+        /// Target directory
+        directory: Option<String>,
+
+        /// File traversal options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// List cached index entries
+    List {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Entry kind: files or symbols
+        #[arg(short, long, default_value = "symbols")]
+        kind: String,
+
+        /// Maximum entries to print
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+    },
+
+    /// Rewrite cached index TOML in compact form
+    Compact {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Report size changes without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Load the index once to warm filesystem cache
+    Prewarm {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Rebuild only when the index is missing, stale, corrupt, or schema-migrated
+    Refresh {
+        /// Target directory
+        directory: Option<String>,
+
+        /// File traversal options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Query cached index entries with fuzzy substring scoring
+    Query {
+        /// Query text
+        query: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Entry kind: files or symbols
+        #[arg(short, long, default_value = "symbols")]
+        kind: String,
+
+        /// Maximum entries to print
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Print query latency
+        #[arg(long)]
+        timing: bool,
+
+        /// Warn on stderr when query latency exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u64>,
+    },
+
+    /// Diagnose index freshness, schema, and corruption status
+    Doctor {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Rebuild stale or corrupt index data
+    Repair {
+        /// Target directory
+        directory: Option<String>,
+
+        /// File traversal options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+
+        /// Rebuild even when the index is already healthy
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Measure cached index operation latency
+    Bench {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Include an index rebuild in the measurement
+        #[arg(long)]
+        build: bool,
+
+        /// Maximum entries for list/query probes
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Query text for the query latency probe
+        #[arg(long, default_value = "main")]
+        query: String,
+
+        /// File traversal options used only with --build
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GraphAction {
+    /// Build an LSP-backed graph from a source location
+    Semantic {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Relation: references, definition, type, implementation, incoming, outgoing
+        #[arg(short, long, default_value = "outgoing")]
+        relation: String,
+
+        /// Output format: text, json, mermaid, or dot
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Maximum relation depth to keep; semantic queries currently return one LSP hop
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+
+        /// Maximum outgoing edges per source; 0 means unlimited
+        #[arg(long, default_value_t = 0)]
+        fanout: usize,
+
+        /// Exclude edges whose source, target, kind, or detail contains this text
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Build a lightweight include/import graph from project files
+    Imports {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Maximum files to scan
+        #[arg(short, long, default_value_t = 500)]
+        limit: usize,
+
+        /// Output format: text, json, mermaid, or dot
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Maximum local import expansion depth
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+
+        /// Maximum outgoing imports per source file; 0 means unlimited
+        #[arg(long, default_value_t = 0)]
+        fanout: usize,
+
+        /// Exclude edges whose source, target, kind, or detail contains this text
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+    },
+
+    /// Build a lightweight Rust module graph from project files
+    Modules {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Maximum files to scan
+        #[arg(short, long, default_value_t = 500)]
+        limit: usize,
+
+        /// Output format: text, json, mermaid, or dot
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Maximum local module expansion depth
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+
+        /// Maximum outgoing modules per source file; 0 means unlimited
+        #[arg(long, default_value_t = 0)]
+        fanout: usize,
+
+        /// Exclude edges whose source, target, kind, or detail contains this text
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+    },
+
+    /// Build a lightweight offline call graph from project files
+    Calls {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Maximum files to scan
+        #[arg(short, long, default_value_t = 500)]
+        limit: usize,
+
+        /// Output format: text, json, mermaid, or dot
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Maximum relation depth to keep
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+
+        /// Maximum outgoing calls per source location; 0 means unlimited
+        #[arg(long, default_value_t = 0)]
+        fanout: usize,
+
+        /// Exclude edges whose source, target, kind, or detail contains this text
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IgnoreAction {
+    /// Initialize a .ignore file with default patterns
+    Init,
+
+    /// Add patterns to .ignore
+    Add {
+        /// Patterns to add
+        patterns: Vec<String>,
+    },
+
+    /// Remove patterns from .ignore
+    Remove {
+        /// Patterns to remove
+        patterns: Vec<String>,
+    },
+
+    /// List patterns in .ignore
+    List,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn clap_command_tree_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn release_smoke_commands_parse() {
+        let cases: &[&[&str]] = &[
+            &["fcs", "tui", "--mode", "files", "--query", "main"],
+            &["fcs", "workspace", "status", "."],
+            &["fcs", "workspace", "detect", "."],
+            &["fcs", "workspace", "doctor", "."],
+            &["fcs", "index", "doctor", "."],
+            &["fcs", "index", "stats", "."],
+            &["fcs", "index", "compact", ".", "--dry-run"],
+            &["fcs", "index", "prewarm", "."],
+            &["fcs", "index", "refresh", "."],
+            &["fcs", "index", "query", "main", ".", "--timing", "--warn-ms", "1000"],
+            &["fcs", "index", "bench", ".", "--query", "main"],
+            &["fcs", "trace", "export", "--format", "json"],
+            &["fcs", "trace", "graph", "--directory", "."],
+            &["fcs", "trace", "note", "latest", "checked"],
+            &["fcs", "trace", "status", "latest", "open"],
+            &["fcs", "trace", "priority", "latest", "high"],
+            &["fcs", "trace", "timeline", "smoke", "--format", "json"],
+            &["fcs", "trace", "replay", "smoke", "--format", "json"],
+            &["fcs", "trace", "diff", "smoke-a", "smoke-b", "--format", "json"],
+            &["fcs", "actions", "list", "."],
+            &[
+                "fcs",
+                "actions",
+                "run",
+                "test",
+                "--directory",
+                ".",
+                "--file",
+                "src/main.rs",
+                "--line",
+                "1",
+                "--symbol",
+                "main",
+                "--dry-run",
+                "--",
+                "--exact",
+            ],
+            &["fcs", "plugin", "list", "."],
+            &["fcs", "plugin", "show", "builtin-dev", "--directory", "."],
+            &["fcs", "plugin", "doctor", "."],
+            &["fcs", "plugin", "templates", "."],
+            &["fcs", "plugin", "commands", "."],
+            &[
+                "fcs",
+                "plugin",
+                "init",
+                "builtin-dev:rust-debug",
+                "--directory",
+                ".",
+                "--dry-run",
+            ],
+            &[
+                "fcs",
+                "plugin",
+                "run",
+                "builtin-dev:cargo-check",
+                "--directory",
+                ".",
+                "--dry-run",
+                "--",
+                "--locked",
+            ],
+            &[
+                "fcs",
+                "graph",
+                "imports",
+                ".",
+                "--format",
+                "mermaid",
+                "--depth",
+                "2",
+                "--fanout",
+                "4",
+                "--exclude",
+                "target",
+            ],
+            &[
+                "fcs", "graph", "modules", ".", "--format", "dot", "--depth", "2", "--fanout", "4",
+            ],
+            &[
+                "fcs", "graph", "calls", ".", "--format", "json", "--depth", "1", "--fanout", "8",
+            ],
+            &[
+                "fcs",
+                "graph",
+                "semantic",
+                "src/main.rs:1:1",
+                "--relation",
+                "references",
+                "--format",
+                "dot",
+                "--depth",
+                "1",
+                "--fanout",
+                "8",
+            ],
+            &["fcs", "type-def", "src/main.rs:1:1"],
+            &["fcs", "doc-symbols", "src/main.rs"],
+            &["fcs", "outgoing", "src/main.rs:1:1"],
+            &["fcs", "lsp", "highlights", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "lsp", "refs", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "lsp", "rename", "src/main.rs:1:1", "renamed", "--directory", "."],
+            &["fcs", "lsp", "code-actions", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "lsp", "call-tree", "src/main.rs:1:1", "--directory", "."],
+            &[
+                "fcs",
+                "debug",
+                "command",
+                "target/debug/fcs",
+                "-b",
+                "src/main.rs:1",
+                "--cwd",
+                ".",
+                "--env",
+                "FCS_SMOKE=1",
+            ],
+            &[
+                "fcs",
+                "debug",
+                "save-profile",
+                "smoke",
+                "target/debug/fcs",
+                "-b",
+                "src/main.rs:1",
+                "--directory",
+                ".",
+                "--cwd",
+                ".",
+                "--env",
+                "FCS_SMOKE=1",
+                "--",
+                "--help",
+            ],
+            &["fcs", "debug", "disable-breakpoint", "smoke", "1", "--directory", "."],
+            &["fcs", "debug", "enable-breakpoint", "smoke", "1", "--directory", "."],
+            &["fcs", "debug", "run-profile", "smoke", "--directory", "."],
+            &[
+                "fcs",
+                "debug",
+                "from-trace",
+                "smoke",
+                "target/debug/fcs",
+                "--name",
+                "smoke-trace",
+                "--directory",
+                ".",
+                "--cwd",
+                ".",
+                "--env",
+                "FCS_SMOKE=1",
+                "--",
+                "--help",
+            ],
+            &["fcs", "debug", "delete-profile", "smoke", "--directory", "."],
+            &[
+                "fcs",
+                "dap",
+                "session-smoke",
+                "target/debug/fcs",
+                "-b",
+                "src/main.rs:1",
+                "--cwd",
+                ".",
+                "--env",
+                "FCS_SMOKE=1",
+                "--",
+                "--help",
+            ],
+            &[
+                "fcs",
+                "dap",
+                "from-trace",
+                "smoke",
+                "target/debug/fcs",
+                "--name",
+                "smoke-dap",
+                "--directory",
+                ".",
+                "--cwd",
+                ".",
+                "--env",
+                "FCS_SMOKE=1",
+                "--",
+                "--help",
+            ],
+            &[
+                "fcs",
+                "dap",
+                "adapter-session",
+                "mock-adapter",
+                "target/debug/fcs",
+                "-b",
+                "src/main.rs:1",
+                "--cwd",
+                ".",
+                "--adapter-env",
+                "FCS_ADAPTER=1",
+                "--env",
+                "FCS_SMOKE=1",
+                "--",
+                "--help",
+            ],
+            &["fcs", "complete", "bash"],
+            &["fcs", "man", "--stdout"],
+            &["fcs", "man", "--out-dir", "target/man"],
+        ];
+
+        for args in cases {
+            Cli::try_parse_from(*args).unwrap_or_else(|err| panic!("failed to parse {args:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn release_help_lists_core_workflows() {
+        let help = Cli::command().render_long_help().to_string();
+
+        for command in [
+            "tui",
+            "workspace",
+            "trace",
+            "actions",
+            "plugin",
+            "debug",
+            "type-def",
+            "doc-symbols",
+            "outgoing",
+        ] {
+            assert!(help.contains(command), "help output should mention {command}");
+        }
+    }
+}
