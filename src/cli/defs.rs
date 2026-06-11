@@ -49,10 +49,55 @@ pub enum Commands {
         action: WorkspaceAction,
     },
 
+    /// Run or inspect the unified fcs background service snapshot
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
     /// Build and inspect the workspace code index cache
     Index {
         #[command(subcommand)]
         action: IndexAction,
+    },
+
+    /// Query index and trace data with field filters
+    Query {
+        /// Query expression, e.g. 'kind:function lang:rust path:src text:main'
+        expression: String,
+
+        /// Target workspace directory
+        directory: Option<String>,
+
+        /// Query source: index, trace, or all
+        #[arg(short, long, default_value = "all")]
+        source: String,
+
+        /// Maximum entries to print
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Print the parsed query plan instead of running it
+        #[arg(long)]
+        explain: bool,
+
+        /// Print query latency in milliseconds
+        #[arg(long)]
+        timing: bool,
+
+        /// Print a warning when query latency exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+    },
+
+    /// Measure search, index, trace, and preview latency
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
     },
 
     /// Build semantic, call, and import graph views
@@ -409,12 +454,48 @@ pub enum TraceAction {
         format: String,
     },
 
+    /// Export replay commands that can reconstruct a trace investigation path
+    ReplayPlan {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Optional program binary for generated DAP profile commands
+        #[arg(long)]
+        program: Option<String>,
+
+        /// Optional generated DAP profile name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
     /// Export the structured hypotheses/evidence/conclusions/open questions for one trace session
     Structured {
         /// Trace session name
         session: String,
 
         /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Export format: markdown or json
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+
+    /// Export an investigation insights report for one trace session
+    Insights {
+        /// Trace session name
+        session: String,
+
+        /// Target workspace directory; enables index-backed symbol correlation
         #[arg(short, long)]
         directory: Option<String>,
 
@@ -553,6 +634,17 @@ pub enum PluginAction {
     Doctor {
         /// Target workspace directory
         directory: Option<String>,
+
+        /// Exit with an error when warnings are found
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Print the supported plugin manifest schema example
+    Schema {
+        /// Output format: toml, text, or json
+        #[arg(short, long, default_value = "toml")]
+        format: String,
     },
 
     /// List plugin project action templates
@@ -610,6 +702,40 @@ pub enum PluginAction {
         #[arg(long)]
         dry_run: bool,
 
+        /// Custom template variable assignment used as {var.KEY}
+        #[arg(long = "var")]
+        vars: Vec<String>,
+
+        /// Extra arguments appended after configured args
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// Print the full plugin command execution plan without running it
+    Plan {
+        /// Command selector, either name or plugin:name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Value for {file}
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Value for {line}
+        #[arg(long)]
+        line: Option<usize>,
+
+        /// Value for {symbol}
+        #[arg(long)]
+        symbol: Option<String>,
+
+        /// Custom template variable assignment used as {var.KEY}
+        #[arg(long = "var")]
+        vars: Vec<String>,
+
         /// Extra arguments appended after configured args
         #[arg(last = true)]
         args: Vec<String>,
@@ -659,9 +785,17 @@ pub enum LspAction {
         /// Workspace directory override
         #[arg(short, long)]
         directory: Option<String>,
+
+        /// Apply the rename edits instead of printing a preview
+        #[arg(long)]
+        apply: bool,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
     },
 
-    /// List code actions for path:line[:column]
+    /// List or apply code actions for path:line[:column]
     CodeActions {
         /// Format: "path:line" or "path:line:column"
         target: String,
@@ -669,6 +803,82 @@ pub enum LspAction {
         /// Workspace directory override
         #[arg(short, long)]
         directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Apply a 1-based code action index
+        #[arg(long)]
+        apply: Option<usize>,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Run source.organizeImports code action for a file
+    OrganizeImports {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Apply the first organize-imports edit
+        #[arg(long)]
+        apply: bool,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show a nested document outline
+    Outline {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: tree or json
+        #[arg(short, long, default_value = "tree")]
+        format: String,
+    },
+
+    /// Show symbol breadcrumbs for path:line[:column]
+    Breadcrumbs {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show semantic tokens for a file
+    SemanticTokens {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Optional 1-based line filter
+        #[arg(long)]
+        line: Option<usize>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
     },
 
     /// Show incoming and outgoing calls grouped around path:line[:column]
@@ -684,6 +894,13 @@ pub enum LspAction {
 
 #[derive(Subcommand, Debug)]
 pub enum DapAction {
+    /// List known DAP adapter commands and availability
+    Adapters {
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Print a DAP launch request for an executable
     Launch {
         /// Program binary to launch
@@ -1110,8 +1327,37 @@ pub enum WorkspaceAction {
         force: bool,
     },
 
+    /// Manage named workspace profiles for monorepos and repeated roots
+    Profile {
+        #[command(subcommand)]
+        action: WorkspaceProfileAction,
+    },
+
+    /// Validate project-level .fcs.toml configuration
+    ConfigDoctor {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Exit with an error when warnings are found
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Print the supported project .fcs.toml schema example
+    ConfigSchema {
+        /// Output format: toml, text, or json
+        #[arg(short, long, default_value = "toml")]
+        format: String,
+    },
+
     /// Print project detection and actionable setup advice
     Advise {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Print the non-blocking startup plan used by the TUI activity panel
+    Plan {
         /// Target directory
         directory: Option<String>,
     },
@@ -1126,6 +1372,245 @@ pub enum WorkspaceAction {
     Doctor {
         /// Target directory
         directory: Option<String>,
+    },
+
+    /// Print diagnostic workflow templates for this workspace
+    Workflows {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkspaceProfileAction {
+    /// Save a named workspace profile
+    Save {
+        /// Profile name
+        name: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Optional profile description
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Profile index root, repeatable; defaults to detected roots
+        #[arg(long = "index-root")]
+        index_roots: Vec<String>,
+    },
+
+    /// List saved workspace profiles
+    List,
+
+    /// Show one saved workspace profile
+    Show {
+        /// Profile name
+        name: String,
+    },
+
+    /// Mark a saved workspace profile as active
+    Use {
+        /// Profile name
+        name: String,
+    },
+
+    /// Show the active workspace profile
+    Current,
+
+    /// Delete a saved workspace profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceAction {
+    /// Run a foreground polling service that refreshes index and writes a unified snapshot
+    Start {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Milliseconds between refresh checks
+        #[arg(long, default_value_t = 2000)]
+        interval_ms: u64,
+
+        /// Stop after this many cycles; omit to run until interrupted
+        #[arg(long)]
+        max_cycles: Option<usize>,
+
+        /// Print each completed cycle
+        #[arg(long)]
+        foreground: bool,
+
+        /// File traversal options used by index refresh
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Show the latest service heartbeat
+    Status {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Build and print a unified status snapshot once
+    Snapshot {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Query through the same advanced query engine used by service snapshots
+    Query {
+        /// Query expression
+        expression: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Query source: index, trace, or all
+        #[arg(short, long, default_value = "all")]
+        source: String,
+
+        /// Maximum entries to print
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Print the parsed query plan instead of running it
+        #[arg(long)]
+        explain: bool,
+
+        /// Print query latency in milliseconds
+        #[arg(long)]
+        timing: bool,
+
+        /// Print a warning when query latency exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+    },
+
+    /// Request a running foreground service to stop
+    Stop {
+        /// Target directory
+        directory: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BenchAction {
+    /// Run the standard benchmark suite for a workspace
+    All {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when a probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+
+        /// Maximum entries for index/query probes
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Query text used by search and index probes
+        #[arg(long, default_value = "main")]
+        query: String,
+
+        /// File traversal options used by search/index probes
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Measure ripgrep-style search latency
+    Search {
+        /// Search pattern
+        pattern: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when the probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+
+        /// Ripgrep-compatible search options
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Measure cached index latency
+    Index {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when a probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+
+        /// Include an index rebuild in the measurement
+        #[arg(long)]
+        build: bool,
+
+        /// Maximum entries for list/query probes
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Query text for the query latency probe
+        #[arg(long, default_value = "main")]
+        query: String,
+
+        /// File traversal options used only with --build
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Measure trace store latency
+    Trace {
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when a probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+    },
+
+    /// Measure preview target file-read latency
+    Preview {
+        /// Format: path:line
+        target: String,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when the probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
     },
 }
 
@@ -1191,6 +1676,34 @@ pub enum IndexAction {
         /// File traversal options (e.g. --hidden, --no-ignore, -L, -d 2)
         #[arg(short, long, allow_hyphen_values = true)]
         option: Vec<String>,
+    },
+
+    /// Run a polling daemon that keeps the cached index fresh
+    Daemon {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Milliseconds between refresh checks
+        #[arg(long, default_value_t = 2000)]
+        interval_ms: u64,
+
+        /// Stop after this many cycles; omit to run until interrupted
+        #[arg(long)]
+        max_cycles: Option<usize>,
+
+        /// Run in the foreground and print each completed cycle
+        #[arg(long)]
+        foreground: bool,
+
+        /// File traversal options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
+    /// Show the last index daemon heartbeat
+    DaemonStatus {
+        /// Target directory
+        directory: Option<String>,
     },
 
     /// Query cached index entries with fuzzy substring scoring
@@ -1410,13 +1923,82 @@ mod tests {
             &["fcs", "workspace", "status", "."],
             &["fcs", "workspace", "detect", "."],
             &["fcs", "workspace", "doctor", "."],
+            &["fcs", "workspace", "config-doctor", ".", "--strict"],
+            &["fcs", "workspace", "config-schema", "--format", "json"],
+            &[
+                "fcs",
+                "workspace",
+                "profile",
+                "save",
+                "main",
+                ".",
+                "--description",
+                "main workspace",
+                "--index-root",
+                "src",
+            ],
+            &["fcs", "workspace", "profile", "list"],
+            &["fcs", "workspace", "profile", "show", "main"],
+            &["fcs", "workspace", "profile", "use", "main"],
+            &["fcs", "workspace", "profile", "current"],
+            &["fcs", "workspace", "profile", "delete", "main"],
+            &["fcs", "service", "snapshot", ".", "--format", "json"],
+            &["fcs", "service", "status", "."],
+            &[
+                "fcs",
+                "service",
+                "start",
+                ".",
+                "--interval-ms",
+                "0",
+                "--max-cycles",
+                "1",
+                "--foreground",
+            ],
+            &[
+                "fcs",
+                "service",
+                "query",
+                "kind:function text:main",
+                ".",
+                "--source",
+                "index",
+            ],
+            &["fcs", "service", "stop", "."],
             &["fcs", "index", "doctor", "."],
             &["fcs", "index", "stats", "."],
             &["fcs", "index", "compact", ".", "--dry-run"],
             &["fcs", "index", "prewarm", "."],
             &["fcs", "index", "refresh", "."],
+            &[
+                "fcs",
+                "index",
+                "daemon",
+                ".",
+                "--interval-ms",
+                "0",
+                "--max-cycles",
+                "1",
+                "--foreground",
+            ],
+            &["fcs", "index", "daemon-status", "."],
             &["fcs", "index", "query", "main", ".", "--timing", "--warn-ms", "1000"],
             &["fcs", "index", "bench", ".", "--query", "main"],
+            &[
+                "fcs",
+                "query",
+                "kind:function lang:rust text:main",
+                ".",
+                "--source",
+                "all",
+                "--format",
+                "json",
+            ],
+            &["fcs", "bench", "all", ".", "--format", "json", "--warn-ms", "10000"],
+            &["fcs", "bench", "search", "main", ".", "--format", "json"],
+            &["fcs", "bench", "index", ".", "--query", "main", "--format", "json"],
+            &["fcs", "bench", "trace", "--format", "json"],
+            &["fcs", "bench", "preview", "src/main.rs:1", "--format", "json"],
             &["fcs", "trace", "export", "--format", "json"],
             &["fcs", "trace", "graph", "--directory", "."],
             &["fcs", "trace", "note", "latest", "checked"],
@@ -1424,7 +2006,29 @@ mod tests {
             &["fcs", "trace", "priority", "latest", "high"],
             &["fcs", "trace", "timeline", "smoke", "--format", "json"],
             &["fcs", "trace", "replay", "smoke", "--format", "json"],
+            &[
+                "fcs",
+                "trace",
+                "replay-plan",
+                "smoke",
+                "--format",
+                "json",
+                "--program",
+                "target/debug/fcs",
+                "--name",
+                "smoke-replay",
+            ],
             &["fcs", "trace", "diff", "smoke-a", "smoke-b", "--format", "json"],
+            &[
+                "fcs",
+                "trace",
+                "insights",
+                "smoke",
+                "--directory",
+                ".",
+                "--format",
+                "json",
+            ],
             &["fcs", "actions", "list", "."],
             &[
                 "fcs",
@@ -1446,6 +2050,8 @@ mod tests {
             &["fcs", "plugin", "list", "."],
             &["fcs", "plugin", "show", "builtin-dev", "--directory", "."],
             &["fcs", "plugin", "doctor", "."],
+            &["fcs", "plugin", "doctor", ".", "--strict"],
+            &["fcs", "plugin", "schema", "--format", "toml"],
             &["fcs", "plugin", "templates", "."],
             &["fcs", "plugin", "commands", "."],
             &[
@@ -1465,6 +2071,20 @@ mod tests {
                 "--directory",
                 ".",
                 "--dry-run",
+                "--var",
+                "mode=debug",
+                "--",
+                "--locked",
+            ],
+            &[
+                "fcs",
+                "plugin",
+                "plan",
+                "builtin-dev:cargo-check",
+                "--directory",
+                ".",
+                "--var",
+                "mode=debug",
                 "--",
                 "--locked",
             ],
@@ -1508,7 +2128,54 @@ mod tests {
             &["fcs", "lsp", "highlights", "src/main.rs:1:1", "--directory", "."],
             &["fcs", "lsp", "refs", "src/main.rs:1:1", "--directory", "."],
             &["fcs", "lsp", "rename", "src/main.rs:1:1", "renamed", "--directory", "."],
+            &[
+                "fcs",
+                "lsp",
+                "rename",
+                "src/main.rs:1:1",
+                "renamed",
+                "--directory",
+                ".",
+                "--apply",
+                "--dry-run",
+            ],
             &["fcs", "lsp", "code-actions", "src/main.rs:1:1", "--directory", "."],
+            &[
+                "fcs",
+                "lsp",
+                "code-actions",
+                "src/main.rs:1:1",
+                "--directory",
+                ".",
+                "--format",
+                "json",
+                "--apply",
+                "1",
+                "--dry-run",
+            ],
+            &["fcs", "lsp", "organize-imports", "src/main.rs", "--directory", "."],
+            &[
+                "fcs",
+                "lsp",
+                "organize-imports",
+                "src/main.rs",
+                "--directory",
+                ".",
+                "--apply",
+                "--dry-run",
+            ],
+            &["fcs", "lsp", "outline", "src/main.rs", "--format", "json"],
+            &["fcs", "lsp", "breadcrumbs", "src/main.rs:1:1", "--directory", "."],
+            &[
+                "fcs",
+                "lsp",
+                "semantic-tokens",
+                "src/main.rs",
+                "--line",
+                "1",
+                "--format",
+                "json",
+            ],
             &["fcs", "lsp", "call-tree", "src/main.rs:1:1", "--directory", "."],
             &[
                 "fcs",
@@ -1625,6 +2292,9 @@ mod tests {
         for command in [
             "tui",
             "workspace",
+            "service",
+            "query",
+            "bench",
             "trace",
             "actions",
             "plugin",

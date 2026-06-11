@@ -41,13 +41,38 @@
 - Added declarative plugin manifests with `plugin list/show/doctor/templates/commands/init/run`.
 - Added man page generation and local install dry-run support with `fcs man` and `scripts/install-local.sh`.
 - Added `scripts/release-check.sh` and release metadata for Cargo packaging.
+- Added interactive DAP/TUI controls for start/refresh/continue/pause/step, watch expressions, evaluation, and advanced breakpoint fields.
+- Added LSP edit workflows for rename/code-action apply previews plus organize imports, outline, breadcrumbs, and semantic token inspection.
+- Added `index daemon` and `index daemon-status` with polling refresh and heartbeat files.
+- Added `trace insights` reports that summarize debug events, unresolved entries, hot files, and index-correlated nearby symbols.
+- Added plugin env expansion, pre/post hooks, execution plans, schema output, strict doctor mode, and custom `{var.KEY}` variables.
+- Added fielded `query` and `service query` commands for index/trace filtering by kind, language, path, text, status, priority, session, and tags.
+- Added `service start/status/snapshot/stop` for foreground workspace snapshot generation across index, LSP provider health, trace, plugins, and workspace profile state.
+- Added top-level `bench` probes for search, index, trace store, preview reads, and combined workspace benchmark reports.
+- Added workspace profile management plus `workspace config-doctor` and `workspace config-schema`.
+- Added `trace replay-plan` exports that turn a trace session into reproducible trace and optional DAP profile commands.
+- Added TUI DAP continue/pause/step controls, watch clearing, and stopped-location jump/open commands.
+- Added CI coverage for the full CLI smoke script, including the P57-P64 command surface.
+- Added interactive TUI real-DAP sessions via `dap real <adapter-command>`, saved DAP profile launch with `dap start <profile>`, and active breakpoint synchronization with `dap sync` / `break sync`.
+- Added structured DAP snapshots for threads, stack frames, scopes, variables, stop reasons, last events, and adapter errors while keeping the existing text summary fields.
+- Added a partitioned TUI Debug panel for session, stack, variables, watches, and events, plus trace-to-breakpoint/profile commands.
+- Added semantic query sources: `--source semantic` for LSP workspace symbols and `--source auto` for index + trace + LSP fusion without changing the fast default `all` source.
+- Added index schema v3 content hashes, per-file symbol counts, indexed timestamps, richer incremental build reports, and hash-first stale detection.
+- Added `workspace plan` and TUI Activity startup summaries for non-blocking index/LSP/profile readiness checks.
+- Added P65-P72 tests and smoke coverage for workspace plans, semantic/auto query, index mutation refresh, DAP typed snapshots, and new TUI command suggestions.
+- Added DAP adapter discovery with `dap adapters`, automatic adapter selection for `dap adapter-session auto`, and breakpoint verification reporting.
+- Added TUI DAP restart/terminate/disconnect/adapters commands plus verified breakpoint rendering in the Debug panel.
+- Added DAP stopped-location trace metadata with stack, variable, watch, and breakpoint context for later investigation replay.
+- Added query `source:` field filters, query-plan explanation, latency output, and warning thresholds for `query` and `service query`.
+- Added `workspace workflows` diagnostic templates and lazy startup-plan guidance for on-demand LSP/DAP and explicit index prewarm.
+- Added P73-P80 smoke coverage for adapter discovery, query explanation/timing, source filtering, service query explanation, and workflow templates.
 
 ### Verification
 
 - Expected release gate: `rtk cargo test`.
 - Recommended full local gate: `rtk scripts/smoke.sh`.
 - Recommended package gate: `rtk scripts/release-check.sh`.
-- Verified locally with `rtk cargo clippy -- -D warnings`, `rtk cargo test`, index/workspace/graph/DAP/trace CLI smoke, and TUI startup/command-palette smoke.
+- Verified locally with `rtk cargo clippy -- -D warnings`, `rtk cargo test`, index/workspace/query/service/bench/graph/DAP/trace CLI smoke, and TUI startup/command-palette smoke.
 
 ## 0.6.3
 

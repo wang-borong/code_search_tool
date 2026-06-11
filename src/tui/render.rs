@@ -209,13 +209,93 @@ fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let trace = List::new(trace_lines).block(Block::default().title("Trace").borders(Borders::ALL));
     frame.render_widget(trace, chunks[0]);
 
-    let debug = app.debug_panel_text();
-    let paragraph = Paragraph::new(debug)
-        .block(Block::default().title("Debug").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, chunks[1]);
+    render_debug_panel(frame, chunks[1], app);
 
     render_activity(frame, chunks[2], app);
+}
+
+fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if area.width < 48 || area.height < 7 {
+        let paragraph = Paragraph::new(app.debug_panel_text())
+            .block(Block::default().title("Debug").borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .split(area);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(3)])
+        .split(columns[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(columns[1]);
+
+    let snapshot = &app.dap_snapshot;
+    let mut session = vec![
+        Line::from(snapshot.status.clone()),
+        Line::from(format!("{} | {}", snapshot.adapter, snapshot.profile)),
+        Line::from(format!(
+            "req/res {}:{}  thread {:?} frame {:?}",
+            snapshot.request_count, snapshot.response_count, snapshot.selected_thread_id, snapshot.selected_frame_id
+        )),
+    ];
+    if let Some(reason) = &snapshot.stop_reason {
+        session.push(Line::from(format!("stop: {reason}")));
+    }
+    let session = Paragraph::new(session)
+        .block(Block::default().title("Session").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(session, left[0]);
+
+    let stack = list_from_strings(&snapshot.stack, left[1].height, "Stack");
+    frame.render_widget(stack, left[1]);
+
+    let mut variable_lines = snapshot.variables.clone();
+    if !snapshot.watches.is_empty() {
+        variable_lines.push("-- watches --".to_string());
+        variable_lines.extend(snapshot.watches.clone());
+    }
+    if let Some(evaluation) = &snapshot.last_evaluation {
+        variable_lines.push(format!("eval: {evaluation}"));
+    }
+    if let Some(error) = &snapshot.error {
+        variable_lines.push(format!("error: {error}"));
+    }
+    let variables = list_from_strings(&variable_lines, right[0].height, "Variables");
+    frame.render_widget(variables, right[0]);
+
+    let mut event_lines = snapshot.events.clone();
+    if !snapshot.breakpoints.is_empty() {
+        event_lines.push("-- breakpoints --".to_string());
+        event_lines.extend(snapshot.breakpoints.clone());
+    }
+    if let Some(location) = &snapshot.stopped_location {
+        let column = location.column.map(|column| format!(":{column}")).unwrap_or_default();
+        event_lines.push(format!(
+            "stopped {}:{}{}",
+            location.path.display(),
+            location.line,
+            column
+        ));
+    }
+    let events = list_from_strings(&event_lines, right[1].height, "Events");
+    frame.render_widget(events, right[1]);
+}
+
+fn list_from_strings<'a>(values: &[String], area_height: u16, title: &'a str) -> List<'a> {
+    let visible_height = area_height.saturating_sub(2).max(1) as usize;
+    let items = values
+        .iter()
+        .take(visible_height)
+        .map(|value| ListItem::new(value.clone()))
+        .collect::<Vec<ListItem>>();
+    List::new(items).block(Block::default().title(title).borders(Borders::ALL))
 }
 
 fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -229,6 +309,11 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .as_ref()
         .map(|(_, label)| format!("lsp: {label}"))
         .unwrap_or_else(|| "lsp: idle".to_string());
+    let dap = app
+        .pending_dap
+        .as_ref()
+        .map(|(_, label)| format!("dap: {label}"))
+        .unwrap_or_else(|| "dap: idle".to_string());
     let preview = format!("preview: {}", app.preview_title());
     let counts = format!(
         "pins: {}  jumps: {}  breakpoints: {}",
@@ -236,12 +321,19 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         app.navigation.len(),
         app.breakpoints.len()
     );
-    let text = vec![
+    let mut text = vec![
         Line::from(source),
         Line::from(lsp),
+        Line::from(dap),
         Line::from(preview),
         Line::from(counts),
     ];
+    if let Some(plan) = &app.startup_plan {
+        let available = area.height.saturating_sub(2).saturating_sub(text.len() as u16) as usize;
+        for line in crate::workspace::startup_plan_lines(plan).into_iter().take(available) {
+            text.push(Line::from(line));
+        }
+    }
     let paragraph = Paragraph::new(text)
         .block(Block::default().title("Activity").borders(Borders::ALL))
         .wrap(Wrap { trim: false });

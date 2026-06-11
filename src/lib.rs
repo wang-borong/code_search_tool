@@ -1,5 +1,6 @@
 mod cache;
 
+pub mod bench;
 pub mod config;
 pub mod core;
 pub mod dap;
@@ -15,7 +16,9 @@ pub mod lsp;
 pub mod plugins;
 pub mod preview;
 pub mod project_actions;
+pub mod query;
 pub mod search;
+pub mod service;
 pub mod symbols;
 pub mod trace;
 pub mod tui;

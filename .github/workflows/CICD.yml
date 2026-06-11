@@ -23,6 +23,7 @@ jobs:
       - min_version
       - documentation
       - cargo-audit
+      - smoke
       - build
     steps:
       - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
@@ -92,6 +93,16 @@ jobs:
       - run: cargo install cargo-audit --locked
       - uses: actions/checkout@v6
       - run: cargo audit
+
+  smoke:
+    name: CLI smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/checkout@v6
+      - run: scripts/smoke.sh
 
   build:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})

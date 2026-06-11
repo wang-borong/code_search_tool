@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::LspConfig;
@@ -15,6 +16,43 @@ use crate::errors::{AppError, Result};
 
 pub const RUST_ANALYZER_COMMAND: &str = "rust-analyzer";
 const DEFAULT_LSP_RETRIES: usize = 1;
+const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "namespace",
+    "type",
+    "class",
+    "enum",
+    "interface",
+    "struct",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "enumMember",
+    "event",
+    "function",
+    "method",
+    "macro",
+    "keyword",
+    "modifier",
+    "comment",
+    "string",
+    "number",
+    "regexp",
+    "operator",
+    "decorator",
+];
+const SEMANTIC_TOKEN_MODIFIERS: &[&str] = &[
+    "declaration",
+    "definition",
+    "readonly",
+    "static",
+    "deprecated",
+    "abstract",
+    "async",
+    "modification",
+    "documentation",
+    "defaultLibrary",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LspProviderKind {
@@ -65,6 +103,61 @@ pub struct LspClientHealth {
     pub command: String,
     pub status: LspClientHealthStatus,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEdit {
+    pub edits: Vec<LspTextEdit>,
+    pub unsupported_operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspTextEdit {
+    pub path: PathBuf,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEditApplyReport {
+    pub dry_run: bool,
+    pub edit_count: usize,
+    pub changed_files: Vec<PathBuf>,
+    pub unsupported_operations: Vec<String>,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeActionCandidate {
+    pub title: String,
+    pub kind: String,
+    pub edit: WorkspaceEdit,
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSymbolNode {
+    pub name: String,
+    pub kind: String,
+    pub path: PathBuf,
+    pub line: usize,
+    pub column: Option<usize>,
+    pub end_line: usize,
+    pub end_column: Option<usize>,
+    #[serde(default)]
+    pub children: Vec<DocumentSymbolNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticToken {
+    pub line: usize,
+    pub start_column: usize,
+    pub length: usize,
+    pub token_type: String,
+    pub modifiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,6 +526,56 @@ impl LspClient {
         code_actions_to_items(location, response.get("result").unwrap_or(&Value::Null))
     }
 
+    pub fn code_action_candidates(&mut self, location: &Location) -> Result<Vec<CodeActionCandidate>> {
+        self.code_action_candidates_with_only(location, &[])
+    }
+
+    fn code_action_candidates_with_only(
+        &mut self,
+        location: &Location,
+        only: &[&str],
+    ) -> Result<Vec<CodeActionCandidate>> {
+        self.open_document(location.path())?;
+        let only_value = if only.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(only.iter().map(|value| Value::String((*value).to_string())).collect())
+        };
+        let mut context = json!({ "diagnostics": [] });
+        if !only_value.is_null() {
+            context["only"] = only_value;
+        }
+        let response = self.request_with_retry(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": text_document(location.path())?,
+                "range": point_range(location),
+                "context": context
+            }),
+        )?;
+
+        code_action_candidates_from_value(response.get("result").unwrap_or(&Value::Null))
+    }
+
+    pub fn organize_imports_candidates(&mut self, path: &Path) -> Result<Vec<CodeActionCandidate>> {
+        self.open_document(path)?;
+        let location = Location::new(path, Some(1), Some(1));
+        self.code_action_candidates_with_only(&location, &["source.organizeImports"])
+    }
+
+    pub fn apply_code_action(
+        &mut self,
+        location: &Location,
+        one_based_index: usize,
+        dry_run: bool,
+    ) -> Result<WorkspaceEditApplyReport> {
+        let actions = self.code_action_candidates(location)?;
+        let action = actions
+            .get(one_based_index.saturating_sub(1))
+            .ok_or_else(|| AppError::General(format!("Code action index out of range: {one_based_index}")))?;
+        apply_workspace_edit(&action.edit, dry_run)
+    }
+
     pub fn diagnostics(&mut self, path: &Path) -> Result<Vec<CodeItem>> {
         self.open_document(path)?;
 
@@ -499,6 +642,10 @@ impl LspClient {
     }
 
     pub fn rename_preview(&mut self, location: &Location, new_name: &str) -> Result<String> {
+        Ok(self.rename_edit(location, new_name)?.preview())
+    }
+
+    pub fn rename_edit(&mut self, location: &Location, new_name: &str) -> Result<WorkspaceEdit> {
         self.open_document(location.path())?;
         let response = self.request_with_retry(
             "textDocument/rename",
@@ -508,7 +655,52 @@ impl LspClient {
                 "newName": new_name,
             }),
         )?;
-        workspace_edit_to_preview(response.get("result").unwrap_or(&Value::Null))
+        workspace_edit_from_value(response.get("result").unwrap_or(&Value::Null))
+    }
+
+    pub fn apply_rename(
+        &mut self,
+        location: &Location,
+        new_name: &str,
+        dry_run: bool,
+    ) -> Result<WorkspaceEditApplyReport> {
+        let edit = self.rename_edit(location, new_name)?;
+        apply_workspace_edit(&edit, dry_run)
+    }
+
+    pub fn document_outline(&mut self, path: &Path) -> Result<Vec<DocumentSymbolNode>> {
+        self.open_document(path)?;
+        let response = self.request_with_retry(
+            "textDocument/documentSymbol",
+            json!({
+                "textDocument": text_document(path)?,
+            }),
+        )?;
+        document_outline_from_value(path, response.get("result").unwrap_or(&Value::Null))
+    }
+
+    pub fn breadcrumbs(&mut self, location: &Location) -> Result<Vec<DocumentSymbolNode>> {
+        let outline = self.document_outline(location.path())?;
+        Ok(breadcrumbs_from_outline(
+            &outline,
+            location.line.unwrap_or(1),
+            location.column.unwrap_or(1),
+        ))
+    }
+
+    pub fn semantic_tokens(&mut self, path: &Path, line_filter: Option<usize>) -> Result<Vec<SemanticToken>> {
+        self.open_document(path)?;
+        let response = self.request_with_retry(
+            "textDocument/semanticTokens/full",
+            json!({
+                "textDocument": text_document(path)?,
+            }),
+        )?;
+        let mut tokens = semantic_tokens_from_value(response.get("result").unwrap_or(&Value::Null))?;
+        if let Some(line) = line_filter {
+            tokens.retain(|token| token.line == line);
+        }
+        Ok(tokens)
     }
 
     pub fn incoming_calls(&mut self, location: &Location) -> Result<Vec<CodeItem>> {
@@ -598,6 +790,18 @@ impl LspClient {
                         "codeAction": {},
                         "rename": {
                             "prepareSupport": true
+                        },
+                        "semanticTokens": {
+                            "dynamicRegistration": false,
+                            "requests": {
+                                "full": true,
+                                "range": false
+                            },
+                            "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                            "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                            "formats": ["relative"],
+                            "overlappingTokenSupport": false,
+                            "multilineTokenSupport": false
                         },
                         "callHierarchy": {},
                         "publishDiagnostics": {}
@@ -1037,6 +1241,50 @@ fn code_actions_to_items(location: &Location, value: &Value) -> Result<Vec<CodeI
         .collect())
 }
 
+fn code_action_candidates_from_value(value: &Value) -> Result<Vec<CodeActionCandidate>> {
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    values
+        .iter()
+        .map(|action| {
+            let title = action
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("code action")
+                .to_string();
+            let kind = action
+                .get("kind")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    action
+                        .get("command")
+                        .and_then(|command| command.get("command"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("code-action")
+                .to_string();
+            let edit = workspace_edit_from_value(action.get("edit").unwrap_or(&Value::Null))?;
+            let command = action
+                .get("command")
+                .and_then(|command| {
+                    command
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .or_else(|| command.as_str())
+                })
+                .map(ToOwned::to_owned);
+            Ok(CodeActionCandidate {
+                title,
+                kind,
+                edit,
+                command,
+            })
+        })
+        .collect()
+}
+
 fn workspace_symbols_to_items(value: &Value) -> Result<Vec<CodeItem>> {
     let Some(values) = value.as_array() else {
         return Ok(Vec::new());
@@ -1105,6 +1353,217 @@ fn document_symbols_to_items(path: &Path, value: &Value) -> Result<Vec<CodeItem>
     }
 
     Ok(items)
+}
+
+fn document_outline_from_value(path: &Path, value: &Value) -> Result<Vec<DocumentSymbolNode>> {
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    values
+        .iter()
+        .filter_map(|value| match document_symbol_node(path, value) {
+            Ok(Some(node)) => Some(Ok(node)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
+}
+
+fn document_symbol_node(path: &Path, value: &Value) -> Result<Option<DocumentSymbolNode>> {
+    if let Some(location) = value.get("location") {
+        let Some(mut node) = symbol_information_node(value, location)? else {
+            return Ok(None);
+        };
+        node.path = path.to_path_buf();
+        return Ok(Some(node));
+    }
+
+    let name = value.get("name").and_then(Value::as_str).unwrap_or("symbol");
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_u64)
+        .map(symbol_kind_label)
+        .unwrap_or("symbol");
+    let range = value.get("range").unwrap_or(&Value::Null);
+    let ((line, column), (end_line, end_column)) = edit_range_position(range);
+    let mut children = Vec::new();
+    if let Some(values) = value.get("children").and_then(Value::as_array) {
+        for child in values {
+            if let Some(child) = document_symbol_node(path, child)? {
+                children.push(child);
+            }
+        }
+    }
+
+    Ok(Some(DocumentSymbolNode {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        path: path.to_path_buf(),
+        line,
+        column: Some(column),
+        end_line,
+        end_column: Some(end_column),
+        children,
+    }))
+}
+
+fn symbol_information_node(value: &Value, location: &Value) -> Result<Option<DocumentSymbolNode>> {
+    let name = value.get("name").and_then(Value::as_str).unwrap_or("symbol");
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_u64)
+        .map(symbol_kind_label)
+        .unwrap_or("symbol");
+    let Some(uri) = location.get("uri").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let path = uri_to_path(uri)?;
+    let range = location.get("range").unwrap_or(&Value::Null);
+    let ((line, column), (end_line, end_column)) = edit_range_position(range);
+    Ok(Some(DocumentSymbolNode {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        path,
+        line,
+        column: Some(column),
+        end_line,
+        end_column: Some(end_column),
+        children: Vec::new(),
+    }))
+}
+
+fn breadcrumbs_from_outline(outline: &[DocumentSymbolNode], line: usize, column: usize) -> Vec<DocumentSymbolNode> {
+    for node in outline {
+        if !node_contains(node, line, column) {
+            continue;
+        }
+        let mut path = vec![node.clone()];
+        path.extend(breadcrumbs_from_outline(&node.children, line, column));
+        return path;
+    }
+    Vec::new()
+}
+
+fn node_contains(node: &DocumentSymbolNode, line: usize, column: usize) -> bool {
+    let start_column = node.column.unwrap_or(1);
+    let end_column = node.end_column.unwrap_or(usize::MAX);
+    if line < node.line || line > node.end_line {
+        return false;
+    }
+    if line == node.line && column < start_column {
+        return false;
+    }
+    if line == node.end_line && column > end_column {
+        return false;
+    }
+    true
+}
+
+pub fn format_outline_text(nodes: &[DocumentSymbolNode]) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        append_outline_node(&mut output, node, 0);
+    }
+    if output.is_empty() {
+        output.push_str("No document outline\n");
+    }
+    output
+}
+
+fn append_outline_node(output: &mut String, node: &DocumentSymbolNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    output.push_str(&format!(
+        "{}- {} [{}] {}:{}\n",
+        indent,
+        node.name,
+        node.kind,
+        node.path.display(),
+        node.line
+    ));
+    for child in &node.children {
+        append_outline_node(output, child, depth + 1);
+    }
+}
+
+pub fn format_breadcrumbs_text(nodes: &[DocumentSymbolNode]) -> String {
+    if nodes.is_empty() {
+        return "No breadcrumbs\n".to_string();
+    }
+    let names = nodes
+        .iter()
+        .map(|node| format!("{} [{}]", node.name, node.kind))
+        .collect::<Vec<String>>();
+    format!("{}\n", names.join(" > "))
+}
+
+fn semantic_tokens_from_value(value: &Value) -> Result<Vec<SemanticToken>> {
+    let Some(data) = value.get("data").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    if data.len() % 5 != 0 {
+        return Err(AppError::General("Invalid semantic token data length".to_string()));
+    }
+
+    let mut line = 0usize;
+    let mut start = 0usize;
+    let mut tokens = Vec::new();
+    for chunk in data.chunks(5) {
+        let delta_line = chunk[0].as_u64().unwrap_or(0) as usize;
+        let delta_start = chunk[1].as_u64().unwrap_or(0) as usize;
+        let length = chunk[2].as_u64().unwrap_or(0) as usize;
+        let token_type = chunk[3].as_u64().unwrap_or(0) as usize;
+        let modifier_bits = chunk[4].as_u64().unwrap_or(0);
+        line += delta_line;
+        if delta_line == 0 {
+            start += delta_start;
+        } else {
+            start = delta_start;
+        }
+        tokens.push(SemanticToken {
+            line: line + 1,
+            start_column: start + 1,
+            length,
+            token_type: SEMANTIC_TOKEN_TYPES
+                .get(token_type)
+                .copied()
+                .unwrap_or("unknown")
+                .to_string(),
+            modifiers: token_modifiers(modifier_bits),
+        });
+    }
+    Ok(tokens)
+}
+
+pub fn format_semantic_tokens_text(tokens: &[SemanticToken]) -> String {
+    if tokens.is_empty() {
+        return "No semantic tokens\n".to_string();
+    }
+    tokens
+        .iter()
+        .map(|token| {
+            let modifiers = if token.modifiers.is_empty() {
+                "-".to_string()
+            } else {
+                token.modifiers.join("|")
+            };
+            format!(
+                "{}:{} len={} type={} modifiers={}",
+                token.line, token.start_column, token.length, token.token_type, modifiers
+            )
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+        + "\n"
+}
+
+fn token_modifiers(bits: u64) -> Vec<String> {
+    SEMANTIC_TOKEN_MODIFIERS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| bits & (1_u64 << index) != 0)
+        .map(|(_, value)| (*value).to_string())
+        .collect()
 }
 
 fn collect_document_symbol(path: &Path, value: &Value, parent: Option<&str>, items: &mut Vec<CodeItem>) -> Result<()> {
@@ -1216,6 +1675,26 @@ fn range_position(range: &Value) -> (usize, Option<usize>) {
     (line, column)
 }
 
+fn edit_range_position(range: &Value) -> ((usize, usize), (usize, usize)) {
+    let start = range.get("start").unwrap_or(&Value::Null);
+    let end = range.get("end").unwrap_or(start);
+    (lsp_position_to_one_based(start), lsp_position_to_one_based(end))
+}
+
+fn lsp_position_to_one_based(position: &Value) -> (usize, usize) {
+    let line = position
+        .get("line")
+        .and_then(Value::as_u64)
+        .map(|line| line as usize + 1)
+        .unwrap_or(1);
+    let column = position
+        .get("character")
+        .and_then(Value::as_u64)
+        .map(|column| column as usize + 1)
+        .unwrap_or(1);
+    (line, column)
+}
+
 fn hover_to_string(value: &Value) -> String {
     let contents = value.get("contents").unwrap_or(value);
     let text = match contents {
@@ -1242,66 +1721,126 @@ fn hover_to_string(value: &Value) -> String {
     }
 }
 
-fn workspace_edit_to_preview(value: &Value) -> Result<String> {
-    if value.is_null() {
-        return Ok("No rename edits".to_string());
+impl WorkspaceEdit {
+    pub fn preview(&self) -> String {
+        let mut output = String::from("# LSP Workspace Edit Preview\n\n");
+        if self.edits.is_empty() && self.unsupported_operations.is_empty() {
+            output.push_str("No edits\n");
+            return output;
+        }
+
+        let mut grouped = BTreeMap::<PathBuf, Vec<&LspTextEdit>>::new();
+        for edit in &self.edits {
+            grouped.entry(edit.path.clone()).or_default().push(edit);
+        }
+        for (path, edits) in grouped {
+            output.push_str(&format!("## {}\n", path.display()));
+            for edit in edits {
+                let new_text = edit.new_text.replace('\n', "\\n");
+                output.push_str(&format!(
+                    "- {}:{}-{}:{} -> `{}`\n",
+                    edit.start_line, edit.start_column, edit.end_line, edit.end_column, new_text
+                ));
+            }
+            output.push('\n');
+        }
+        if !self.unsupported_operations.is_empty() {
+            output.push_str("## Unsupported Operations\n");
+            for operation in &self.unsupported_operations {
+                output.push_str(&format!("- {operation}\n"));
+            }
+            output.push('\n');
+        }
+        output.push_str(&format!("Total edits: {}\n", self.edits.len()));
+        output
+    }
+}
+
+pub fn apply_workspace_edit(edit: &WorkspaceEdit, dry_run: bool) -> Result<WorkspaceEditApplyReport> {
+    let preview = edit.preview();
+    let mut grouped = BTreeMap::<PathBuf, Vec<LspTextEdit>>::new();
+    for text_edit in &edit.edits {
+        grouped
+            .entry(text_edit.path.clone())
+            .or_default()
+            .push(text_edit.clone());
     }
 
-    let mut output = String::from("# LSP Rename Preview\n\n");
-    let mut edit_count = 0usize;
+    let mut changed_files = Vec::new();
+    for (path, edits) in grouped {
+        let original = fs::read_to_string(&path)?;
+        let updated = apply_text_edits_to_string(&original, &edits, &path)?;
+        if updated != original {
+            changed_files.push(path.clone());
+            if !dry_run {
+                fs::write(&path, updated)?;
+            }
+        }
+    }
 
+    Ok(WorkspaceEditApplyReport {
+        dry_run,
+        edit_count: edit.edits.len(),
+        changed_files,
+        unsupported_operations: edit.unsupported_operations.clone(),
+        preview,
+    })
+}
+
+fn workspace_edit_from_value(value: &Value) -> Result<WorkspaceEdit> {
+    if value.is_null() {
+        return Ok(WorkspaceEdit::default());
+    }
+
+    let mut edit = WorkspaceEdit::default();
     if let Some(changes) = value.get("changes").and_then(Value::as_object) {
         for (uri, edits) in changes {
             let path = uri_to_path(uri)?;
-            edit_count += append_text_edits(&mut output, &path, edits);
+            edit.edits.extend(parse_text_edits(&path, edits)?);
         }
     }
 
     if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
         for change in document_changes {
             let Some(text_document) = change.get("textDocument") else {
-                append_resource_operation(&mut output, change);
+                edit.unsupported_operations.push(resource_operation_label(change));
                 continue;
             };
             let Some(uri) = text_document.get("uri").and_then(Value::as_str) else {
                 continue;
             };
             let path = uri_to_path(uri)?;
-            edit_count += append_text_edits(&mut output, &path, change.get("edits").unwrap_or(&Value::Null));
+            edit.edits
+                .extend(parse_text_edits(&path, change.get("edits").unwrap_or(&Value::Null))?);
         }
     }
 
-    if edit_count == 0 && output.trim() == "# LSP Rename Preview" {
-        output.push_str("No rename edits\n");
-    } else {
-        output.push_str(&format!("Total edits: {edit_count}\n"));
-    }
-
-    Ok(output)
+    Ok(edit)
 }
 
-fn append_text_edits(output: &mut String, path: &Path, edits: &Value) -> usize {
+fn parse_text_edits(path: &Path, edits: &Value) -> Result<Vec<LspTextEdit>> {
     let Some(values) = edits.as_array() else {
-        return 0;
+        return Ok(Vec::new());
     };
 
-    output.push_str(&format!("## {}\n", path.display()));
-    for edit in values {
-        let range = edit.get("range").unwrap_or(&Value::Null);
-        let (line, column) = range_position(range);
-        let new_text = edit
-            .get("newText")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .replace('\n', "\\n");
-        let column = column.map(|value| format!(":{value}")).unwrap_or_default();
-        output.push_str(&format!("- {line}{column} -> `{new_text}`\n"));
-    }
-    output.push('\n');
-    values.len()
+    values
+        .iter()
+        .map(|edit| {
+            let range = edit.get("range").unwrap_or(&Value::Null);
+            let ((start_line, start_column), (end_line, end_column)) = edit_range_position(range);
+            Ok(LspTextEdit {
+                path: path.to_path_buf(),
+                start_line,
+                start_column,
+                end_line,
+                end_column,
+                new_text: edit.get("newText").and_then(Value::as_str).unwrap_or("").to_string(),
+            })
+        })
+        .collect()
 }
 
-fn append_resource_operation(output: &mut String, operation: &Value) {
+fn resource_operation_label(operation: &Value) -> String {
     let kind = operation.get("kind").and_then(Value::as_str).unwrap_or("resource");
     let uri = operation
         .get("uri")
@@ -1309,7 +1848,102 @@ fn append_resource_operation(output: &mut String, operation: &Value) {
         .or_else(|| operation.get("newUri"))
         .and_then(Value::as_str)
         .unwrap_or("<unknown>");
-    output.push_str(&format!("## {kind}\n- {uri}\n\n"));
+    format!("{kind}: {uri}")
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTextEdit {
+    start: usize,
+    end: usize,
+    new_text: String,
+}
+
+fn apply_text_edits_to_string(original: &str, edits: &[LspTextEdit], path: &Path) -> Result<String> {
+    let mut resolved = edits
+        .iter()
+        .map(|edit| {
+            let start = line_column_to_offset(original, edit.start_line, edit.start_column, path)?;
+            let end = line_column_to_offset(original, edit.end_line, edit.end_column, path)?;
+            if start > end {
+                return Err(AppError::General(format!(
+                    "Invalid LSP edit range in {}: start is after end",
+                    path.display()
+                )));
+            }
+            Ok(ResolvedTextEdit {
+                start,
+                end,
+                new_text: edit.new_text.clone(),
+            })
+        })
+        .collect::<Result<Vec<ResolvedTextEdit>>>()?;
+    resolved.sort_by_key(|edit| (edit.start, edit.end));
+    for pair in resolved.windows(2) {
+        if pair[0].end > pair[1].start {
+            return Err(AppError::General(format!(
+                "Overlapping LSP edits are not supported for {}",
+                path.display()
+            )));
+        }
+    }
+
+    let mut updated = original.to_string();
+    for edit in resolved.into_iter().rev() {
+        updated.replace_range(edit.start..edit.end, &edit.new_text);
+    }
+    Ok(updated)
+}
+
+fn line_column_to_offset(text: &str, line: usize, column: usize, path: &Path) -> Result<usize> {
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    for (index, ch) in text.char_indices() {
+        if current_line == line {
+            return column_to_offset_in_line(text, line_start, column, path);
+        }
+        if ch == '\n' {
+            current_line += 1;
+            line_start = index + ch.len_utf8();
+        }
+    }
+
+    if current_line == line {
+        return column_to_offset_in_line(text, line_start, column, path);
+    }
+    if current_line + 1 == line && column == 1 {
+        return Ok(text.len());
+    }
+
+    Err(AppError::General(format!(
+        "LSP edit line {line} is outside {}",
+        path.display()
+    )))
+}
+
+fn column_to_offset_in_line(text: &str, line_start: usize, column: usize, path: &Path) -> Result<usize> {
+    let target = column.saturating_sub(1);
+    let line = &text[line_start..];
+    for (char_index, (byte_index, ch)) in line.char_indices().enumerate() {
+        if ch == '\n' {
+            break;
+        }
+        if char_index == target {
+            return Ok(line_start + byte_index);
+        }
+    }
+
+    let line_end = line
+        .find('\n')
+        .map(|offset| line_start + offset)
+        .unwrap_or_else(|| text.len());
+    if line[..line_end.saturating_sub(line_start)].chars().count() == target {
+        return Ok(line_end);
+    }
+
+    Err(AppError::General(format!(
+        "LSP edit column {column} is outside {}",
+        path.display()
+    )))
 }
 
 fn symbol_kind_label(kind: u64) -> &'static str {
@@ -1587,5 +2221,121 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].display_text().contains("callee [outgoing]"));
         assert_eq!(items[0].location.column, Some(4));
+    }
+
+    #[test]
+    fn workspace_edit_applies_and_supports_dry_run() {
+        let path = std::env::temp_dir().join(format!("fcs_lsp_edit_{}.rs", std::process::id()));
+        fs::write(&path, "fn main() {\n    let value = 1;\n}\n").unwrap();
+        let edit = WorkspaceEdit {
+            edits: vec![LspTextEdit {
+                path: path.clone(),
+                start_line: 2,
+                start_column: 9,
+                end_line: 2,
+                end_column: 14,
+                new_text: "count".to_string(),
+            }],
+            unsupported_operations: Vec::new(),
+        };
+
+        let dry_run = apply_workspace_edit(&edit, true).unwrap();
+        assert!(dry_run.dry_run);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn main() {\n    let value = 1;\n}\n"
+        );
+
+        let applied = apply_workspace_edit(&edit, false).unwrap();
+        assert_eq!(applied.changed_files, vec![path.clone()]);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn main() {\n    let count = 1;\n}\n"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn workspace_edit_rejects_overlapping_ranges() {
+        let path = PathBuf::from("/tmp/fcs_lsp_overlap.rs");
+        let edits = vec![
+            LspTextEdit {
+                path: path.clone(),
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 4,
+                new_text: "abc".to_string(),
+            },
+            LspTextEdit {
+                path: path.clone(),
+                start_line: 1,
+                start_column: 3,
+                end_line: 1,
+                end_column: 5,
+                new_text: "de".to_string(),
+            },
+        ];
+
+        let error = apply_text_edits_to_string("value\n", &edits, &path).unwrap_err();
+
+        assert!(error.to_string().contains("Overlapping LSP edits"));
+    }
+
+    #[test]
+    fn outline_and_breadcrumbs_preserve_nested_symbols() {
+        let path = PathBuf::from("/tmp/main.rs");
+        let value = json!([
+            {
+                "name": "App",
+                "kind": 5,
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 20, "character": 0 }
+                },
+                "children": [
+                    {
+                        "name": "run",
+                        "kind": 6,
+                        "range": {
+                            "start": { "line": 4, "character": 4 },
+                            "end": { "line": 9, "character": 5 }
+                        }
+                    }
+                ]
+            }
+        ]);
+
+        let outline = document_outline_from_value(&path, &value).unwrap();
+        let breadcrumbs = breadcrumbs_from_outline(&outline, 5, 5);
+        let formatted = format_breadcrumbs_text(&breadcrumbs);
+
+        assert_eq!(outline[0].name, "App");
+        assert_eq!(outline[0].children[0].name, "run");
+        assert!(formatted.contains("App [class] > run [method]"));
+    }
+
+    #[test]
+    fn semantic_tokens_decode_relative_lsp_data() {
+        let value = json!({
+            "data": [
+                0, 0, 4, 12, 3,
+                0, 5, 5, 8, 0,
+                2, 2, 3, 15, 0
+            ]
+        });
+
+        let tokens = semantic_tokens_from_value(&value).unwrap();
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].start_column, 1);
+        assert_eq!(tokens[0].token_type, "function");
+        assert_eq!(tokens[0].modifiers, vec!["declaration", "definition"]);
+        assert_eq!(tokens[1].start_column, 6);
+        assert_eq!(tokens[1].token_type, "variable");
+        assert_eq!(tokens[2].line, 3);
+        assert_eq!(tokens[2].token_type, "keyword");
     }
 }

@@ -18,7 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::config::Config;
-use crate::core::{CodeItem, Location};
+use crate::core::{CodeItem, CodeItemKind, Location};
 use crate::errors::Result;
 use actions::{action_for_key, goto_action_for_key, AppAction};
 use dap_worker::{DapCommand, DapWorker};
@@ -29,7 +29,7 @@ use sources::{
 };
 #[cfg(test)]
 use sources::{SourceRequest, SourceResponse};
-use state::{TuiPersistentState, TuiSavedItem, TuiSavedLocation};
+use state::{TuiPersistentState, TuiSavedBreakpoint, TuiSavedItem, TuiSavedLocation};
 
 const HELP_TEXT: &str = "? help  / query  : command  n/N cycle  p pin  [/ ] back/fwd  gd/gr jump  Enter open";
 const HELP_OVERLAY_TEXT: &str = "\
@@ -53,6 +53,16 @@ Pins, trace, debug
   a / b / B           bookmark / breakpoint / trace breakpoints
   D / X               debug source / run debug profile
   : dap smoke         run a mock DAP session and show threads/stack/variables
+  : dap start         start interactive mock DAP session
+  : dap start <name>  start a saved DAP profile in mock mode
+  : dap real <cmd>    start the current debug profile with a real DAP adapter
+  : dap sync          synchronize current TUI breakpoints to the DAP session
+  : dap next          continue/pause/step-in/step-out/restart/stop/jump also supported
+  : dap adapters      show discovered adapter commands in the status line
+  : watch add <expr>  evaluate a watch expression on refresh
+  : watch clear       remove all watch expressions
+  : eval <expr>       evaluate once in the selected frame
+  F5/F10/F11          continue / next / step-in (shift-F11 step-out, ctrl-F5 stop)
   x                   delete selected debug item
 
 Command palette
@@ -94,7 +104,7 @@ struct AppState {
     selected: usize,
     pinned_items: Vec<CodeItem>,
     trace_items: Vec<CodeItem>,
-    breakpoints: Vec<Location>,
+    breakpoints: Vec<crate::dap::DapBreakpoint>,
     debug_profiles: Vec<crate::debugger::DebugProfile>,
     dap_snapshot: crate::dap::DapSessionSnapshot,
     navigation: Vec<CodeItem>,
@@ -104,6 +114,7 @@ struct AppState {
     preview_cache: RefCell<PreviewCache>,
     debug_binary: PathBuf,
     semantic_status: String,
+    startup_plan: Option<crate::workspace::WorkspaceStartupPlan>,
     status: String,
     status_level: StatusLevel,
     should_quit: bool,
@@ -128,12 +139,21 @@ impl AppState {
         let navigation_index = persisted_state
             .navigation_index
             .filter(|index| *index < navigation.len());
-        let breakpoints = persisted_state
-            .breakpoints
-            .clone()
-            .into_iter()
-            .map(TuiSavedLocation::into_location)
-            .collect::<Vec<Location>>();
+        let breakpoints = if persisted_state.debug_breakpoints.is_empty() {
+            persisted_state
+                .breakpoints
+                .clone()
+                .into_iter()
+                .map(|location| crate::dap::DapBreakpoint::from_location(&location.into_location()))
+                .collect::<Vec<crate::dap::DapBreakpoint>>()
+        } else {
+            persisted_state
+                .debug_breakpoints
+                .clone()
+                .into_iter()
+                .map(TuiSavedBreakpoint::into_breakpoint)
+                .collect::<Vec<crate::dap::DapBreakpoint>>()
+        };
         let locked_preview = persisted_state
             .locked_preview
             .clone()
@@ -152,6 +172,7 @@ impl AppState {
         let workspace_status =
             crate::workspace::status(Some(&root.to_string_lossy().to_string()), &config.lsp.clangd_command)?;
         let semantic_status = workspace_status.semantic_status_label().to_string();
+        let startup_plan = crate::workspace::startup_plan(&root, &config).ok();
         let lsp_worker = LspWorker::start(root.clone(), config.clone());
         let mut state = Self {
             config,
@@ -198,6 +219,7 @@ impl AppState {
                 })
                 .unwrap_or_else(|| PathBuf::from("target/debug/app")),
             semantic_status,
+            startup_plan,
             status: "Ready".to_string(),
             status_level: StatusLevel::Info,
             should_quit: false,
@@ -314,13 +336,13 @@ impl AppState {
             self.breakpoints
                 .iter()
                 .enumerate()
-                .map(|(index, location)| {
-                    let label = format!("breakpoint {}", index + 1);
+                .map(|(index, breakpoint)| {
+                    let label = breakpoint_label(index, breakpoint);
                     CodeItem::symbol(
-                        location.path.clone(),
-                        location.display_path(),
-                        location.line.unwrap_or(1),
-                        location.column,
+                        breakpoint.path.clone(),
+                        breakpoint.path.to_string_lossy().replace('\\', "/"),
+                        breakpoint.line,
+                        breakpoint.column,
                         label,
                         "debug",
                     )
@@ -388,7 +410,22 @@ impl AppState {
             pinned_items: self.pinned_items.iter().map(TuiSavedItem::from_code_item).collect(),
             navigation: self.navigation.iter().map(TuiSavedItem::from_code_item).collect(),
             navigation_index: self.navigation_index.filter(|index| *index < self.navigation.len()),
-            breakpoints: self.breakpoints.iter().map(TuiSavedLocation::from_location).collect(),
+            breakpoints: self
+                .breakpoints
+                .iter()
+                .map(|breakpoint| {
+                    TuiSavedLocation::from_location(&Location::new(
+                        breakpoint.path.clone(),
+                        Some(breakpoint.line),
+                        breakpoint.column,
+                    ))
+                })
+                .collect(),
+            debug_breakpoints: self
+                .breakpoints
+                .iter()
+                .map(TuiSavedBreakpoint::from_breakpoint)
+                .collect(),
             locked_preview: self.locked_preview.as_ref().map(TuiSavedLocation::from_location),
             preview_scroll: self.preview_scroll,
             command_history,
@@ -519,8 +556,52 @@ impl AppState {
             return;
         };
 
-        self.breakpoints.push(location);
+        self.breakpoints
+            .push(crate::dap::DapBreakpoint::from_location(&location));
         self.status = format!("Breakpoint count: {}", self.breakpoints.len());
+    }
+
+    fn add_advanced_breakpoint(&mut self, kind: &str, value: &str) {
+        let Some(location) = self.current_location() else {
+            self.set_warning("No selected item for breakpoint");
+            return;
+        };
+
+        let mut breakpoint = crate::dap::DapBreakpoint::from_location(&location);
+        match kind {
+            "if" | "condition" => breakpoint.condition = Some(value.trim().to_string()),
+            "hit" | "hit-count" => breakpoint.hit_condition = Some(value.trim().to_string()),
+            "log" | "logpoint" => breakpoint.log_message = Some(value.trim().to_string()),
+            _ => {
+                self.set_warning(format!("Unknown breakpoint kind: {kind}"));
+                return;
+            }
+        }
+        self.breakpoints.push(breakpoint);
+        self.set_status(format!("Breakpoint count: {}", self.breakpoints.len()));
+    }
+
+    fn set_breakpoint_enabled(&mut self, index: usize, enabled: bool) {
+        if index == 0 || index > self.breakpoints.len() {
+            self.set_warning(format!("Breakpoint index out of range: {index}"));
+            return;
+        }
+        self.breakpoints[index - 1].enabled = enabled;
+        let state = if enabled { "enabled" } else { "disabled" };
+        self.set_status(format!("Breakpoint {index} {state}"));
+    }
+
+    fn delete_breakpoint_by_index(&mut self, index: usize) {
+        if index == 0 || index > self.breakpoints.len() {
+            self.set_warning(format!("Breakpoint index out of range: {index}"));
+            return;
+        }
+        self.breakpoints.remove(index - 1);
+        if self.mode == SourceMode::Debug {
+            self.results = self.debug_results();
+            self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        }
+        self.set_status(format!("Deleted breakpoint {index}"));
     }
 
     fn delete_selected(&mut self) -> Result<()> {
@@ -574,7 +655,8 @@ impl AppState {
     fn add_trace_breakpoints(&mut self) {
         let mut added = 0;
         for item in &self.trace_items {
-            self.breakpoints.push(item.location.clone());
+            self.breakpoints
+                .push(crate::dap::DapBreakpoint::from_location(&item.location));
             added += 1;
         }
         self.status = format!("Added {added} trace breakpoint(s)");
@@ -712,7 +794,12 @@ impl AppState {
             binary: self.debug_binary.clone(),
             cwd: Some(self.root.clone()),
             env: Vec::new(),
-            breakpoints: self.breakpoints.clone(),
+            breakpoints: self
+                .breakpoints
+                .iter()
+                .filter(|breakpoint| breakpoint.enabled)
+                .map(breakpoint_location)
+                .collect(),
             args: Vec::new(),
         }
     }
@@ -762,11 +849,15 @@ impl AppState {
                     value: entry.value,
                 })
                 .collect(),
-            breakpoints: session
-                .breakpoints
-                .iter()
-                .map(crate::dap::DapBreakpoint::from_location)
-                .collect(),
+            breakpoints: if self.current_debug_profile().is_some() {
+                session
+                    .breakpoints
+                    .iter()
+                    .map(crate::dap::DapBreakpoint::from_location)
+                    .collect()
+            } else {
+                self.breakpoints.clone()
+            },
             stop_on_entry: false,
         }
     }
@@ -777,6 +868,197 @@ impl AppState {
         self.pending_dap = Some((id, "DAP mock session"));
         self.set_status("DAP mock session: pending...");
         Ok(())
+    }
+
+    fn queue_dap_start(&mut self) -> Result<()> {
+        let profile = self.dap_profile();
+        self.queue_dap_command("DAP start", DapCommand::StartMock(profile))
+    }
+
+    fn queue_dap_start_profile(&mut self, name: &str) -> Result<()> {
+        let profile = crate::dap::load_profile(&self.root, name.trim())?;
+        self.queue_dap_command("DAP start profile", DapCommand::StartMock(profile))
+    }
+
+    fn queue_dap_real(&mut self, rest: &str) -> Result<()> {
+        let (profile, adapter_command) = self.dap_real_input(rest)?;
+        let mut spec = dap_adapter_spec_from_command(adapter_command, &self.root)?;
+        if spec.cwd.is_none() {
+            spec.cwd = Some(self.root.clone());
+        }
+        self.queue_dap_command("DAP real start", DapCommand::StartReal { spec, profile })
+    }
+
+    fn dap_real_input(&self, rest: &str) -> Result<(crate::dap::DapLaunchProfile, String)> {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Err(crate::errors::AppError::General(
+                "Usage: dap real <adapter-command...> or dap real <profile> -- <adapter-command...>".to_string(),
+            ));
+        }
+
+        if let Some((profile_name, adapter_command)) = rest.split_once(" -- ") {
+            let mut profile = crate::dap::load_profile(&self.root, profile_name.trim())?;
+            if profile.adapter == "mock" {
+                profile.adapter = adapter_id_from_command(adapter_command);
+            }
+            return Ok((profile, adapter_command.trim().to_string()));
+        }
+
+        let mut profile = self.dap_profile();
+        profile.adapter = adapter_id_from_command(rest);
+        Ok((profile, rest.to_string()))
+    }
+
+    fn queue_dap_command(&mut self, label: &'static str, command: DapCommand) -> Result<()> {
+        let id = self.dap_worker.request(command)?;
+        self.pending_dap = Some((id, label));
+        self.set_status(format!("{label}: pending..."));
+        Ok(())
+    }
+
+    fn queue_dap_breakpoint_sync(&mut self) -> Result<()> {
+        let profile = self.dap_profile();
+        self.queue_dap_command("DAP break sync", DapCommand::SyncBreakpoints(profile))
+    }
+
+    fn show_dap_adapters(&mut self) {
+        let adapters = crate::dap::discover_adapters()
+            .into_iter()
+            .take(6)
+            .map(|adapter| {
+                let state = if adapter.available { "ok" } else { "missing" };
+                format!("{}={} ({state})", adapter.adapter, adapter.command_line())
+            })
+            .collect::<Vec<String>>();
+        if adapters.is_empty() {
+            self.set_warning("No DAP adapter candidates configured");
+        } else {
+            self.set_status(format!("DAP adapters: {}", adapters.join("; ")));
+        }
+    }
+
+    fn queue_dap_control(&mut self, command: &str) -> Result<()> {
+        match command {
+            "refresh" => self.queue_dap_command("DAP refresh", DapCommand::Refresh),
+            "continue" | "cont" | "c" => self.queue_dap_command("DAP continue", DapCommand::Continue),
+            "pause" => self.queue_dap_command("DAP pause", DapCommand::Pause),
+            "next" | "n" => self.queue_dap_command("DAP next", DapCommand::Next),
+            "step" | "step-in" | "in" => self.queue_dap_command("DAP step-in", DapCommand::StepIn),
+            "step-out" | "out" => self.queue_dap_command("DAP step-out", DapCommand::StepOut),
+            "restart" => self.queue_dap_command("DAP restart", DapCommand::Restart),
+            "terminate" => self.queue_dap_command("DAP terminate", DapCommand::Terminate),
+            "disconnect" => self.queue_dap_command("DAP disconnect", DapCommand::Disconnect),
+            "stop" => self.queue_dap_command("DAP stop", DapCommand::Stop),
+            "adapters" => {
+                self.show_dap_adapters();
+                Ok(())
+            }
+            other => {
+                self.set_warning(format!("Unknown DAP command: {other}"));
+                Ok(())
+            }
+        }
+    }
+
+    fn queue_watch_add(&mut self, expression: &str) -> Result<()> {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            self.set_warning("Watch expression is empty");
+            return Ok(());
+        }
+        self.queue_dap_command("DAP watch add", DapCommand::AddWatch(expression.to_string()))
+    }
+
+    fn queue_watch_remove(&mut self, index: &str) -> Result<()> {
+        let index = index
+            .trim()
+            .parse::<usize>()
+            .map_err(|err| crate::errors::AppError::General(format!("Invalid watch index: {err}")))?;
+        self.queue_dap_command("DAP watch remove", DapCommand::RemoveWatch(index))
+    }
+
+    fn queue_watch_clear(&mut self) -> Result<()> {
+        self.queue_dap_command("DAP watch clear", DapCommand::ClearWatches)
+    }
+
+    fn queue_eval(&mut self, expression: &str) -> Result<()> {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            self.set_warning("Evaluate expression is empty");
+            return Ok(());
+        }
+        self.queue_dap_command("DAP evaluate", DapCommand::Evaluate(expression.to_string()))
+    }
+
+    fn add_dap_stopped_breakpoint(&mut self) {
+        let Some(location) = self.dap_stopped_location() else {
+            self.set_warning("DAP session has no stopped location");
+            return;
+        };
+
+        self.breakpoints
+            .push(crate::dap::DapBreakpoint::from_location(&location));
+        self.set_status(format!("Breakpoint count: {}", self.breakpoints.len()));
+    }
+
+    fn add_trace_breakpoint(&mut self) {
+        let Some(location) = self.current_location().or_else(|| self.dap_stopped_location()) else {
+            self.set_warning("No trace or DAP stopped location for breakpoint");
+            return;
+        };
+
+        self.breakpoints
+            .push(crate::dap::DapBreakpoint::from_location(&location));
+        self.set_status(format!("Breakpoint count: {}", self.breakpoints.len()));
+    }
+
+    fn save_dap_profile_from_trace(&mut self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            self.set_warning("DAP profile name is empty");
+            return Ok(());
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        let breakpoints = self
+            .trace_items
+            .iter()
+            .filter_map(|item| {
+                let line = item.location.line?;
+                let key = (item.location.path.clone(), line, item.location.column);
+                if seen.insert(key) {
+                    Some(crate::dap::DapBreakpoint::from_location(&item.location))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<crate::dap::DapBreakpoint>>();
+        if breakpoints.is_empty() {
+            self.set_warning("Trace has no line locations for a DAP profile");
+            return Ok(());
+        }
+
+        let mut profile = self.dap_profile();
+        profile.name = name.to_string();
+        profile.breakpoints = breakpoints;
+        crate::dap::save_profile(&self.root, profile)?;
+        self.set_status(format!("Saved DAP profile from trace: {name}"));
+        Ok(())
+    }
+
+    fn dap_stopped_location(&self) -> Option<Location> {
+        let stopped_location = self.dap_snapshot.stopped_location.as_ref()?;
+        let path = if stopped_location.path.is_absolute() {
+            stopped_location.path.clone()
+        } else {
+            self.root.join(&stopped_location.path)
+        };
+        Some(Location::new(
+            path,
+            Some(stopped_location.line),
+            stopped_location.column,
+        ))
     }
 
     fn poll_dap_worker(&mut self) {
@@ -818,8 +1100,58 @@ impl AppState {
             self.root.join(&stopped_location.path)
         };
         let location = Location::new(&path, Some(stopped_location.line), stopped_location.column);
-        crate::trace::record_location_for_workspace(&self.root, &location, "DAP stopped", "debug-stop")?;
+        let reason = snapshot.stop_reason.as_deref().unwrap_or("stopped");
+        let metadata = crate::trace::TraceMetadata {
+            session: Some(format!("dap:{}", snapshot.profile)),
+            parent: None,
+            branch: Some(snapshot.adapter.clone()),
+            tags: vec![
+                "dap".to_string(),
+                "debug".to_string(),
+                "stop".to_string(),
+                reason.to_string(),
+            ],
+            note: Some(dap_trace_note(snapshot)),
+            status: Some("observed".to_string()),
+            priority: None,
+        };
+        crate::trace::record_location_for_workspace_with_metadata(
+            &self.root,
+            &location,
+            &format!("DAP stopped: {reason}"),
+            "debug-stop",
+            metadata,
+        )?;
         Ok(true)
+    }
+
+    fn jump_to_dap_stopped_location(&mut self) {
+        let snapshot = &self.dap_snapshot;
+        let Some(stopped_location) = &snapshot.stopped_location else {
+            self.set_warning("DAP session has no stopped location");
+            return;
+        };
+
+        let path = if stopped_location.path.is_absolute() {
+            stopped_location.path.clone()
+        } else {
+            self.root.join(&stopped_location.path)
+        };
+        let location = Location::new(&path, Some(stopped_location.line), stopped_location.column);
+        let display = format!("{}:{}:{}", path.display(), stopped_location.line, snapshot.status);
+        let item = CodeItem::from_parts(
+            CodeItemKind::TextMatch,
+            "DAP stopped",
+            snapshot.status.clone(),
+            location,
+            display,
+        );
+        self.results = vec![item.clone()];
+        self.selected = 0;
+        self.preview_scroll = 0;
+        self.mode = SourceMode::Debug;
+        self.push_navigation(item);
+        self.set_status("Jumped to DAP stopped location");
     }
 
     fn preview_for_current(&self, height: u16) -> String {
@@ -1009,6 +1341,12 @@ impl AppState {
             AppAction::MoveSelection(delta) => self.move_selection(delta),
             AppAction::ScrollPreview(delta) => self.scroll_preview(delta),
             AppAction::TogglePreviewLock => self.toggle_preview_lock(),
+            AppAction::DapContinue => self.queue_dap_control("continue")?,
+            AppAction::DapPause => self.queue_dap_control("pause")?,
+            AppAction::DapNext => self.queue_dap_control("next")?,
+            AppAction::DapStepIn => self.queue_dap_control("step-in")?,
+            AppAction::DapStepOut => self.queue_dap_control("step-out")?,
+            AppAction::DapStop => self.queue_dap_control("stop")?,
             AppAction::Definition => self.show_definition()?,
             AppAction::References => self.show_references()?,
         }
@@ -1153,9 +1491,87 @@ impl AppState {
         }
 
         if let Some(rest) = command.strip_prefix("dap ") {
-            match rest.trim() {
+            let rest = rest.trim();
+            if let Some(adapter_command) = rest.strip_prefix("real ").or_else(|| rest.strip_prefix("start-real ")) {
+                self.queue_dap_real(adapter_command)?;
+                return Ok(true);
+            }
+            if let Some(profile_name) = rest.strip_prefix("start ") {
+                self.queue_dap_start_profile(profile_name)?;
+                return Ok(true);
+            }
+            match rest {
                 "smoke" | "mock" | "session" => self.queue_dap_mock_session()?,
+                "start" | "launch" => self.queue_dap_start()?,
+                "sync" | "break-sync" | "breakpoints" => self.queue_dap_breakpoint_sync()?,
+                "break" | "breakpoint" => self.add_dap_stopped_breakpoint(),
+                "jump" | "open" => self.jump_to_dap_stopped_location(),
+                "adapters" | "adapter" => self.show_dap_adapters(),
+                "refresh" | "continue" | "cont" | "c" | "pause" | "next" | "n" | "step" | "step-in" | "in"
+                | "step-out" | "out" | "restart" | "terminate" | "disconnect" | "stop" => {
+                    self.queue_dap_control(rest)?
+                }
                 other => self.set_warning(format!("Unknown DAP command: {other}")),
+            }
+            return Ok(true);
+        }
+
+        if let Some(rest) = command.strip_prefix("watch ") {
+            if let Some(expression) = rest.trim().strip_prefix("add ") {
+                self.queue_watch_add(expression)?;
+            } else if let Some(index) = rest
+                .trim()
+                .strip_prefix("del ")
+                .or_else(|| rest.trim().strip_prefix("delete "))
+            {
+                self.queue_watch_remove(index)?;
+            } else if matches!(rest.trim(), "clear" | "reset") {
+                self.queue_watch_clear()?;
+            } else if matches!(rest.trim(), "refresh" | "update") {
+                self.queue_dap_command("DAP watch refresh", DapCommand::RefreshWatches)?;
+            } else {
+                self.queue_watch_add(rest.trim())?;
+            }
+            return Ok(true);
+        }
+
+        if let Some(expression) = command.strip_prefix("eval ") {
+            self.queue_eval(expression)?;
+            return Ok(true);
+        }
+
+        if let Some(rest) = command.strip_prefix("break ") {
+            if let Some(value) = rest.trim().strip_prefix("if ") {
+                self.add_advanced_breakpoint("if", value);
+            } else if let Some(value) = rest.trim().strip_prefix("hit ") {
+                self.add_advanced_breakpoint("hit", value);
+            } else if let Some(value) = rest.trim().strip_prefix("log ") {
+                self.add_advanced_breakpoint("log", value);
+            } else if let Some(value) = rest.trim().strip_prefix("enable ") {
+                self.set_breakpoint_enabled(parse_index(value)?, true);
+            } else if let Some(value) = rest.trim().strip_prefix("disable ") {
+                self.set_breakpoint_enabled(parse_index(value)?, false);
+            } else if let Some(value) = rest
+                .trim()
+                .strip_prefix("delete ")
+                .or_else(|| rest.trim().strip_prefix("del "))
+            {
+                self.delete_breakpoint_by_index(parse_index(value)?);
+            } else if matches!(rest.trim(), "sync" | "dap-sync") {
+                self.queue_dap_breakpoint_sync()?;
+            } else {
+                self.add_breakpoint();
+            }
+            return Ok(true);
+        }
+
+        if let Some(rest) = command.strip_prefix("trace ") {
+            if matches!(rest.trim(), "break" | "breakpoint") {
+                self.add_trace_breakpoint();
+            } else if let Some(name) = rest.trim().strip_prefix("dap-profile ") {
+                self.save_dap_profile_from_trace(name)?;
+            } else {
+                self.set_warning(format!("Unknown trace command: {}", rest.trim()));
             }
             return Ok(true);
         }
@@ -1163,6 +1579,30 @@ impl AppState {
         match command {
             "dap-smoke" | "dap-mock" => {
                 self.queue_dap_mock_session()?;
+                Ok(true)
+            }
+            "dap-start" => {
+                self.queue_dap_start()?;
+                Ok(true)
+            }
+            "dap-sync" => {
+                self.queue_dap_breakpoint_sync()?;
+                Ok(true)
+            }
+            "dap-next" => {
+                self.queue_dap_control("next")?;
+                Ok(true)
+            }
+            "dap-continue" => {
+                self.queue_dap_control("continue")?;
+                Ok(true)
+            }
+            "dap-pause" => {
+                self.queue_dap_control("pause")?;
+                Ok(true)
+            }
+            "dap-restart" => {
+                self.queue_dap_control("restart")?;
                 Ok(true)
             }
             "pin" => {
@@ -1404,6 +1844,8 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
         adapter: "mock".to_string(),
         status: "DAP mock: idle".to_string(),
         profile: "none".to_string(),
+        selected_thread_id: None,
+        selected_frame_id: None,
         request_count: 0,
         response_count: 0,
         commands: Vec::new(),
@@ -1412,6 +1854,16 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
         stack: Vec::new(),
         scopes: Vec::new(),
         variables: Vec::new(),
+        breakpoints: Vec::new(),
+        thread_items: Vec::new(),
+        frame_items: Vec::new(),
+        scope_items: Vec::new(),
+        variable_items: Vec::new(),
+        watches: Vec::new(),
+        last_evaluation: None,
+        stop_reason: None,
+        last_event: None,
+        error: None,
         stopped_location: None,
     }
 }
@@ -1436,6 +1888,21 @@ fn dap_panel_lines(snapshot: &crate::dap::DapSessionSnapshot) -> Vec<String> {
     if !snapshot.variables.is_empty() {
         lines.push(format!("Variables: {}", limited_join(&snapshot.variables, 3)));
     }
+    if !snapshot.watches.is_empty() {
+        lines.push(format!("Watches: {}", limited_join(&snapshot.watches, 3)));
+    }
+    if !snapshot.breakpoints.is_empty() {
+        lines.push(format!("Breakpoints: {}", limited_join(&snapshot.breakpoints, 3)));
+    }
+    if let Some(evaluation) = &snapshot.last_evaluation {
+        lines.push(format!("Eval: {evaluation}"));
+    }
+    if let Some(reason) = &snapshot.stop_reason {
+        lines.push(format!("Stop reason: {reason}"));
+    }
+    if let Some(error) = &snapshot.error {
+        lines.push(format!("Error: {error}"));
+    }
     if let Some(location) = &snapshot.stopped_location {
         let column = location.column.map(|column| format!(":{column}")).unwrap_or_default();
         lines.push(format!(
@@ -1454,6 +1921,67 @@ fn dap_panel_lines(snapshot: &crate::dap::DapSessionSnapshot) -> Vec<String> {
     lines
 }
 
+fn breakpoint_location(breakpoint: &crate::dap::DapBreakpoint) -> Location {
+    Location::new(breakpoint.path.clone(), Some(breakpoint.line), breakpoint.column)
+}
+
+fn breakpoint_label(index: usize, breakpoint: &crate::dap::DapBreakpoint) -> String {
+    let mut parts = vec![format!("breakpoint {}", index + 1)];
+    if !breakpoint.enabled {
+        parts.push("disabled".to_string());
+    }
+    if let Some(condition) = &breakpoint.condition {
+        parts.push(format!("if {condition}"));
+    }
+    if let Some(hit_condition) = &breakpoint.hit_condition {
+        parts.push(format!("hit {hit_condition}"));
+    }
+    if let Some(log_message) = &breakpoint.log_message {
+        parts.push(format!("log {log_message}"));
+    }
+    parts.join(" ")
+}
+
+fn parse_index(value: &str) -> Result<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| crate::errors::AppError::General(format!("Invalid index: {err}")))
+}
+
+fn dap_adapter_spec_from_command(command: String, root: &std::path::Path) -> Result<crate::dap::DapAdapterProcessSpec> {
+    let mut parts = command
+        .split_whitespace()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<&str>>();
+    if parts.is_empty() {
+        return Err(crate::errors::AppError::General(
+            "DAP adapter command is empty".to_string(),
+        ));
+    }
+
+    let program = parts.remove(0);
+    Ok(crate::dap::DapAdapterProcessSpec {
+        command: PathBuf::from(program),
+        args: parts.into_iter().map(ToOwned::to_owned).collect(),
+        cwd: Some(root.to_path_buf()),
+        env: Vec::new(),
+    })
+}
+
+fn adapter_id_from_command(command: &str) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .and_then(|program| {
+            PathBuf::from(program)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "cppdbg".to_string())
+}
+
 fn limited_join(values: &[String], max: usize) -> String {
     let mut parts = values.iter().take(max).cloned().collect::<Vec<String>>();
     if values.len() > max {
@@ -1464,6 +1992,29 @@ fn limited_join(values: &[String], max: usize) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+fn dap_trace_note(snapshot: &crate::dap::DapSessionSnapshot) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("status={}", snapshot.status));
+    parts.push(format!("adapter={}", snapshot.adapter));
+    parts.push(format!("profile={}", snapshot.profile));
+    if let Some(reason) = &snapshot.stop_reason {
+        parts.push(format!("reason={reason}"));
+    }
+    if let Some(frame) = snapshot.stack.first() {
+        parts.push(format!("top_frame={frame}"));
+    }
+    if !snapshot.variables.is_empty() {
+        parts.push(format!("variables={}", limited_join(&snapshot.variables, 4)));
+    }
+    if !snapshot.watches.is_empty() {
+        parts.push(format!("watches={}", limited_join(&snapshot.watches, 4)));
+    }
+    if !snapshot.breakpoints.is_empty() {
+        parts.push(format!("breakpoints={}", limited_join(&snapshot.breakpoints, 4)));
+    }
+    parts.join("; ")
 }
 
 fn query_with_cursor(query: &str, cursor: usize, active: bool) -> String {
@@ -1591,7 +2142,39 @@ fn palette_command_names() -> &'static [&'static str] {
         "break",
         "debug",
         "dap smoke",
+        "dap start",
+        "dap start ",
+        "dap real ",
+        "dap sync",
+        "dap next",
+        "dap continue",
+        "dap pause",
+        "dap refresh",
+        "dap step-in",
+        "dap step-out",
+        "dap restart",
+        "dap terminate",
+        "dap disconnect",
+        "dap adapters",
+        "dap stop",
+        "dap jump",
+        "dap break",
         "dap-smoke",
+        "dap-sync",
+        "watch add ",
+        "watch del ",
+        "watch clear",
+        "watch refresh",
+        "eval ",
+        "break if ",
+        "break hit ",
+        "break log ",
+        "break enable ",
+        "break disable ",
+        "break delete ",
+        "break sync",
+        "trace breakpoint",
+        "trace dap-profile ",
         "run",
         "open",
         "refresh",
@@ -1638,7 +2221,7 @@ fn command_hint_text(command: &str) -> String {
 }
 
 fn command_help_text() -> String {
-    "Commands: source <mode> | query <text> | pin pins back forward cycle | def refs type impl symbols diag incoming outgoing hover trace break debug dap smoke run open refresh delete preview lock/up/down quit"
+    "Commands: source <mode> | query <text> | def refs type impl symbols diag incoming outgoing hover | trace breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down quit"
         .to_string()
 }
 
@@ -1719,6 +2302,16 @@ mod tests {
         assert_eq!(palette_command_to_action("def"), Some(AppAction::Definition));
         assert_eq!(palette_command_to_action(" outgoing "), Some(AppAction::OutgoingCalls));
         assert_eq!(palette_command_to_action("missing"), None);
+    }
+
+    #[test]
+    fn palette_suggests_debug_watch_commands() {
+        assert!(palette_command_matches("dap ref").contains(&"dap refresh"));
+        assert!(palette_command_matches("watch del").contains(&"watch del "));
+        assert!(palette_command_matches("dap real").contains(&"dap real "));
+        assert!(palette_command_matches("break sy").contains(&"break sync"));
+        assert!(palette_command_matches("trace dap").contains(&"trace dap-profile "));
+        assert!(command_help_text().contains("watch add/del/clear/refresh"));
     }
 
     #[test]

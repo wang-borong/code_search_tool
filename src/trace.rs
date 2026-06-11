@@ -43,6 +43,9 @@ pub struct TraceMetadata {
     pub parent: Option<String>,
     pub branch: Option<String>,
     pub tags: Vec<String>,
+    pub note: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +92,23 @@ pub struct TraceReplayStep {
     pub target: String,
     pub state: Option<String>,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceReplayPlan {
+    pub session: String,
+    pub entries: usize,
+    pub commands: Vec<TraceReplayCommand>,
+    pub debug_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceReplayCommand {
+    pub step: usize,
+    pub entry_id: String,
+    pub kind: String,
+    pub target: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +166,48 @@ pub struct TraceDiffEntry {
     pub changes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceInsightsReport {
+    pub session: String,
+    pub entries: usize,
+    pub status_counts: BTreeMap<String, usize>,
+    pub priority_counts: BTreeMap<String, usize>,
+    pub kind_counts: BTreeMap<String, usize>,
+    pub hot_files: Vec<TraceInsightCount>,
+    pub debug_events: Vec<TraceInsightEvent>,
+    pub unresolved_entries: Vec<TraceInsightEvent>,
+    pub nearest_symbols: Vec<TraceInsightSymbol>,
+    pub suggested_next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceInsightCount {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceInsightEvent {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceInsightSymbol {
+    pub entry_id: String,
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub symbol: String,
+    pub kind: String,
+    pub symbol_line: usize,
+    pub distance: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceSessionChange {
     Changed,
@@ -192,6 +254,16 @@ pub fn record_location_for_workspace(root: &Path, location: &Location, label: &s
     record_location_with_workspace(Some(root), location, label, kind)
 }
 
+pub fn record_location_for_workspace_with_metadata(
+    root: &Path,
+    location: &Location,
+    label: &str,
+    kind: &str,
+    metadata: TraceMetadata,
+) -> Result<()> {
+    record_location_with_workspace_and_metadata(Some(root), location, label, kind, metadata)
+}
+
 fn record_location_with_workspace(root: Option<&Path>, location: &Location, label: &str, kind: &str) -> Result<()> {
     record_location_with_workspace_and_metadata(root, location, label, kind, TraceMetadata::default())
 }
@@ -215,9 +287,9 @@ fn record_location_with_workspace_and_metadata(
         path: location.path.clone(),
         line: location.line,
         column: location.column,
-        note: None,
-        status: None,
-        priority: None,
+        note: metadata.note,
+        status: metadata.status,
+        priority: metadata.priority,
         session: metadata.session,
         parent: metadata.parent,
         branch: metadata.branch,
@@ -377,6 +449,41 @@ pub fn export_session_replay_json(name: &str, root: Option<&Path>) -> Result<Str
         .map_err(|err| AppError::General(err.to_string()))
 }
 
+pub fn session_replay_plan(
+    name: &str,
+    root: Option<&Path>,
+    program: Option<&str>,
+    profile_name: Option<&str>,
+) -> Result<TraceReplayPlan> {
+    let report = session_report(name, root)?;
+    Ok(build_replay_plan(&report, program, profile_name))
+}
+
+pub fn export_session_replay_plan_markdown(
+    name: &str,
+    root: Option<&Path>,
+    program: Option<&str>,
+    profile_name: Option<&str>,
+) -> Result<String> {
+    let plan = session_replay_plan(name, root, program, profile_name)?;
+    Ok(replay_plan_to_markdown(&plan))
+}
+
+pub fn export_session_replay_plan_json(
+    name: &str,
+    root: Option<&Path>,
+    program: Option<&str>,
+    profile_name: Option<&str>,
+) -> Result<String> {
+    let plan = session_replay_plan(name, root, program, profile_name)?;
+    serde_json::to_string_pretty(&plan)
+        .map(|mut json| {
+            json.push('\n');
+            json
+        })
+        .map_err(|err| AppError::General(err.to_string()))
+}
+
 pub fn export_session_structured_markdown(name: &str, root: Option<&Path>) -> Result<String> {
     let report = session_report(name, root)?;
     let mut output = String::from("# fcs Trace Structured Report\n\n");
@@ -409,6 +516,298 @@ pub fn export_session_diff_json(left_session: &str, right_session: &str, root: O
             json
         })
         .map_err(|err| AppError::General(err.to_string()))
+}
+
+pub fn session_insights(name: &str, root: Option<&Path>) -> Result<TraceInsightsReport> {
+    let report = session_report(name, root)?;
+    let index = match root {
+        Some(root) => crate::index::load(root)?,
+        None => None,
+    };
+    let kind_counts = count_values(report.entries.iter().map(|entry| entry.kind.as_str()));
+    let hot_files = count_values_sorted(
+        report
+            .entries
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().into_owned()),
+    )
+    .into_iter()
+    .take(10)
+    .map(|(name, count)| TraceInsightCount { name, count })
+    .collect::<Vec<_>>();
+    let debug_events = report
+        .entries
+        .iter()
+        .filter(|entry| is_debug_trace_entry(entry))
+        .map(trace_insight_event)
+        .collect::<Vec<_>>();
+    let unresolved_entries = report
+        .entries
+        .iter()
+        .filter(|entry| is_unresolved_trace_entry(entry))
+        .map(trace_insight_event)
+        .collect::<Vec<_>>();
+    let nearest_symbols = match (root, index.as_ref()) {
+        (Some(root), Some(index)) => nearest_symbols_for_entries(&report.entries, root, index),
+        _ => Vec::new(),
+    };
+    let suggested_next_steps = insight_next_steps(&report, root, index.as_ref(), &debug_events, &unresolved_entries);
+
+    Ok(TraceInsightsReport {
+        session: report.summary.name,
+        entries: report.summary.entries,
+        status_counts: report.status_counts,
+        priority_counts: report.priority_counts,
+        kind_counts,
+        hot_files,
+        debug_events,
+        unresolved_entries,
+        nearest_symbols,
+        suggested_next_steps,
+    })
+}
+
+pub fn export_session_insights_markdown(name: &str, root: Option<&Path>) -> Result<String> {
+    let insights = session_insights(name, root)?;
+    Ok(session_insights_to_markdown(&insights))
+}
+
+pub fn export_session_insights_json(name: &str, root: Option<&Path>) -> Result<String> {
+    let insights = session_insights(name, root)?;
+    serde_json::to_string_pretty(&insights)
+        .map(|mut json| {
+            json.push('\n');
+            json
+        })
+        .map_err(|err| AppError::General(err.to_string()))
+}
+
+fn session_insights_to_markdown(insights: &TraceInsightsReport) -> String {
+    let mut output = String::from("# fcs Trace Insights\n\n");
+    output.push_str(&format!("- session: {}\n", insights.session));
+    output.push_str(&format!("- entries: {}\n", insights.entries));
+    output.push_str(&format!("- statuses: {}\n", format_count_map(&insights.status_counts)));
+    output.push_str(&format!(
+        "- priorities: {}\n",
+        format_count_map(&insights.priority_counts)
+    ));
+    output.push_str(&format!("- kinds: {}\n\n", format_count_map(&insights.kind_counts)));
+
+    output.push_str("## Hot Files\n");
+    if insights.hot_files.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for item in &insights.hot_files {
+            output.push_str(&format!("- {} ({})\n", item.name, item.count));
+        }
+    }
+
+    output.push_str("\n## Debug Events\n");
+    append_insight_events(&mut output, &insights.debug_events);
+    output.push_str("\n## Unresolved Entries\n");
+    append_insight_events(&mut output, &insights.unresolved_entries);
+
+    output.push_str("\n## Nearest Indexed Symbols\n");
+    if insights.nearest_symbols.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for symbol in &insights.nearest_symbols {
+            let line = symbol.line.unwrap_or(1);
+            output.push_str(&format!(
+                "- `{}` {}:{} -> {} [{}] at line {} (distance {})\n",
+                symbol.entry_id,
+                symbol.path.display(),
+                line,
+                symbol.symbol,
+                symbol.kind,
+                symbol.symbol_line,
+                symbol.distance
+            ));
+        }
+    }
+
+    output.push_str("\n## Suggested Next Steps\n");
+    if insights.suggested_next_steps.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for step in &insights.suggested_next_steps {
+            output.push_str(&format!("- {step}\n"));
+        }
+    }
+    output
+}
+
+fn append_insight_events(output: &mut String, events: &[TraceInsightEvent]) {
+    if events.is_empty() {
+        output.push_str("- none\n");
+        return;
+    }
+
+    for event in events {
+        let line = event.line.unwrap_or(1);
+        let status = event.status.as_deref().unwrap_or("-");
+        let priority = event.priority.as_deref().unwrap_or("-");
+        output.push_str(&format!(
+            "- `{}` [{}] {}:{} - {} (status={}, priority={})\n",
+            event.id,
+            event.kind,
+            event.path.display(),
+            line,
+            event.label,
+            status,
+            priority
+        ));
+    }
+}
+
+fn trace_insight_event(entry: &TraceEntry) -> TraceInsightEvent {
+    TraceInsightEvent {
+        id: entry.id.clone(),
+        kind: entry.kind.clone(),
+        label: entry.label.clone(),
+        path: entry.path.clone(),
+        line: entry.line,
+        status: entry.status.clone(),
+        priority: entry.priority.clone(),
+    }
+}
+
+fn is_debug_trace_entry(entry: &TraceEntry) -> bool {
+    entry.kind.contains("debug")
+        || entry.kind.contains("dap")
+        || entry
+            .tags
+            .iter()
+            .any(|tag| tag.contains("debug") || tag.contains("dap"))
+}
+
+fn is_unresolved_trace_entry(entry: &TraceEntry) -> bool {
+    let Some(status) = entry.status.as_deref() else {
+        return true;
+    };
+    !matches!(
+        status,
+        "done" | "resolved" | "closed" | "fixed" | "verified" | "complete"
+    )
+}
+
+fn nearest_symbols_for_entries(
+    entries: &[TraceEntry],
+    root: &Path,
+    index: &crate::index::CodeIndex,
+) -> Vec<TraceInsightSymbol> {
+    entries
+        .iter()
+        .filter_map(|entry| nearest_symbol_for_entry(entry, root, index))
+        .collect()
+}
+
+fn nearest_symbol_for_entry(
+    entry: &TraceEntry,
+    root: &Path,
+    index: &crate::index::CodeIndex,
+) -> Option<TraceInsightSymbol> {
+    let line = entry.line?;
+    let path_key = trace_entry_index_path(root, &entry.path);
+    let symbol = index
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.path == path_key)
+        .min_by_key(|symbol| (symbol.line.abs_diff(line), Reverse(symbol.line)))?;
+    Some(TraceInsightSymbol {
+        entry_id: entry.id.clone(),
+        path: entry.path.clone(),
+        line: entry.line,
+        symbol: if symbol.name.is_empty() {
+            symbol.label.clone()
+        } else {
+            symbol.name.clone()
+        },
+        kind: symbol.kind.clone(),
+        symbol_line: symbol.line,
+        distance: symbol.line.abs_diff(line),
+    })
+}
+
+fn trace_entry_index_path(root: &Path, path: &Path) -> String {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root).unwrap_or(path)
+    } else {
+        path
+    };
+    relative.to_string_lossy().replace('\\', "/")
+}
+
+fn insight_next_steps(
+    report: &TraceSessionReport,
+    root: Option<&Path>,
+    index: Option<&crate::index::CodeIndex>,
+    debug_events: &[TraceInsightEvent],
+    unresolved_entries: &[TraceInsightEvent],
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    if root.is_some() && index.is_none() {
+        steps.push(
+            "Build the workspace index with `fcs index build` to connect trace entries to nearby symbols".to_string(),
+        );
+    }
+    if debug_events.is_empty() {
+        steps.push(format!(
+            "Create a debug profile from this session with `fcs dap from-trace {} <program>`",
+            report.summary.name
+        ));
+    }
+    if !unresolved_entries.is_empty() {
+        steps.push(format!(
+            "Review {} unresolved trace entry status value(s)",
+            unresolved_entries.len()
+        ));
+    }
+    if !report.structured.open_questions.is_empty() {
+        steps.push(format!(
+            "Resolve {} open question(s) captured in structured trace notes",
+            report.structured.open_questions.len()
+        ));
+    }
+    if report.structured.conclusions.is_empty() {
+        steps.push("Add a conclusion trace entry or tag once the investigation has an outcome".to_string());
+    }
+    steps
+}
+
+fn count_values<'a>(values: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        let normalized = if value.trim().is_empty() { "unset" } else { value };
+        *counts.entry(normalized.to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn count_values_sorted(values: impl Iterator<Item = String>) -> Vec<(String, usize)> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for value in values {
+        let normalized = if value.trim().is_empty() {
+            "unset".to_string()
+        } else {
+            value
+        };
+        *counts.entry(normalized).or_insert(0) += 1;
+    }
+    let mut items = counts.into_iter().collect::<Vec<(String, usize)>>();
+    items.sort_by_key(|(name, count)| (Reverse(*count), name.clone()));
+    items
+}
+
+fn format_count_map(counts: &BTreeMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return "none".to_string();
+    }
+    counts
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 fn entries_to_markdown(entries: Vec<TraceEntry>) -> String {
@@ -1132,6 +1531,79 @@ fn session_replay_to_markdown(report: &TraceSessionReport) -> String {
     output
 }
 
+fn build_replay_plan(
+    report: &TraceSessionReport,
+    program: Option<&str>,
+    profile_name: Option<&str>,
+) -> TraceReplayPlan {
+    let commands = report
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let target = trace_target(entry);
+            TraceReplayCommand {
+                step: index + 1,
+                entry_id: entry.id.clone(),
+                kind: entry.kind.clone(),
+                target: target.clone(),
+                command: format!("fcs preview {}", shell_quote(&format!("{target}:20"))),
+            }
+        })
+        .collect::<Vec<TraceReplayCommand>>();
+    let debug_command = program.map(|program| {
+        let mut command = format!(
+            "fcs dap from-trace {} {}",
+            shell_quote(&report.summary.name),
+            shell_quote(program)
+        );
+        if let Some(profile_name) = profile_name {
+            command.push_str(&format!(" --name {}", shell_quote(profile_name)));
+        }
+        command
+    });
+
+    TraceReplayPlan {
+        session: report.summary.name.clone(),
+        entries: report.entries.len(),
+        commands,
+        debug_command,
+    }
+}
+
+fn replay_plan_to_markdown(plan: &TraceReplayPlan) -> String {
+    let mut output = String::from("# fcs Trace Replay Plan\n\n");
+    output.push_str(&format!("- session: {}\n", plan.session));
+    output.push_str(&format!("- entries: {}\n\n", plan.entries));
+    output.push_str("## Commands\n\n");
+    if plan.commands.is_empty() {
+        output.push_str("- empty\n");
+    } else {
+        for command in &plan.commands {
+            output.push_str(&format!(
+                "{}. `{}` [{}] {}\n",
+                command.step, command.entry_id, command.kind, command.command
+            ));
+        }
+    }
+    if let Some(debug_command) = &plan.debug_command {
+        output.push_str("\n## Debug Profile\n\n");
+        output.push_str(&format!("```bash\n{debug_command}\n```\n"));
+    }
+    output
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '-' | '_' | ':'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn append_replay_markdown(output: &mut String, replay: &[TraceReplayStep]) {
     output.push_str("\n## Replay\n\n");
     if replay.is_empty() {
@@ -1749,5 +2221,59 @@ line = 3
         assert_eq!(structured.evidence.len(), 1);
         assert_eq!(structured.conclusions.len(), 1);
         assert_eq!(structured.open_questions.len(), 1);
+    }
+
+    #[test]
+    fn insights_correlate_trace_entries_with_index_symbols() {
+        let mut entry = test_entry("debug-1", "bug", "stopped in run", 12);
+        entry.kind = "dap-stop".to_string();
+        entry.status = Some("open".to_string());
+        let index = crate::index::CodeIndex {
+            version: 2,
+            root: "/tmp/project".to_string(),
+            built_at_unix: 1,
+            options: crate::index::IndexOptionsSnapshot::default(),
+            files: Vec::new(),
+            symbols: vec![crate::index::IndexedSymbol {
+                path: "src/main.rs".to_string(),
+                line: 10,
+                column: Some(1),
+                label: "run [function]".to_string(),
+                detail: "run [function]".to_string(),
+                name: "run".to_string(),
+                kind: "function".to_string(),
+                language: "rust".to_string(),
+                range: crate::index::IndexedSymbolRange {
+                    start_line: 10,
+                    start_column: 1,
+                    end_line: 10,
+                    end_column: 4,
+                },
+                parent: None,
+            }],
+        };
+        let symbols = nearest_symbols_for_entries(&[entry.clone()], Path::new("/tmp/project"), &index);
+        let insights = TraceInsightsReport {
+            session: "bug".to_string(),
+            entries: 1,
+            status_counts: count_optional_values([entry.status.as_deref()].into_iter()),
+            priority_counts: BTreeMap::new(),
+            kind_counts: count_values([entry.kind.as_str()].into_iter()),
+            hot_files: vec![TraceInsightCount {
+                name: "src/main.rs".to_string(),
+                count: 1,
+            }],
+            debug_events: vec![trace_insight_event(&entry)],
+            unresolved_entries: vec![trace_insight_event(&entry)],
+            nearest_symbols: symbols,
+            suggested_next_steps: vec!["review".to_string()],
+        };
+        let markdown = session_insights_to_markdown(&insights);
+
+        assert_eq!(insights.nearest_symbols[0].symbol, "run");
+        assert!(is_debug_trace_entry(&entry));
+        assert!(markdown.contains("# fcs Trace Insights"));
+        assert!(markdown.contains("run [function]"));
+        assert!(markdown.contains("review"));
     }
 }

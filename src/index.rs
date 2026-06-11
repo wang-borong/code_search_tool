@@ -1,16 +1,20 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::CodeItem;
 use crate::errors::{AppError, Result};
 
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 const INDEX_FILE_NAME: &str = "code_index.toml";
 const INDEX_TMP_EXTENSION: &str = "tmp";
+const INDEX_DAEMON_HEARTBEAT_FILE_NAME: &str = "index-daemon.toml";
+const MAX_DAEMON_REPORT_CYCLES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodeIndex {
@@ -39,6 +43,14 @@ pub struct IndexedFile {
     pub modified_unix: u64,
     #[serde(default)]
     pub language: String,
+    #[serde(default)]
+    pub content_hash: String,
+    #[serde(default)]
+    pub symbol_count: usize,
+    #[serde(default)]
+    pub last_indexed_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +88,12 @@ pub struct IndexBuildReport {
     pub unchanged_files: usize,
     pub changed_files: usize,
     pub removed_files: usize,
+    pub added_files: usize,
+    pub reindexed_files: usize,
+    pub reused_symbol_files: usize,
+    pub changed_paths_sample: Vec<String>,
+    pub removed_paths_sample: Vec<String>,
+    pub elapsed_ms: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +167,56 @@ pub struct IndexRefreshReport {
     pub build_report: Option<IndexBuildReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDaemonOptions {
+    pub interval_ms: u64,
+    pub max_cycles: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexDaemonCycle {
+    pub cycle: usize,
+    pub timestamp_unix: u64,
+    pub elapsed_ms: u128,
+    pub rebuilt: bool,
+    pub reason: String,
+    pub file_count: usize,
+    pub symbol_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDaemonReport {
+    pub root: PathBuf,
+    pub heartbeat_path: PathBuf,
+    pub cycles: Vec<IndexDaemonCycle>,
+    pub rebuilds: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexDaemonHeartbeat {
+    pub root: String,
+    pub pid: u32,
+    pub started_at_unix: u64,
+    pub updated_at_unix: u64,
+    pub interval_ms: u64,
+    pub cycles: usize,
+    pub rebuilds: usize,
+    pub last_rebuilt: bool,
+    pub last_reason: String,
+    #[serde(default)]
+    pub last_file_count: usize,
+    #[serde(default)]
+    pub last_symbol_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDaemonStatus {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub heartbeat: Option<IndexDaemonHeartbeat>,
+    pub stale: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexListKind {
     Files,
@@ -179,6 +247,7 @@ pub fn build(
     default_ignore: &[String],
     ignore_file: &Path,
 ) -> Result<IndexBuildReport> {
+    let started = Instant::now();
     let root = normalize_root(root);
     let previous = load_recoverable(&root)?;
     let previous_files = previous
@@ -192,7 +261,7 @@ pub fn build(
     let previous_paths = previous_files.keys().cloned().collect::<HashSet<String>>();
     let root_arg = root.to_string_lossy().to_string();
     let file_items = crate::files::find_files(Some(&root_arg), file_options, default_ignore, ignore_file)?;
-    let files = index_files(&root, &file_items)?;
+    let mut files = index_files(&root, &file_items)?;
     let current_paths = files.iter().map(|file| file.path.clone()).collect::<HashSet<String>>();
     let unchanged_files = files
         .iter()
@@ -203,6 +272,7 @@ pub fn build(
         })
         .count();
     let removed_files = previous_paths.difference(&current_paths).count();
+    let added_files = current_paths.difference(&previous_paths).count();
     let changed_files = files.len().saturating_sub(unchanged_files);
     let changed_paths = files
         .iter()
@@ -213,6 +283,8 @@ pub fn build(
         })
         .map(|file| file.path.clone())
         .collect::<HashSet<String>>();
+    let reindexed_files = changed_paths.len();
+    let reused_symbol_files = files.len().saturating_sub(reindexed_files);
     let mut symbols = index_symbols_incremental(
         &root,
         &files,
@@ -223,6 +295,7 @@ pub fn build(
         ignore_file,
     )?;
     finalize_symbol_metadata(&mut symbols);
+    apply_file_symbol_counts(&mut files, &symbols);
     let index = CodeIndex {
         version: INDEX_VERSION,
         root: root.to_string_lossy().to_string(),
@@ -245,6 +318,12 @@ pub fn build(
         unchanged_files,
         changed_files,
         removed_files,
+        added_files,
+        reindexed_files,
+        reused_symbol_files,
+        changed_paths_sample: sorted_sample(changed_paths.iter(), 5),
+        removed_paths_sample: sorted_sample(previous_paths.difference(&current_paths), 5),
+        elapsed_ms: started.elapsed().as_millis(),
     })
 }
 
@@ -476,6 +555,105 @@ pub fn refresh(
     })
 }
 
+pub fn run_polling_daemon(
+    root: &Path,
+    file_options: &[String],
+    default_ignore: &[String],
+    ignore_file: &Path,
+    options: IndexDaemonOptions,
+) -> Result<IndexDaemonReport> {
+    if options.max_cycles == Some(0) {
+        return Err(AppError::General(
+            "index daemon --max-cycles must be greater than zero".to_string(),
+        ));
+    }
+
+    let root = normalize_root(root);
+    let heartbeat_path = daemon_heartbeat_path(&root)?;
+    let started_at_unix = now_unix();
+    let pid = std::process::id();
+    let mut report = IndexDaemonReport {
+        root: root.clone(),
+        heartbeat_path: heartbeat_path.clone(),
+        cycles: Vec::new(),
+        rebuilds: 0,
+    };
+
+    loop {
+        let cycle_number = report.cycles.last().map_or(1, |cycle| cycle.cycle + 1);
+        let started = Instant::now();
+        let refresh_report = refresh(&root, file_options, default_ignore, ignore_file)?;
+        let elapsed_ms = started.elapsed().as_millis();
+        let status = status(&root)?;
+        let cycle = IndexDaemonCycle {
+            cycle: cycle_number,
+            timestamp_unix: now_unix(),
+            elapsed_ms,
+            rebuilt: refresh_report.rebuilt,
+            reason: refresh_report.reason,
+            file_count: status.file_count,
+            symbol_count: status.symbol_count,
+        };
+        if cycle.rebuilt {
+            report.rebuilds += 1;
+        }
+        write_daemon_heartbeat(
+            &heartbeat_path,
+            &IndexDaemonHeartbeat {
+                root: root.to_string_lossy().to_string(),
+                pid,
+                started_at_unix,
+                updated_at_unix: cycle.timestamp_unix,
+                interval_ms: options.interval_ms,
+                cycles: cycle.cycle,
+                rebuilds: report.rebuilds,
+                last_rebuilt: cycle.rebuilt,
+                last_reason: cycle.reason.clone(),
+                last_file_count: cycle.file_count,
+                last_symbol_count: cycle.symbol_count,
+            },
+        )?;
+        push_daemon_cycle(&mut report.cycles, cycle);
+
+        if options
+            .max_cycles
+            .is_some_and(|max_cycles| report.cycles.last().is_some_and(|cycle| cycle.cycle >= max_cycles))
+        {
+            break;
+        }
+        if options.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(options.interval_ms));
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn daemon_status(root: &Path) -> Result<IndexDaemonStatus> {
+    let root = normalize_root(root);
+    let path = daemon_heartbeat_path(&root)?;
+    if !path.exists() {
+        return Ok(IndexDaemonStatus {
+            path,
+            exists: false,
+            heartbeat: None,
+            stale: false,
+        });
+    }
+
+    let contents = fs::read_to_string(&path)?;
+    let heartbeat = toml::from_str::<IndexDaemonHeartbeat>(&contents)
+        .map_err(|err| AppError::General(format!("Corrupt index daemon heartbeat: {err}")))?;
+    let grace_secs = ((heartbeat.interval_ms / 1000).max(1) * 3).max(5);
+    let stale = now_unix().saturating_sub(heartbeat.updated_at_unix) > grace_secs;
+    Ok(IndexDaemonStatus {
+        path,
+        exists: true,
+        heartbeat: Some(heartbeat),
+        stale,
+    })
+}
+
 pub fn migrate_index_contents(contents: &str) -> Result<CodeIndex> {
     match parse_index_contents(contents) {
         IndexReadState::Ready { index, .. } => Ok(index),
@@ -549,6 +727,26 @@ pub fn query(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Res
 
 pub fn index_path(root: &Path) -> Result<PathBuf> {
     Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_FILE_NAME))
+}
+
+fn daemon_heartbeat_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_DAEMON_HEARTBEAT_FILE_NAME))
+}
+
+fn write_daemon_heartbeat(path: &Path, heartbeat: &IndexDaemonHeartbeat) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = toml::to_string_pretty(heartbeat).map_err(|err| AppError::General(err.to_string()))?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn push_daemon_cycle(cycles: &mut Vec<IndexDaemonCycle>, cycle: IndexDaemonCycle) {
+    if cycles.len() >= MAX_DAEMON_REPORT_CYCLES {
+        cycles.remove(0);
+    }
+    cycles.push(cycle);
 }
 
 fn write_index(path: &Path, index: &CodeIndex) -> Result<()> {
@@ -662,6 +860,9 @@ fn migrate_indexed_file(mut file: IndexedFile) -> IndexedFile {
     if file.language.is_empty() {
         file.language = language_for_path(Path::new(&file.path));
     }
+    if file.scan_error.as_deref() == Some("") {
+        file.scan_error = None;
+    }
     file
 }
 
@@ -762,6 +963,10 @@ fn file_metadata(root: &Path, path: &Path) -> Result<IndexedFile> {
         size_bytes: metadata.len(),
         modified_unix,
         language: language_for_path(path),
+        content_hash: content_hash(path)?,
+        symbol_count: 0,
+        last_indexed_unix: now_unix(),
+        scan_error: None,
     })
 }
 
@@ -826,7 +1031,38 @@ fn symbols_by_path(symbols: &[IndexedSymbol]) -> HashMap<String, Vec<IndexedSymb
 }
 
 fn is_same_file_snapshot(left: &IndexedFile, right: &IndexedFile) -> bool {
+    if !left.content_hash.is_empty() && !right.content_hash.is_empty() {
+        return left.path == right.path && left.content_hash == right.content_hash;
+    }
+
     left.path == right.path && left.size_bytes == right.size_bytes && left.modified_unix == right.modified_unix
+}
+
+fn apply_file_symbol_counts(files: &mut [IndexedFile], symbols: &[IndexedSymbol]) {
+    let mut counts = HashMap::<String, usize>::new();
+    for symbol in symbols {
+        *counts.entry(symbol.path.clone()).or_default() += 1;
+    }
+    let indexed_at = now_unix();
+    for file in files {
+        file.symbol_count = counts.get(&file.path).copied().unwrap_or(0);
+        file.last_indexed_unix = indexed_at;
+        file.scan_error = None;
+    }
+}
+
+fn sorted_sample<'a>(values: impl Iterator<Item = &'a String>, limit: usize) -> Vec<String> {
+    let mut sample = values.cloned().collect::<Vec<String>>();
+    sample.sort();
+    sample.truncate(limit);
+    sample
+}
+
+fn content_hash(path: &Path) -> Result<String> {
+    let contents = fs::read(path)?;
+    let mut hasher = DefaultHasher::new();
+    contents.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
 }
 
 fn finalize_symbol_metadata(symbols: &mut [IndexedSymbol]) {
@@ -995,10 +1231,10 @@ mod tests {
         assert_eq!(report.removed_files, 0);
         assert_eq!(index.version, INDEX_VERSION);
         assert!(!index.is_empty());
-        assert!(index
-            .files
-            .iter()
-            .any(|file| file.path == "src/main.rs" && file.language == "rust"));
+        assert!(index.files.iter().any(|file| file.path == "src/main.rs"
+            && file.language == "rust"
+            && !file.content_hash.is_empty()
+            && file.last_indexed_unix > 0));
         assert!(index.symbols.iter().any(|symbol| {
             symbol.name == "main"
                 && symbol.kind == "function"
@@ -1013,6 +1249,27 @@ mod tests {
         assert_eq!(status.changed_tracked_files, 0);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn file_snapshot_prefers_content_hash_over_size_and_mtime() {
+        let left = IndexedFile {
+            path: "src/lib.rs".to_string(),
+            size_bytes: 10,
+            modified_unix: 100,
+            language: "rust".to_string(),
+            content_hash: "aaaa".to_string(),
+            symbol_count: 1,
+            last_indexed_unix: 100,
+            scan_error: None,
+        };
+        let mut right = left.clone();
+
+        assert!(is_same_file_snapshot(&left, &right));
+
+        right.content_hash = "bbbb".to_string();
+
+        assert!(!is_same_file_snapshot(&left, &right));
     }
 
     #[test]
@@ -1132,6 +1389,36 @@ detail = "Config [struct]"
         assert!(report.file_count >= 2);
         assert!(!status.is_corrupt);
         assert_eq!(status.schema_status, IndexSchemaStatus::Current);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn polling_daemon_writes_readable_heartbeat() {
+        let temp_dir = temp_workspace_dir("daemon");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("main.rs"), "pub fn main() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+
+        let report = run_polling_daemon(
+            &temp_dir,
+            &[],
+            &[],
+            &ignore_file,
+            IndexDaemonOptions {
+                interval_ms: 0,
+                max_cycles: Some(1),
+            },
+        )
+        .unwrap();
+        let status = daemon_status(&temp_dir).unwrap();
+
+        assert_eq!(report.cycles.len(), 1);
+        assert!(report.heartbeat_path.exists());
+        assert!(status.exists);
+        assert_eq!(status.heartbeat.unwrap().cycles, 1);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

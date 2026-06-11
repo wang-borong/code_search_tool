@@ -14,6 +14,7 @@
 - 🧭 **文件与符号导航**：支持项目文件模糊查找，以及无需 clangd 的轻量级符号索引。
 - 🧠 **语义导航**：支持通过 clangd 查询定义、引用和文件诊断。
 - 🧵 **追踪会话**：自动记录打开过的位置，并支持手动书签、历史回放和调试器断点联动。
+- 🔎 **统一查询与服务快照**：支持字段化查询 index/trace，并可用前台 service 生成 workspace 状态快照。
 - 🧩 **声明式插件**：支持内置和项目级 TOML 插件，为项目提供可复用 commands/templates。
 - ⚙️ **配置灵活**：支持全局配置文件 `fcs.toml`，可定制快捷键、配色方案、默认忽略路径等。
 - 🙈 **智能忽略管理**：提供便捷的命令管理本地或全局缓存的 `.ignore` 规则。
@@ -111,8 +112,9 @@ fcs tui --debug-binary target/debug/app
 - `D`：切换到 Debug source，显示断点和已保存 debug profile。
 - `X`：显式启动 Debug source 中的 gdb 会话；在 Debug source 中选中 profile 时会运行该 profile。
 - `x`：在 Debug source 中删除当前 profile 或断点。
+- `F5` / `F6` / `F10` / `F11` / `Shift-F11` / `Ctrl-F5`：对 TUI DAP worker 执行 continue、pause、next、step in、step out、stop。
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
-- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace`、`break`、`debug`、`run`、`open`、`refresh`、`delete`、`quit`。
+- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：在状态栏显示快捷键提示。
 
@@ -239,15 +241,89 @@ fcs index refresh
 fcs index prewarm
 fcs index compact --dry-run
 
+# 前台轮询刷新索引；常驻模式省略 --max-cycles
+fcs index daemon --interval-ms 2000 --max-cycles 1 --foreground
+fcs index daemon-status
+
 # 记录缓存操作延迟，并写入 workspace cache 的 latency-smoke.tsv
 fcs index bench --limit 50 --query main
 ```
 
-索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取只作用于新增或变化文件。
+索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
 
 ---
 
-### 6. LSP 语义导航
+### 6. 统一查询、Service 与 Benchmark
+
+`fcs query` 提供一个统一的字段化查询入口，可以同时查缓存 index 和 trace 历史。常用字段包括 `kind:`、`lang:` / `language:`、`path:`、`name:`、`text:`、`source:`、`status:`、`priority:`、`session:` 和 `tag:`。
+
+```bash
+# 从 index + trace 中查询
+fcs query "kind:function lang:rust text:parse" . --source all --format json
+
+# 只查 index，适合脚本化筛选符号
+fcs query "path:src name:main" . --source index --limit 20
+
+# 只查 trace，适合复盘调查状态
+fcs query "session:bug-42 status:open tag:hot" . --source trace
+
+# 解释字段解析、source 选择和支持字段，不执行查询
+fcs query "source:index kind:function name:main" . --source all --explain
+
+# 输出慢查询观测信息
+fcs query "source:index kind:function text:main" . --source all --timing --warn-ms 200
+
+# 只查 LSP workspace/symbol；默认 all 不会启动 LSP
+fcs query "name:parse_config" . --source semantic
+
+# 融合 index + trace + LSP；LSP 不可用时仍返回本地结果和状态项
+fcs query "kind:function text:main" . --source auto
+```
+
+`fcs service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
+
+```bash
+# 跑一轮刷新并写入 heartbeat/snapshot
+fcs service start . --interval-ms 2000 --max-cycles 1 --foreground
+
+# 查看最近 heartbeat 和 snapshot 摘要
+fcs service status .
+fcs service snapshot . --format json
+
+# 复用统一查询引擎
+fcs service query "kind:function text:main" . --source index --format json
+fcs service query "source:index kind:function text:main" . --source all --explain
+
+# 请求常驻前台 service 在下一轮停止
+fcs service stop .
+```
+
+`fcs bench` 用于给搜索、索引、trace store 和 preview 读取建立本地延迟基线；`bench all` 会把 `benchmark-report.json` 写入 workspace cache。
+
+```bash
+fcs bench search main . --format json --warn-ms 200
+fcs bench index . --limit 50 --query main --warn-ms 200
+fcs bench trace --format json
+fcs bench preview src/main.rs:20 --warn-ms 20
+fcs bench all . --query main --limit 50
+```
+
+workspace profile 和配置诊断适合 monorepo 或多根项目：
+
+```bash
+fcs workspace profile save core . --description "core workspace" --index-root src
+fcs workspace profile list
+fcs workspace profile use core
+fcs workspace profile current
+fcs workspace plan
+fcs workspace workflows . --format text
+fcs workspace config-doctor .
+fcs workspace config-schema --format toml
+```
+
+---
+
+### 7. LSP 语义导航
 
 语义导航会按文件类型选择 LSP provider：Rust 使用 `rust-analyzer`，C/C++ 使用 `clangd`。对于 C/C++ 项目，建议项目根目录存在 `compile_commands.json` 或 `compile_flags.txt`；Rust 项目建议保留 `Cargo.toml` 并确保 `rust-analyzer` 在 `PATH` 中。
 
@@ -257,6 +333,12 @@ fcs workspace status
 
 # 输出项目识别结果和可执行建议
 fcs workspace advise
+
+# 输出 TUI Activity 面板使用的非阻塞启动计划
+fcs workspace plan
+
+# 输出面向 crash、symbol、diagnostic、trace->DAP 的诊断 workflow 模板
+fcs workspace workflows
 
 # 只查看项目自动识别结果，或执行更完整健康检查
 fcs workspace detect
@@ -283,7 +365,14 @@ fcs workspace-symbols parse_config --limit 50
 fcs lsp highlights src/main.c:42:5
 fcs lsp refs src/main.c:42:5
 fcs lsp rename src/main.c:42:5 new_name
+fcs lsp rename src/main.c:42:5 new_name --apply --dry-run
 fcs lsp code-actions src/main.c:42:5
+fcs lsp code-actions src/main.c:42:5 --format json
+fcs lsp code-actions src/main.c:42:5 --apply 1 --dry-run
+fcs lsp organize-imports src/main.c --apply --dry-run
+fcs lsp outline src/main.c --format tree
+fcs lsp breadcrumbs src/main.c:42:5
+fcs lsp semantic-tokens src/main.c --line 42
 fcs lsp call-tree src/main.c:42:5
 
 # 检查当前 workspace 或指定文件使用的 LSP provider
@@ -291,7 +380,7 @@ fcs lsp health
 fcs lsp health --file src/main.c
 ```
 
-### 7. 语义图与导入图 (`graph`)
+### 8. 语义图与导入图 (`graph`)
 
 `fcs graph` 用来把追踪过程中的关系导出成可读边列表、JSON、Mermaid 或 Graphviz DOT。`semantic` 子命令复用 LSP provider，适合定义、引用、类型定义、实现和调用关系；`imports` 子命令使用轻量文件扫描，适合快速观察模块依赖。
 
@@ -317,7 +406,7 @@ fcs graph calls --limit 100 --fanout 8 --format json
 
 ---
 
-### 8. 追踪、历史与调试器联动
+### 9. 追踪、历史与调试器联动
 
 通过 `fcs` 打开的搜索、文件、符号、引用结果会自动写入 trace。也可以手动添加书签。
 
@@ -343,7 +432,9 @@ fcs trace report bug-42 --format markdown
 fcs trace report bug-42 --format json
 fcs trace timeline bug-42 --format json
 fcs trace replay bug-42 --format markdown
+fcs trace replay-plan bug-42 --program target/debug/app --name bug-42-dap --format json
 fcs trace structured bug-42 --format json
+fcs trace insights bug-42 --directory . --format markdown
 fcs trace diff bug-42 bug-42-next --format json
 
 # 查看查询历史
@@ -364,9 +455,11 @@ fcs debug command target/debug/app -b src/main.c:42 --run
 
 `debug` 默认只打印命令，不会擅自进入交互式调试器。加 `--run` 后才启动 `gdb` 或 `lldb`。
 
+`trace insights` 会在普通 session report 之上汇总 kind/status/priority、热点文件、debug/DAP 事件和未关闭条目；提供 `--directory` 且存在 index 时，还会把 trace 位置关联到最近的索引符号。
+
 ---
 
-### 9. DAP 请求与 Profile (`dap`)
+### 10. DAP 请求与 Profile (`dap`)
 
 `fcs dap` 面向 VS Code、nvim-dap 等 Debug Adapter Protocol 前端，生成基础 `launch` 请求和 `setBreakpoints` bundle，也可以把 launch profile 保存在 workspace cache 中。
 
@@ -388,15 +481,19 @@ fcs dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_
 # 使用 mock adapter 做非交互 DAP 会话 smoke
 fcs dap session-smoke target/debug/app -b src/main.c:42 -- --config dev.toml
 
+# 查看本机可用的 DAP adapter 候选；不会自动安装
+fcs dap adapters
+
 # 使用真实 DAP adapter 进程做 initialize/launch/configurationDone 会话
 fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
+fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 ```
 
-`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch 编排。TUI 的命令面板支持 `dap smoke`，会把 mock DAP 线程、栈帧、scope、变量、事件和命令摘要显示到 Debug 面板。
+`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect` 和 `dap jump/open`；Debug 面板会分区显示 session、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
-### 10. 忽略规则管理 (`ignore`)
+### 11. 忽略规则管理 (`ignore`)
 
 你可以方便地初始化和修改本地或项目的忽略规则。
 
@@ -419,7 +516,7 @@ fcs ignore list
 
 ---
 
-### 11. 单文件预览 (`preview`)
+### 12. 单文件预览 (`preview`)
 
 直接预览指定文件特定行前后的上下文（不进入交互界面）：
 
@@ -433,7 +530,7 @@ fcs preview src/main.rs:100:20
 
 ---
 
-### 12. 命令行自动补全 (`complete`)
+### 13. 命令行自动补全 (`complete`)
 
 `fcs` 可以为各种 Shell 生成自动补全脚本：
 
@@ -499,13 +596,16 @@ fcs actions run test-symbol --directory /path/to/project -- --exact
 fcs plugin list
 fcs plugin show builtin-dev
 fcs plugin doctor
+fcs plugin doctor --strict
+fcs plugin schema --format toml
 fcs plugin commands
 fcs plugin templates
 fcs plugin init builtin-dev:rust-debug --dry-run
-fcs plugin run builtin-dev:cargo-check --dry-run -- --locked
+fcs plugin run builtin-dev:cargo-check --dry-run --var mode=debug -- --locked
+fcs plugin plan builtin-dev:cargo-check --var mode=debug -- --locked
 ```
 
-插件 commands/templates 支持和 actions 一致的 `{workspace}`、`{file}`、`{line}`、`{symbol}` 变量。
+插件 commands/templates 支持和 actions 一致的 `{workspace}`、`{file}`、`{line}`、`{symbol}` 变量；commands 还支持 `env = { KEY = "VALUE" }`、`[[commands.pre]]`、`[[commands.post]]`，以及 `{env.NAME}` 和 `--var KEY=VALUE` 对应的 `{var.KEY}`。
 
 ### Debug Profile
 
@@ -668,7 +768,7 @@ cargo test
 rtk cargo test
 ```
 
-发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、trace export/graph/session edit/timeline/diff/structured、index query/repair/bench、project action templates、debug profile 和 DAP mock 流程；所有命令都通过 `rtk` 执行：
+发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、workspace profile/config doctor/schema、query/service/bench、trace export/graph/session edit/timeline/diff/structured/insights/replay-plan、index query/repair/bench/daemon、project action templates、plugin schema/plan、debug profile 和 DAP mock 流程；所有命令都通过 `rtk` 执行：
 
 ```bash
 rtk scripts/smoke.sh

@@ -11,8 +11,8 @@ use super::args::{
     resolve_path_for_root,
 };
 use super::defs::{
-    Cli, Commands, DapAction, DebugAction, GraphAction, HistoryAction, IgnoreAction, IndexAction, LspAction,
-    PluginAction, ProjectAction, TraceAction, WorkspaceAction,
+    BenchAction, Cli, Commands, DapAction, DebugAction, GraphAction, HistoryAction, IgnoreAction, IndexAction,
+    LspAction, PluginAction, ProjectAction, ServiceAction, TraceAction, WorkspaceAction, WorkspaceProfileAction,
 };
 use super::picker::run_code_item_picker;
 use fcs::core::{CodeItem, Location};
@@ -188,6 +188,130 @@ fn handle_workspace_detect(directory: Option<&String>) -> Result<(), AppError> {
     Ok(())
 }
 
+fn handle_workspace_plan(directory: Option<&String>, config: &fcs::config::Config) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let plan = fcs::workspace::startup_plan(&root, config)?;
+
+    println!("Root: {}", plan.root.display());
+    for line in fcs::workspace::startup_plan_lines(&plan) {
+        println!("{line}");
+    }
+    if let Some(message) = plan.index.message.as_deref() {
+        println!("index_message: {message}");
+    }
+    println!("lsp_command: {}", plan.lsp.command);
+    println!("lsp_message: {}", plan.lsp.message);
+    Ok(())
+}
+
+fn handle_workspace_workflows(
+    directory: Option<&String>,
+    format: &str,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let workflows = fcs::workspace::diagnostic_workflows(&root, config)?;
+    print!("{}", fcs::workspace::format_diagnostic_workflows(&workflows, format)?);
+    Ok(())
+}
+
+fn handle_workspace_profile(action: WorkspaceProfileAction) -> Result<(), AppError> {
+    match action {
+        WorkspaceProfileAction::Save {
+            name,
+            directory,
+            description,
+            index_roots,
+        } => {
+            let profile = fcs::workspace::save_profile(&name, directory.as_ref(), description, &index_roots)?;
+            println!("Saved workspace profile: {}", format_workspace_profile(&profile, false));
+        }
+        WorkspaceProfileAction::List => {
+            let store = fcs::workspace::list_profiles()?;
+            if store.profiles.is_empty() {
+                println!("No workspace profiles");
+            } else {
+                for profile in store.profiles {
+                    let active = store.active.as_deref() == Some(profile.name.as_str());
+                    println!("{}", format_workspace_profile(&profile, active));
+                }
+            }
+        }
+        WorkspaceProfileAction::Show { name } => {
+            let profile = fcs::workspace::get_profile(&name)?;
+            println!("{}", format_workspace_profile_detail(&profile));
+        }
+        WorkspaceProfileAction::Use { name } => {
+            let profile = fcs::workspace::use_profile(&name)?;
+            println!("Active workspace profile: {}", format_workspace_profile(&profile, true));
+        }
+        WorkspaceProfileAction::Current => match fcs::workspace::current_profile()? {
+            Some(profile) => println!("{}", format_workspace_profile_detail(&profile)),
+            None => println!("No active workspace profile"),
+        },
+        WorkspaceProfileAction::Delete { name } => {
+            if fcs::workspace::delete_profile(&name)? {
+                println!("Deleted workspace profile: {name}");
+            } else {
+                println!("Workspace profile not found: {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_workspace_config_doctor(directory: Option<&String>, strict: bool) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let diagnostics = fcs::workspace::config_diagnostics(&root)?;
+    let mut failed = 0usize;
+    for diagnostic in &diagnostics {
+        if !diagnostic.ok {
+            failed += 1;
+        }
+        let status = if diagnostic.ok { "ok" } else { "fail" };
+        println!("[{status}] {}: {}", diagnostic.name, diagnostic.detail);
+    }
+    if strict && failed > 0 {
+        return Err(AppError::General(format!(
+            "Project config doctor found {failed} failing diagnostic(s)"
+        )));
+    }
+    Ok(())
+}
+
+fn handle_workspace_config_schema(format: &str) -> Result<(), AppError> {
+    print!("{}", fcs::workspace::project_config_schema(format)?);
+    Ok(())
+}
+
+fn format_workspace_profile(profile: &fcs::workspace::WorkspaceProfile, active: bool) -> String {
+    let marker = if active { " [active]" } else { "" };
+    format!(
+        "{}{} root={} project_type={} index_roots={}",
+        profile.name,
+        marker,
+        profile.root.display(),
+        profile.project_type,
+        display_list(&profile.index_roots)
+    )
+}
+
+fn format_workspace_profile_detail(profile: &fcs::workspace::WorkspaceProfile) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("name: {}\n", profile.name));
+    output.push_str(&format!("root: {}\n", profile.root.display()));
+    output.push_str(&format!("project_type: {}\n", profile.project_type));
+    output.push_str(&format!("languages: {}\n", display_list(&profile.languages)));
+    output.push_str(&format!("build_systems: {}\n", display_list(&profile.build_systems)));
+    output.push_str(&format!("index_roots: {}\n", display_list(&profile.index_roots)));
+    output.push_str(&format!(
+        "description: {}\n",
+        profile.description.as_deref().unwrap_or("-")
+    ));
+    output.push_str(&format!("updated_at_unix: {}\n", profile.updated_at_unix));
+    output
+}
+
 fn handle_index_status(directory: Option<&String>) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
     let status = fcs::index::status(&root)?;
@@ -300,6 +424,82 @@ fn handle_index_refresh(
         println!("unchanged_files: {}", build_report.unchanged_files);
         println!("changed_files: {}", build_report.changed_files);
         println!("removed_files: {}", build_report.removed_files);
+        println!("added_files: {}", build_report.added_files);
+        println!("reindexed_files: {}", build_report.reindexed_files);
+        println!("reused_symbol_files: {}", build_report.reused_symbol_files);
+        println!(
+            "changed_paths_sample: {}",
+            display_list(&build_report.changed_paths_sample)
+        );
+        println!(
+            "removed_paths_sample: {}",
+            display_list(&build_report.removed_paths_sample)
+        );
+        println!("elapsed_ms: {}", build_report.elapsed_ms);
+    }
+    Ok(())
+}
+
+fn handle_index_daemon(
+    directory: Option<&String>,
+    interval_ms: u64,
+    max_cycles: Option<usize>,
+    foreground: bool,
+    options: &[String],
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::index::run_polling_daemon(
+        &root,
+        options,
+        &config.search.ignore,
+        &ignore_path,
+        fcs::index::IndexDaemonOptions {
+            interval_ms,
+            max_cycles,
+        },
+    )?;
+
+    println!("Index daemon heartbeat: {}", report.heartbeat_path.display());
+    println!("cycles: {}", report.cycles.last().map_or(0, |cycle| cycle.cycle));
+    println!("rebuilds: {}", report.rebuilds);
+    if foreground {
+        for cycle in &report.cycles {
+            println!(
+                "cycle {}: rebuilt={} reason={} files={} symbols={} elapsed_ms={}",
+                cycle.cycle, cycle.rebuilt, cycle.reason, cycle.file_count, cycle.symbol_count, cycle.elapsed_ms
+            );
+        }
+    } else if let Some(cycle) = report.cycles.last() {
+        println!(
+            "last_cycle: rebuilt={} reason={} files={} symbols={} elapsed_ms={}",
+            cycle.rebuilt, cycle.reason, cycle.file_count, cycle.symbol_count, cycle.elapsed_ms
+        );
+    }
+    Ok(())
+}
+
+fn handle_index_daemon_status(directory: Option<&String>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let status = fcs::index::daemon_status(&root)?;
+
+    println!("Heartbeat: {}", status.path.display());
+    println!("exists: {}", status.exists);
+    if let Some(heartbeat) = status.heartbeat {
+        println!("root: {}", heartbeat.root);
+        println!("pid: {}", heartbeat.pid);
+        println!("started_at_unix: {}", heartbeat.started_at_unix);
+        println!("updated_at_unix: {}", heartbeat.updated_at_unix);
+        println!("interval_ms: {}", heartbeat.interval_ms);
+        println!("cycles: {}", heartbeat.cycles);
+        println!("rebuilds: {}", heartbeat.rebuilds);
+        println!("last_rebuilt: {}", heartbeat.last_rebuilt);
+        println!("last_reason: {}", heartbeat.last_reason);
+        println!("files: {}", heartbeat.last_file_count);
+        println!("symbols: {}", heartbeat.last_symbol_count);
+        println!("stale: {}", status.stale);
     }
     Ok(())
 }
@@ -320,6 +520,12 @@ fn handle_index_build(
     println!("unchanged_files: {}", report.unchanged_files);
     println!("changed_files: {}", report.changed_files);
     println!("removed_files: {}", report.removed_files);
+    println!("added_files: {}", report.added_files);
+    println!("reindexed_files: {}", report.reindexed_files);
+    println!("reused_symbol_files: {}", report.reused_symbol_files);
+    println!("changed_paths_sample: {}", display_list(&report.changed_paths_sample));
+    println!("removed_paths_sample: {}", display_list(&report.removed_paths_sample));
+    println!("elapsed_ms: {}", report.elapsed_ms);
     Ok(())
 }
 
@@ -440,6 +646,205 @@ fn handle_index_bench(
     }
     write_latency_smoke(&root, &rows)?;
     Ok(())
+}
+
+struct QueryRequest<'a> {
+    expression: &'a str,
+    directory: Option<&'a String>,
+    source: &'a str,
+    limit: usize,
+    format: &'a str,
+    explain: bool,
+    timing: bool,
+    warn_ms: Option<u128>,
+}
+
+fn handle_query(request: QueryRequest<'_>, config: &fcs::config::Config) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(request.directory)?;
+    let source = fcs::query::QuerySource::parse(request.source)?;
+    if request.explain {
+        let explanation = fcs::query::explain(request.expression, source);
+        print!("{}", fcs::query::format_explanation(&explanation, request.format)?);
+        return Ok(());
+    }
+    let start = Instant::now();
+    let matches = fcs::query::run_with_config(&root, request.expression, source, request.limit, Some(&config.lsp))?;
+    let elapsed_ms = start.elapsed().as_millis();
+    print!("{}", fcs::query::format_matches(&matches, request.format)?);
+    if request.timing {
+        println!("timing_ms: {elapsed_ms}");
+    }
+    if request.warn_ms.is_some_and(|threshold| elapsed_ms > threshold) {
+        eprintln!("warning: query took {elapsed_ms}ms");
+    }
+    Ok(())
+}
+
+fn handle_service_start(
+    directory: Option<&String>,
+    interval_ms: u64,
+    max_cycles: Option<usize>,
+    foreground: bool,
+    options: &[String],
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::service::run_daemon(
+        &root,
+        options,
+        &config.search.ignore,
+        &ignore_path,
+        config,
+        fcs::service::ServiceOptions {
+            interval_ms,
+            max_cycles,
+        },
+    )?;
+
+    println!("Service heartbeat: {}", report.heartbeat_path.display());
+    println!("Service snapshot: {}", report.snapshot_path.display());
+    println!("cycles: {}", report.cycles.last().map_or(0, |cycle| cycle.cycle));
+    if foreground {
+        for cycle in &report.cycles {
+            println!(
+                "cycle {}: index_rebuilt={} reason={} elapsed_ms={}",
+                cycle.cycle, cycle.index_rebuilt, cycle.index_reason, cycle.elapsed_ms
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_service_status(directory: Option<&String>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let status = fcs::service::status(&root)?;
+    println!("Heartbeat: {}", status.heartbeat_path.display());
+    println!("Snapshot: {}", status.snapshot_path.display());
+    println!("Stop file: {}", status.stop_path.display());
+    println!("exists: {}", status.heartbeat.is_some());
+    println!("stale: {}", status.stale);
+    println!("stop_requested: {}", status.stop_requested);
+    if let Some(heartbeat) = status.heartbeat {
+        println!("root: {}", heartbeat.root);
+        println!("pid: {}", heartbeat.pid);
+        println!("started_at_unix: {}", heartbeat.started_at_unix);
+        println!("updated_at_unix: {}", heartbeat.updated_at_unix);
+        println!("interval_ms: {}", heartbeat.interval_ms);
+        println!("cycles: {}", heartbeat.cycles);
+        println!("last_index_rebuilt: {}", heartbeat.last_index_rebuilt);
+        println!("last_index_reason: {}", heartbeat.last_index_reason);
+    }
+    if let Some(snapshot) = status.snapshot {
+        println!("snapshot_index_files: {}", snapshot.index.files);
+        println!("snapshot_index_symbols: {}", snapshot.index.symbols);
+        println!("snapshot_trace_entries: {}", snapshot.trace.entries);
+    }
+    Ok(())
+}
+
+fn handle_service_snapshot(
+    directory: Option<&String>,
+    format: &str,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let snapshot = fcs::service::snapshot(&root, config)?;
+    print!("{}", fcs::service::format_snapshot(&snapshot, format)?);
+    Ok(())
+}
+
+fn handle_service_stop(directory: Option<&String>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let path = fcs::service::request_stop(&root)?;
+    println!("Requested service stop: {}", path.display());
+    Ok(())
+}
+
+fn handle_bench_report(
+    mut report: fcs::bench::BenchReport,
+    format: &str,
+    warn_ms: Option<u128>,
+) -> Result<(), AppError> {
+    report.push_warning_rows(warn_ms);
+    print!("{}", fcs::bench::format_report(&report, format)?);
+    if !report.warnings.is_empty() {
+        eprintln!(
+            "warning: {} benchmark probe(s) exceeded threshold",
+            report.warnings.len()
+        );
+    }
+    Ok(())
+}
+
+fn handle_bench_all(
+    directory: Option<&String>,
+    format: &str,
+    warn_ms: Option<u128>,
+    limit: usize,
+    query: &str,
+    options: &[String],
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::bench::run_all(&root, query, limit, options, &config.search.ignore, &ignore_path)?;
+    handle_bench_report(report, format, warn_ms)
+}
+
+fn handle_bench_search(
+    pattern: &str,
+    directory: Option<&String>,
+    format: &str,
+    warn_ms: Option<u128>,
+    options: &[String],
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::bench::run_search(&root, pattern, options, &config.search.ignore, &ignore_path)?;
+    handle_bench_report(report, format, warn_ms)
+}
+
+struct BenchIndexInput<'a> {
+    directory: Option<&'a String>,
+    format: &'a str,
+    warn_ms: Option<u128>,
+    build: bool,
+    limit: usize,
+    query: &'a str,
+    options: &'a [String],
+    config: &'a fcs::config::Config,
+}
+
+fn handle_bench_index(input: BenchIndexInput<'_>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(input.directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::bench::run_index(
+        &root,
+        input.build,
+        input.limit,
+        input.query,
+        input.options,
+        &input.config.search.ignore,
+        &ignore_path,
+    )?;
+    handle_bench_report(report, input.format, input.warn_ms)
+}
+
+fn handle_bench_trace(format: &str, warn_ms: Option<u128>) -> Result<(), AppError> {
+    let report = fcs::bench::run_trace()?;
+    handle_bench_report(report, format, warn_ms)
+}
+
+fn handle_bench_preview(target: &str, format: &str, warn_ms: Option<u128>) -> Result<(), AppError> {
+    let (path, _line, _height) = parse_preview_arg(target)?;
+    let report = fcs::bench::run_preview_read(Path::new(&path))?;
+    handle_bench_report(report, format, warn_ms)
 }
 
 fn handle_definition(target: &str, directory: Option<&String>, config: &fcs::config::Config) -> Result<(), AppError> {
@@ -648,21 +1053,123 @@ fn handle_lsp_rename(
     target: &str,
     new_name: &str,
     directory: Option<&String>,
+    apply: bool,
+    dry_run: bool,
     config: &fcs::config::Config,
 ) -> Result<(), AppError> {
     let (mut client, location) = lsp_client_for_location(target, directory, config)?;
-    print!("{}", client.rename_preview(&location, new_name)?);
+    if apply {
+        let report = client.apply_rename(&location, new_name, dry_run)?;
+        print_workspace_edit_report(&report)?;
+    } else {
+        print!("{}", client.rename_preview(&location, new_name)?);
+    }
     Ok(())
 }
 
 fn handle_lsp_code_actions(
     target: &str,
     directory: Option<&String>,
+    format: &str,
+    apply: Option<usize>,
+    dry_run: bool,
     config: &fcs::config::Config,
 ) -> Result<(), AppError> {
     let (mut client, location) = lsp_client_for_location(target, directory, config)?;
-    let items = client.code_actions(&location)?;
-    print_code_item_list("No code actions found", &items);
+    if let Some(index) = apply {
+        let report = client.apply_code_action(&location, index, dry_run)?;
+        print_workspace_edit_report(&report)?;
+        return Ok(());
+    }
+
+    let actions = client.code_action_candidates(&location)?;
+    print_code_actions(&actions, format)?;
+    Ok(())
+}
+
+fn handle_lsp_organize_imports(
+    target: &str,
+    directory: Option<&String>,
+    apply: bool,
+    dry_run: bool,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let path = resolve_path_for_root(parse_file_arg(target), &root);
+    let mut client = fcs::lsp::LspClient::start_for_path(&path, &root, &config.lsp)?;
+    let actions = client.organize_imports_candidates(&path)?;
+    if !apply {
+        print_code_actions(&actions, "text")?;
+        return Ok(());
+    }
+
+    let action = actions
+        .first()
+        .ok_or_else(|| AppError::General("No organize-imports action found".to_string()))?;
+    let report = fcs::lsp::apply_workspace_edit(&action.edit, dry_run)?;
+    print_workspace_edit_report(&report)?;
+    Ok(())
+}
+
+fn handle_lsp_outline(
+    target: &str,
+    directory: Option<&String>,
+    format: &str,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let path = resolve_path_for_root(parse_file_arg(target), &root);
+    let mut client = fcs::lsp::LspClient::start_for_path(&path, &root, &config.lsp)?;
+    let outline = client.document_outline(&path)?;
+    match format {
+        "tree" | "text" => print!("{}", fcs::lsp::format_outline_text(&outline)),
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&outline).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported outline format: {other}"))),
+    }
+    Ok(())
+}
+
+fn handle_lsp_breadcrumbs(
+    target: &str,
+    directory: Option<&String>,
+    format: &str,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let (mut client, location) = lsp_client_for_location(target, directory, config)?;
+    let breadcrumbs = client.breadcrumbs(&location)?;
+    match format {
+        "text" => print!("{}", fcs::lsp::format_breadcrumbs_text(&breadcrumbs)),
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&breadcrumbs).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported breadcrumbs format: {other}"))),
+    }
+    Ok(())
+}
+
+fn handle_lsp_semantic_tokens(
+    target: &str,
+    directory: Option<&String>,
+    line: Option<usize>,
+    format: &str,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let path = resolve_path_for_root(parse_file_arg(target), &root);
+    let mut client = fcs::lsp::LspClient::start_for_path(&path, &root, &config.lsp)?;
+    let tokens = client.semantic_tokens(&path, line)?;
+    match format {
+        "text" => print!("{}", fcs::lsp::format_semantic_tokens_text(&tokens)),
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&tokens).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported semantic token format: {other}"))),
+    }
     Ok(())
 }
 
@@ -696,6 +1203,47 @@ fn print_code_item_list(empty_message: &str, items: &[CodeItem]) {
     for item in items {
         println!("{}", item.display_text());
     }
+}
+
+fn print_code_actions(actions: &[fcs::lsp::CodeActionCandidate], format: &str) -> Result<(), AppError> {
+    if actions.is_empty() {
+        println!("No code actions found");
+        return Ok(());
+    }
+
+    match format {
+        "text" => {
+            for (index, action) in actions.iter().enumerate() {
+                let edit_count = action.edit.edits.len();
+                let command = action.command.as_deref().unwrap_or("-");
+                println!(
+                    "{}. {} [{}] edits={} command={}",
+                    index + 1,
+                    action.title,
+                    action.kind,
+                    edit_count,
+                    command
+                );
+            }
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(actions).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported code action format: {other}"))),
+    }
+    Ok(())
+}
+
+fn print_workspace_edit_report(report: &fcs::lsp::WorkspaceEditApplyReport) -> Result<(), AppError> {
+    print!("{}", report.preview);
+    println!("dry_run: {}", report.dry_run);
+    println!("edit_count: {}", report.edit_count);
+    println!("changed_files: {}", display_paths(&report.changed_files));
+    if !report.unsupported_operations.is_empty() {
+        println!("unsupported_operations: {}", report.unsupported_operations.join(", "));
+    }
+    Ok(())
 }
 
 struct GraphSemanticInput<'a> {
@@ -852,6 +1400,9 @@ fn handle_trace_add(
         parent,
         branch,
         tags,
+        note: None,
+        status: None,
+        priority: None,
     };
     fcs::trace::record_location_with_metadata(&location, &label, kind, metadata)?;
     println!("Added trace entry: {label}");
@@ -1015,6 +1566,45 @@ fn handle_trace_replay(session: &str, directory: Option<&String>, format: &str) 
     Ok(())
 }
 
+fn handle_trace_replay_plan(
+    session: &str,
+    directory: Option<&String>,
+    program: Option<&String>,
+    name: Option<&String>,
+    format: &str,
+) -> Result<(), AppError> {
+    let root = match directory {
+        Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
+        None => None,
+    };
+    match format {
+        "markdown" | "md" => print!(
+            "{}",
+            fcs::trace::export_session_replay_plan_markdown(
+                session,
+                root.as_deref(),
+                program.map(String::as_str),
+                name.map(String::as_str),
+            )?
+        ),
+        "json" => print!(
+            "{}",
+            fcs::trace::export_session_replay_plan_json(
+                session,
+                root.as_deref(),
+                program.map(String::as_str),
+                name.map(String::as_str),
+            )?
+        ),
+        other => {
+            return Err(AppError::General(format!(
+                "Unsupported trace replay-plan format: {other}"
+            )))
+        }
+    }
+    Ok(())
+}
+
 fn handle_trace_structured(session: &str, directory: Option<&String>, format: &str) -> Result<(), AppError> {
     let root = match directory {
         Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
@@ -1032,6 +1622,29 @@ fn handle_trace_structured(session: &str, directory: Option<&String>, format: &s
         other => {
             return Err(AppError::General(format!(
                 "Unsupported trace structured report format: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn handle_trace_insights(session: &str, directory: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = match directory {
+        Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
+        None => None,
+    };
+    match format {
+        "markdown" | "md" => print!(
+            "{}",
+            fcs::trace::export_session_insights_markdown(session, root.as_deref())?
+        ),
+        "json" => print!(
+            "{}",
+            fcs::trace::export_session_insights_json(session, root.as_deref())?
+        ),
+        other => {
+            return Err(AppError::General(format!(
+                "Unsupported trace insights report format: {other}"
             )));
         }
     }
@@ -1390,6 +2003,37 @@ fn handle_dap_profiles(directory: Option<&String>) -> Result<(), AppError> {
     Ok(())
 }
 
+fn handle_dap_adapters(format: &str) -> Result<(), AppError> {
+    let adapters = fcs::dap::discover_adapters();
+    match format {
+        "text" => {
+            if adapters.is_empty() {
+                println!("No DAP adapter candidates");
+                return Ok(());
+            }
+            for adapter in adapters {
+                let state = if adapter.available { "available" } else { "missing" };
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    adapter.adapter,
+                    state,
+                    adapter.command_line(),
+                    adapter.detail
+                );
+            }
+            Ok(())
+        }
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&adapters).map_err(|err| AppError::General(err.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(AppError::General(format!("Unsupported DAP adapter format: {other}"))),
+    }
+}
+
 fn handle_dap_request_profile(name: &str, directory: Option<&String>, bundle: bool) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
     let profile = fcs::dap::load_profile(&root, name)?;
@@ -1422,20 +2066,41 @@ fn handle_dap_adapter_session(
         .iter()
         .map(|value| fcs::dap::parse_env_var(value))
         .collect::<Result<Vec<fcs::dap::DapEnvVar>, AppError>>()?;
-    let spec = fcs::dap::DapAdapterProcessSpec {
-        command: PathBuf::from(adapter_command),
-        args: Vec::new(),
-        cwd: profile.cwd.clone(),
-        env: adapter_env,
+    let mut spec = if adapter_command == "auto" {
+        fcs::dap::best_adapter_for_profile(&profile)
+            .ok_or_else(|| AppError::General("No available DAP adapter was discovered".to_string()))?
+            .spec(profile.cwd.clone())
+    } else {
+        fcs::dap::DapAdapterProcessSpec {
+            command: PathBuf::from(adapter_command),
+            args: Vec::new(),
+            cwd: profile.cwd.clone(),
+            env: Vec::new(),
+        }
     };
+    spec.env = adapter_env;
     let transport = fcs::dap::DapProcessTransport::spawn(&spec)?;
     let mut client = fcs::dap::DapClient::new(transport);
     let report = fcs::dap::run_launch_session(&mut client, &profile)?;
 
     println!("DAP adapter session completed");
+    println!("adapter_command: {}", spec.command.display());
     println!("requests: {}", report.request_count);
     println!("responses: {}", report.response_count);
     println!("breakpoint_responses: {}", report.breakpoint_response_count);
+    if report.breakpoint_results.is_empty() {
+        println!("breakpoints: none");
+    } else {
+        for (index, breakpoint) in report.breakpoint_results.iter().enumerate() {
+            let state = if breakpoint.verified { "verified" } else { "unverified" };
+            let line = breakpoint
+                .line
+                .map(|line| line.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let message = breakpoint.message.as_deref().unwrap_or("-");
+            println!("breakpoint {}: {} line={} {}", index + 1, state, line, message);
+        }
+    }
     println!("initialized: {}", report.initialized);
     println!("launch_completed: {}", report.launch_completed);
     println!("commands: {}", report.commands.join(", "));
@@ -1597,6 +2262,17 @@ fn display_list(values: &[String]) -> String {
     }
 }
 
+fn display_paths(values: &[PathBuf]) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    values
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 fn format_index_counts(values: &[fcs::index::IndexCount]) -> String {
     if values.is_empty() {
         return "none".to_string();
@@ -1745,13 +2421,23 @@ fn handle_plugin_show(name: &str, directory: Option<&String>) -> Result<(), AppE
     Ok(())
 }
 
-fn handle_plugin_doctor(directory: Option<&String>) -> Result<(), AppError> {
+fn handle_plugin_doctor(directory: Option<&String>, strict: bool) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
     let diagnostics = fcs::plugins::doctor(Some(&root))?;
+    let mut has_warning = false;
     for diagnostic in diagnostics {
         let state = if diagnostic.ok { "ok" } else { "warn" };
+        has_warning |= !diagnostic.ok;
         println!("[{state}] {}: {}", diagnostic.name, diagnostic.detail);
     }
+    if strict && has_warning {
+        return Err(AppError::General("Plugin doctor found warning(s)".to_string()));
+    }
+    Ok(())
+}
+
+fn handle_plugin_schema(format: &str) -> Result<(), AppError> {
+    print!("{}", fcs::plugins::manifest_schema(format)?);
     Ok(())
 }
 
@@ -1798,19 +2484,43 @@ struct PluginRunInput<'a> {
     line: Option<usize>,
     symbol: Option<&'a String>,
     dry_run: bool,
+    vars: &'a [String],
     args: &'a [String],
 }
 
 fn handle_plugin_run(input: PluginRunInput<'_>) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(input.directory)?;
-    let command = fcs::plugins::expand_command(&root, input.name, input.file, input.line, input.symbol, input.args)?;
+    let command = fcs::plugins::expand_command_with_vars(
+        &root,
+        input.name,
+        input.file,
+        input.line,
+        input.symbol,
+        input.args,
+        input.vars,
+    )?;
     if input.dry_run {
-        println!("{}", fcs::plugins::format_expanded_command(&command));
+        println!("{}", fcs::plugins::format_execution_plan(&command));
         return Ok(());
     }
 
     let code = fcs::plugins::run_expanded_command(&command)?;
     println!("Plugin command exited with status {code}");
+    Ok(())
+}
+
+fn handle_plugin_plan(input: PluginRunInput<'_>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(input.directory)?;
+    let command = fcs::plugins::expand_command_with_vars(
+        &root,
+        input.name,
+        input.file,
+        input.line,
+        input.symbol,
+        input.args,
+        input.vars,
+    )?;
+    println!("{}", fcs::plugins::format_execution_plan(&command));
     Ok(())
 }
 
@@ -1874,14 +2584,80 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 let path = fcs::workspace::write_project_config(directory.as_ref(), force)?;
                 println!("Wrote project config: {}", path.display());
             }
+            WorkspaceAction::Profile { action } => {
+                handle_workspace_profile(action)?;
+            }
+            WorkspaceAction::ConfigDoctor { directory, strict } => {
+                handle_workspace_config_doctor(directory.as_ref(), strict)?;
+            }
+            WorkspaceAction::ConfigSchema { format } => {
+                handle_workspace_config_schema(&format)?;
+            }
             WorkspaceAction::Advise { directory } => {
                 handle_workspace_advise(directory.as_ref(), &config)?;
+            }
+            WorkspaceAction::Plan { directory } => {
+                handle_workspace_plan(directory.as_ref(), &config)?;
             }
             WorkspaceAction::Detect { directory } => {
                 handle_workspace_detect(directory.as_ref())?;
             }
             WorkspaceAction::Doctor { directory } => {
                 handle_workspace_advise(directory.as_ref(), &config)?;
+            }
+            WorkspaceAction::Workflows { directory, format } => {
+                handle_workspace_workflows(directory.as_ref(), &format, &config)?;
+            }
+        },
+        Commands::Service { action } => match action {
+            ServiceAction::Start {
+                directory,
+                interval_ms,
+                max_cycles,
+                foreground,
+                option,
+            } => {
+                handle_service_start(
+                    directory.as_ref(),
+                    interval_ms,
+                    max_cycles,
+                    foreground,
+                    &option,
+                    &config,
+                )?;
+            }
+            ServiceAction::Status { directory } => {
+                handle_service_status(directory.as_ref())?;
+            }
+            ServiceAction::Snapshot { directory, format } => {
+                handle_service_snapshot(directory.as_ref(), &format, &config)?;
+            }
+            ServiceAction::Query {
+                expression,
+                directory,
+                source,
+                limit,
+                format,
+                explain,
+                timing,
+                warn_ms,
+            } => {
+                handle_query(
+                    QueryRequest {
+                        expression: &expression,
+                        directory: directory.as_ref(),
+                        source: &source,
+                        limit,
+                        format: &format,
+                        explain,
+                        timing,
+                        warn_ms,
+                    },
+                    &config,
+                )?;
+            }
+            ServiceAction::Stop { directory } => {
+                handle_service_stop(directory.as_ref())?;
             }
         },
         Commands::Index { action } => match action {
@@ -1916,6 +2692,25 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             IndexAction::Refresh { directory, option } => {
                 handle_index_refresh(directory.as_ref(), &option, &config)?;
             }
+            IndexAction::Daemon {
+                directory,
+                interval_ms,
+                max_cycles,
+                foreground,
+                option,
+            } => {
+                handle_index_daemon(
+                    directory.as_ref(),
+                    interval_ms,
+                    max_cycles,
+                    foreground,
+                    &option,
+                    &config,
+                )?;
+            }
+            IndexAction::DaemonStatus { directory } => {
+                handle_index_daemon_status(directory.as_ref())?;
+            }
             IndexAction::Doctor { directory } => {
                 handle_index_doctor(directory.as_ref())?;
             }
@@ -1934,6 +2729,81 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 option,
             } => {
                 handle_index_bench(directory.as_ref(), build, limit, &query, &option, &config)?;
+            }
+        },
+        Commands::Query {
+            expression,
+            directory,
+            source,
+            limit,
+            format,
+            explain,
+            timing,
+            warn_ms,
+        } => {
+            handle_query(
+                QueryRequest {
+                    expression: &expression,
+                    directory: directory.as_ref(),
+                    source: &source,
+                    limit,
+                    format: &format,
+                    explain,
+                    timing,
+                    warn_ms,
+                },
+                &config,
+            )?;
+        }
+        Commands::Bench { action } => match action {
+            BenchAction::All {
+                directory,
+                format,
+                warn_ms,
+                limit,
+                query,
+                option,
+            } => {
+                handle_bench_all(directory.as_ref(), &format, warn_ms, limit, &query, &option, &config)?;
+            }
+            BenchAction::Search {
+                pattern,
+                directory,
+                format,
+                warn_ms,
+                option,
+            } => {
+                handle_bench_search(&pattern, directory.as_ref(), &format, warn_ms, &option, &config)?;
+            }
+            BenchAction::Index {
+                directory,
+                format,
+                warn_ms,
+                build,
+                limit,
+                query,
+                option,
+            } => {
+                handle_bench_index(BenchIndexInput {
+                    directory: directory.as_ref(),
+                    format: &format,
+                    warn_ms,
+                    build,
+                    limit,
+                    query: &query,
+                    options: &option,
+                    config: &config,
+                })?;
+            }
+            BenchAction::Trace { format, warn_ms } => {
+                handle_bench_trace(&format, warn_ms)?;
+            }
+            BenchAction::Preview {
+                target,
+                format,
+                warn_ms,
+            } => {
+                handle_bench_preview(&target, &format, warn_ms)?;
             }
         },
         Commands::Graph { action } => match action {
@@ -2034,8 +2904,11 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             PluginAction::Show { name, directory } => {
                 handle_plugin_show(&name, directory.as_ref())?;
             }
-            PluginAction::Doctor { directory } => {
-                handle_plugin_doctor(directory.as_ref())?;
+            PluginAction::Doctor { directory, strict } => {
+                handle_plugin_doctor(directory.as_ref(), strict)?;
+            }
+            PluginAction::Schema { format } => {
+                handle_plugin_schema(&format)?;
             }
             PluginAction::Templates { directory } => {
                 handle_plugin_templates(directory.as_ref())?;
@@ -2058,6 +2931,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 line,
                 symbol,
                 dry_run,
+                vars,
                 args,
             } => {
                 handle_plugin_run(PluginRunInput {
@@ -2067,6 +2941,27 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     line,
                     symbol: symbol.as_ref(),
                     dry_run,
+                    vars: &vars,
+                    args: &args,
+                })?;
+            }
+            PluginAction::Plan {
+                name,
+                directory,
+                file,
+                line,
+                symbol,
+                vars,
+                args,
+            } => {
+                handle_plugin_plan(PluginRunInput {
+                    name: &name,
+                    directory: directory.as_ref(),
+                    file: file.as_ref(),
+                    line,
+                    symbol: symbol.as_ref(),
+                    dry_run: true,
+                    vars: &vars,
                     args: &args,
                 })?;
             }
@@ -2119,11 +3014,49 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 target,
                 new_name,
                 directory,
+                apply,
+                dry_run,
             } => {
-                handle_lsp_rename(&target, &new_name, directory.as_ref(), &config)?;
+                handle_lsp_rename(&target, &new_name, directory.as_ref(), apply, dry_run, &config)?;
             }
-            LspAction::CodeActions { target, directory } => {
-                handle_lsp_code_actions(&target, directory.as_ref(), &config)?;
+            LspAction::CodeActions {
+                target,
+                directory,
+                format,
+                apply,
+                dry_run,
+            } => {
+                handle_lsp_code_actions(&target, directory.as_ref(), &format, apply, dry_run, &config)?;
+            }
+            LspAction::OrganizeImports {
+                target,
+                directory,
+                apply,
+                dry_run,
+            } => {
+                handle_lsp_organize_imports(&target, directory.as_ref(), apply, dry_run, &config)?;
+            }
+            LspAction::Outline {
+                target,
+                directory,
+                format,
+            } => {
+                handle_lsp_outline(&target, directory.as_ref(), &format, &config)?;
+            }
+            LspAction::Breadcrumbs {
+                target,
+                directory,
+                format,
+            } => {
+                handle_lsp_breadcrumbs(&target, directory.as_ref(), &format, &config)?;
+            }
+            LspAction::SemanticTokens {
+                target,
+                directory,
+                line,
+                format,
+            } => {
+                handle_lsp_semantic_tokens(&target, directory.as_ref(), line, &format, &config)?;
             }
             LspAction::CallTree { target, directory } => {
                 handle_lsp_call_tree(&target, directory.as_ref(), &config)?;
@@ -2198,12 +3131,28 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             } => {
                 handle_trace_replay(&session, directory.as_ref(), &format)?;
             }
+            TraceAction::ReplayPlan {
+                session,
+                directory,
+                program,
+                name,
+                format,
+            } => {
+                handle_trace_replay_plan(&session, directory.as_ref(), program.as_ref(), name.as_ref(), &format)?;
+            }
             TraceAction::Structured {
                 session,
                 directory,
                 format,
             } => {
                 handle_trace_structured(&session, directory.as_ref(), &format)?;
+            }
+            TraceAction::Insights {
+                session,
+                directory,
+                format,
+            } => {
+                handle_trace_insights(&session, directory.as_ref(), &format)?;
             }
             TraceAction::Diff {
                 left,
@@ -2333,6 +3282,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             }
         },
         Commands::Dap { action } => match action {
+            DapAction::Adapters { format } => {
+                handle_dap_adapters(&format)?;
+            }
             DapAction::Launch {
                 program,
                 adapter,

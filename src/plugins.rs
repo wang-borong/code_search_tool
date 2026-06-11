@@ -78,6 +78,25 @@ pub struct PluginCommand {
     pub args: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pre: Vec<PluginHookCommand>,
+    #[serde(default)]
+    pub post: Vec<PluginHookCommand>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginHookCommand {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +122,19 @@ pub struct ExpandedPluginCommand {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
+    pub pre_hooks: Vec<ExpandedPluginStep>,
+    pub post_hooks: Vec<ExpandedPluginStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedPluginStep {
+    pub phase: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +152,7 @@ struct PluginContext {
     file: Option<String>,
     line: Option<usize>,
     symbol: Option<String>,
+    vars: BTreeMap<String, String>,
 }
 
 pub fn discover(root: Option<&Path>) -> Result<Vec<PluginManifest>> {
@@ -183,12 +216,25 @@ pub fn expand_command(
     symbol: Option<&String>,
     extra_args: &[String],
 ) -> Result<ExpandedPluginCommand> {
+    expand_command_with_vars(root, selector, file, line, symbol, extra_args, &[])
+}
+
+pub fn expand_command_with_vars(
+    root: &Path,
+    selector: &str,
+    file: Option<&String>,
+    line: Option<usize>,
+    symbol: Option<&String>,
+    extra_args: &[String],
+    vars: &[String],
+) -> Result<ExpandedPluginCommand> {
     let (manifest, command) = find_command(Some(root), selector)?;
     let context = PluginContext {
         workspace: root.to_path_buf(),
         file: file.cloned(),
         line,
         symbol: symbol.cloned(),
+        vars: parse_vars(vars)?,
     };
     Ok(expand_plugin_command(
         &manifest.plugin.name,
@@ -199,15 +245,78 @@ pub fn expand_command(
 }
 
 pub fn run_expanded_command(command: &ExpandedPluginCommand) -> Result<i32> {
-    let status = Command::new(&command.command)
-        .args(&command.args)
-        .current_dir(&command.cwd)
+    for step in execution_steps(command) {
+        run_expanded_step(&step)?;
+    }
+    Ok(0)
+}
+
+pub fn execution_steps(command: &ExpandedPluginCommand) -> Vec<ExpandedPluginStep> {
+    let mut steps = Vec::new();
+    steps.extend(command.pre_hooks.iter().cloned());
+    steps.push(ExpandedPluginStep {
+        phase: "main".to_string(),
+        name: command.name.clone(),
+        command: command.command.clone(),
+        args: command.args.clone(),
+        cwd: command.cwd.clone(),
+        env: command.env.clone(),
+    });
+    steps.extend(command.post_hooks.iter().cloned());
+    steps
+}
+
+pub fn format_execution_plan(command: &ExpandedPluginCommand) -> String {
+    execution_steps(command)
+        .iter()
+        .map(format_expanded_step)
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+pub fn manifest_schema(format: &str) -> Result<String> {
+    match format {
+        "toml" | "text" => Ok(plugin_schema_toml()),
+        "json" => serde_json::to_string_pretty(
+            &toml::from_str::<toml::Value>(&plugin_schema_toml()).map_err(|err| AppError::General(err.to_string()))?,
+        )
+        .map(|mut json| {
+            json.push('\n');
+            json
+        })
+        .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!("Unsupported plugin schema format: {other}"))),
+    }
+}
+
+pub fn parse_vars(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut vars = BTreeMap::new();
+    for value in values {
+        let Some((name, value)) = value.split_once('=') else {
+            return Err(AppError::General(format!(
+                "Invalid plugin variable assignment: {value}. Use KEY=VALUE"
+            )));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::General("Plugin variable name cannot be empty".to_string()));
+        }
+        vars.insert(name.to_string(), value.to_string());
+    }
+    Ok(vars)
+}
+
+fn run_expanded_step(step: &ExpandedPluginStep) -> Result<i32> {
+    let status = Command::new(&step.command)
+        .args(&step.args)
+        .current_dir(&step.cwd)
+        .envs(&step.env)
         .status()?;
     let code = status.code().unwrap_or(1);
     if !status.success() {
         return Err(AppError::General(format!(
             "Plugin command failed with status {code}: {}",
-            format_expanded_command(command)
+            format_expanded_step(step)
         )));
     }
     Ok(code)
@@ -255,7 +364,12 @@ pub fn format_manifest(manifest: &PluginManifest) -> String {
 
 pub fn format_command(plugin_name: &str, command: &PluginCommand) -> String {
     let description = command.description.as_deref().unwrap_or("-");
-    format!("{}:{} - {}", plugin_name, command.name, description)
+    let hook_count = command.pre.len() + command.post.len();
+    let env_count = command.env.len();
+    format!(
+        "{}:{} - {} [env={} hooks={}]",
+        plugin_name, command.name, description, env_count, hook_count
+    )
 }
 
 pub fn format_template(plugin_name: &str, template: &PluginTemplate) -> String {
@@ -270,13 +384,27 @@ pub fn format_template(plugin_name: &str, template: &PluginTemplate) -> String {
 }
 
 pub fn format_expanded_command(command: &ExpandedPluginCommand) -> String {
-    let mut parts = vec![command.command.clone()];
-    parts.extend(command.args.iter().cloned());
+    format_execution_plan(command)
+}
+
+fn format_expanded_step(step: &ExpandedPluginStep) -> String {
+    let mut parts = vec![step.command.clone()];
+    parts.extend(step.args.iter().cloned());
+    let env = if step.env.is_empty() {
+        "-".to_string()
+    } else {
+        step.env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<String>>()
+            .join(",")
+    };
     format!(
-        "{}:{} cwd={} {}",
-        command.plugin,
-        command.name,
-        command.cwd.display(),
+        "{}:{} cwd={} env={} {}",
+        step.phase,
+        step.name,
+        step.cwd.display(),
+        env,
         parts.join(" ")
     )
 }
@@ -399,6 +527,42 @@ fn expand_plugin_command(
         command: expand_template(&command.command, context),
         args,
         cwd,
+        env: expand_env(&command.env, context),
+        pre_hooks: command
+            .pre
+            .iter()
+            .enumerate()
+            .map(|(index, hook)| expand_hook("pre", index, hook, context))
+            .collect(),
+        post_hooks: command
+            .post
+            .iter()
+            .enumerate()
+            .map(|(index, hook)| expand_hook("post", index, hook, context))
+            .collect(),
+    }
+}
+
+fn expand_hook(phase: &str, index: usize, hook: &PluginHookCommand, context: &PluginContext) -> ExpandedPluginStep {
+    let cwd = hook
+        .cwd
+        .as_deref()
+        .map(|cwd| expand_template(cwd, context))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| context.workspace.clone());
+    let cwd = if cwd.is_absolute() {
+        cwd
+    } else {
+        context.workspace.join(cwd)
+    };
+
+    ExpandedPluginStep {
+        phase: phase.to_string(),
+        name: hook.name.clone().unwrap_or_else(|| format!("{}-{}", phase, index + 1)),
+        command: expand_template(&hook.command, context),
+        args: hook.args.iter().map(|arg| expand_template(arg, context)).collect(),
+        cwd,
+        env: expand_env(&hook.env, context),
     }
 }
 
@@ -415,6 +579,30 @@ fn diagnostics_for_command(plugin_name: &str, command: &PluginCommand) -> Vec<Pl
             ok: false,
             detail: format!("unknown template variable: {variable}"),
         }));
+    }
+    for hook in command.pre.iter().chain(command.post.iter()) {
+        diagnostics.push(PluginDiagnostic {
+            name: format!(
+                "{}:{}:{}",
+                plugin_name,
+                command.name,
+                hook.name.as_deref().unwrap_or("hook")
+            ),
+            ok: !hook.command.trim().is_empty(),
+            detail: format!("hook_command={}", hook.command),
+        });
+        for value in hook_fields(hook) {
+            diagnostics.extend(unknown_variables(value).into_iter().map(|variable| PluginDiagnostic {
+                name: format!(
+                    "{}:{}:{}",
+                    plugin_name,
+                    command.name,
+                    hook.name.as_deref().unwrap_or("hook")
+                ),
+                ok: false,
+                detail: format!("unknown template variable: {variable}"),
+            }));
+        }
     }
     diagnostics
 }
@@ -443,6 +631,17 @@ fn command_fields(command: &PluginCommand) -> Vec<&str> {
     if let Some(cwd) = command.cwd.as_deref() {
         fields.push(cwd);
     }
+    fields.extend(command.env.values().map(String::as_str));
+    fields
+}
+
+fn hook_fields(hook: &PluginHookCommand) -> Vec<&str> {
+    let mut fields = vec![hook.command.as_str()];
+    fields.extend(hook.args.iter().map(|arg| arg.as_str()));
+    if let Some(cwd) = hook.cwd.as_deref() {
+        fields.push(cwd);
+    }
+    fields.extend(hook.env.values().map(String::as_str));
     fields
 }
 
@@ -465,7 +664,7 @@ fn unknown_variables(value: &str) -> Vec<String> {
             break;
         };
         let variable = &after_start[..end];
-        if !TEMPLATE_VARIABLES.contains(&variable) {
+        if !is_known_template_variable(variable) {
             unknown.insert(variable.to_string(), ());
         }
         rest = &after_start[end + 1..];
@@ -474,11 +673,99 @@ fn unknown_variables(value: &str) -> Vec<String> {
 }
 
 fn expand_template(template: &str, context: &PluginContext) -> String {
-    template
-        .replace("{workspace}", &context.workspace.to_string_lossy())
-        .replace("{file}", context.file.as_deref().unwrap_or(""))
-        .replace("{line}", &context.line.map(|line| line.to_string()).unwrap_or_default())
-        .replace("{symbol}", context.symbol.as_deref().unwrap_or(""))
+    let mut output = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            output.push('{');
+            output.push_str(after_start);
+            return output;
+        };
+        let variable = &after_start[..end];
+        match template_variable_value(variable, context) {
+            Some(value) => output.push_str(&value),
+            None => {
+                output.push('{');
+                output.push_str(variable);
+                output.push('}');
+            }
+        }
+        rest = &after_start[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn expand_env(env: &BTreeMap<String, String>, context: &PluginContext) -> BTreeMap<String, String> {
+    env.iter()
+        .map(|(name, value)| (name.clone(), expand_template(value, context)))
+        .collect()
+}
+
+fn template_variable_value(variable: &str, context: &PluginContext) -> Option<String> {
+    match variable {
+        "workspace" => Some(context.workspace.to_string_lossy().to_string()),
+        "file" => Some(context.file.clone().unwrap_or_default()),
+        "line" => Some(context.line.map(|line| line.to_string()).unwrap_or_default()),
+        "symbol" => Some(context.symbol.clone().unwrap_or_default()),
+        _ if variable.starts_with("env.") => {
+            let name = variable.trim_start_matches("env.");
+            Some(std::env::var(name).unwrap_or_default())
+        }
+        _ if variable.starts_with("var.") => {
+            let name = variable.trim_start_matches("var.");
+            Some(context.vars.get(name).cloned().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+fn is_known_template_variable(variable: &str) -> bool {
+    TEMPLATE_VARIABLES.contains(&variable) || variable.starts_with("env.") || variable.starts_with("var.")
+}
+
+fn plugin_schema_toml() -> String {
+    r#"[plugin]
+name = "example"
+version = "1.0.0"
+description = "Optional plugin description"
+
+[[commands]]
+name = "command-name"
+description = "Command shown in fcs plugin commands"
+command = "echo"
+args = ["{workspace}", "{file}:{line}", "{symbol}", "{env.HOME}", "{var.mode}"]
+cwd = "{workspace}"
+env = { FCS_PLUGIN_MODE = "{var.mode}", FCS_WORKSPACE = "{workspace}" }
+
+[[commands.pre]]
+name = "before"
+command = "echo"
+args = ["pre hook"]
+cwd = "{workspace}"
+env = { FCS_HOOK = "pre" }
+
+[[commands.post]]
+name = "after"
+command = "echo"
+args = ["post hook"]
+cwd = "{workspace}"
+env = { FCS_HOOK = "post" }
+
+[[templates]]
+name = "template-name"
+description = "Template shown in fcs plugin templates"
+
+[[templates.actions]]
+name = "project-action"
+description = "Action copied into .fcs.toml"
+command = "echo"
+args = ["{workspace}"]
+cwd = "{workspace}"
+"#
+    .to_string()
 }
 
 #[cfg(test)]
@@ -505,18 +792,69 @@ mod tests {
             command: "echo".to_string(),
             args: vec!["{file}:{line}".to_string(), "{symbol}".to_string()],
             cwd: Some("{workspace}".to_string()),
+            env: BTreeMap::new(),
+            pre: Vec::new(),
+            post: Vec::new(),
         };
         let context = PluginContext {
             workspace: root.clone(),
             file: Some("src/main.rs".to_string()),
             line: Some(7),
             symbol: Some("main".to_string()),
+            vars: BTreeMap::new(),
         };
 
         let expanded = expand_plugin_command("demo", &command, &context, &["--extra".to_string()]);
 
         assert_eq!(expanded.cwd, root);
         assert_eq!(expanded.args, vec!["src/main.rs:7", "main", "--extra"]);
+    }
+
+    #[test]
+    fn expands_plugin_env_hooks_and_custom_vars() {
+        let root = PathBuf::from("/tmp/project");
+        let command = PluginCommand {
+            name: "trace".to_string(),
+            description: None,
+            command: "echo".to_string(),
+            args: vec!["{var.mode}".to_string()],
+            cwd: Some("{workspace}".to_string()),
+            env: BTreeMap::from([("MODE".to_string(), "{var.mode}".to_string())]),
+            pre: vec![PluginHookCommand {
+                name: Some("prepare".to_string()),
+                command: "echo".to_string(),
+                args: vec!["{file}".to_string()],
+                cwd: Some("{workspace}".to_string()),
+                env: BTreeMap::from([("HOOK".to_string(), "pre-{var.mode}".to_string())]),
+            }],
+            post: vec![PluginHookCommand {
+                name: Some("cleanup".to_string()),
+                command: "echo".to_string(),
+                args: vec!["done".to_string()],
+                cwd: None,
+                env: BTreeMap::new(),
+            }],
+        };
+        let context = PluginContext {
+            workspace: root.clone(),
+            file: Some("src/main.rs".to_string()),
+            line: Some(7),
+            symbol: Some("main".to_string()),
+            vars: BTreeMap::from([("mode".to_string(), "debug".to_string())]),
+        };
+
+        let expanded = expand_plugin_command("demo", &command, &context, &[]);
+        let plan = format_execution_plan(&expanded);
+
+        assert_eq!(expanded.env.get("MODE").map(String::as_str), Some("debug"));
+        assert_eq!(
+            expanded.pre_hooks[0].env.get("HOOK").map(String::as_str),
+            Some("pre-debug")
+        );
+        assert_eq!(execution_steps(&expanded).len(), 3);
+        assert!(plan.contains("pre:prepare"));
+        assert!(plan.contains("main:trace"));
+        assert!(plan.contains("post:cleanup"));
     }
 
     #[test]

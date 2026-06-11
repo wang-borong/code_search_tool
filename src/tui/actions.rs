@@ -35,6 +35,12 @@ pub(super) enum AppAction {
     MoveSelection(isize),
     ScrollPreview(isize),
     TogglePreviewLock,
+    DapContinue,
+    DapPause,
+    DapNext,
+    DapStepIn,
+    DapStepOut,
+    DapStop,
     Definition,
     References,
 }
@@ -77,6 +83,12 @@ pub(super) fn action_for_key(key: KeyEvent, keymap: &TuiKeymapConfig) -> Option<
         KeyCode::Char('s') => Some(AppAction::DocumentSymbols),
         KeyCode::Char('t') => Some(AppAction::TypeDefinition),
         KeyCode::Enter | KeyCode::Char('o') => Some(AppAction::Open),
+        KeyCode::F(5) if key.modifiers.contains(KeyModifiers::CONTROL) => Some(AppAction::DapStop),
+        KeyCode::F(5) => Some(AppAction::DapContinue),
+        KeyCode::F(10) => Some(AppAction::DapNext),
+        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => Some(AppAction::DapStepOut),
+        KeyCode::F(11) => Some(AppAction::DapStepIn),
+        KeyCode::F(6) => Some(AppAction::DapPause),
         KeyCode::Tab | KeyCode::Right => Some(AppAction::NextSource),
         KeyCode::BackTab | KeyCode::Left => Some(AppAction::PreviousSource),
         KeyCode::Down | KeyCode::Char('j') => Some(AppAction::MoveSelection(1)),
@@ -139,6 +151,17 @@ mod tests {
         assert_eq!(
             action_for_key(KeyEvent::from(KeyCode::Char('C')), &TuiKeymapConfig::default()),
             Some(AppAction::OutgoingCalls)
+        );
+        assert_eq!(
+            action_for_key(KeyEvent::from(KeyCode::F(5)), &TuiKeymapConfig::default()),
+            Some(AppAction::DapContinue)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::F(11), KeyModifiers::SHIFT),
+                &TuiKeymapConfig::default()
+            ),
+            Some(AppAction::DapStepOut)
         );
     }
 

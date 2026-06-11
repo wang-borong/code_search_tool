@@ -2,6 +2,7 @@ use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,34 @@ pub struct ProjectConfig {
     pub latency_warn_ms: u64,
     #[serde(default)]
     pub actions: Vec<ActionConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProfile {
+    pub name: String,
+    pub root: PathBuf,
+    pub project_type: String,
+    pub languages: Vec<String>,
+    pub build_systems: Vec<String>,
+    pub index_roots: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub updated_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceProfileStore {
+    #[serde(default)]
+    pub active: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<WorkspaceProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDiagnostic {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
 }
 
 impl Default for ProjectConfig {
@@ -123,6 +152,49 @@ pub struct WorkspaceAdviceReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStartupPlan {
+    pub root: PathBuf,
+    pub active_profile: Option<String>,
+    pub project_type: String,
+    pub languages: Vec<String>,
+    pub build_systems: Vec<String>,
+    pub index: WorkspaceStartupIndex,
+    pub lsp: WorkspaceStartupLsp,
+    pub debug_profile_count: usize,
+    pub dap_profile_count: usize,
+    pub recommended_tasks: Vec<String>,
+    pub blocking_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStartupIndex {
+    pub exists: bool,
+    pub stale: bool,
+    pub corrupt: bool,
+    pub file_count: usize,
+    pub symbol_count: usize,
+    pub changed_tracked_files: usize,
+    pub missing_tracked_files: usize,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStartupLsp {
+    pub provider: String,
+    pub command: String,
+    pub available: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticWorkflow {
+    pub name: String,
+    pub goal: String,
+    pub commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceHealthCheck {
     pub name: String,
     pub ok: bool,
@@ -206,6 +278,210 @@ pub fn init(directory: Option<&String>, clangd_command: &str) -> Result<Workspac
 
 pub fn advise(directory: Option<&String>, clangd_command: &str) -> Result<WorkspaceAdviceReport> {
     advise_with_lsp_commands(directory, clangd_command, crate::lsp::RUST_ANALYZER_COMMAND)
+}
+
+pub fn startup_plan(root: &Path, config: &crate::config::Config) -> Result<WorkspaceStartupPlan> {
+    let root = normalize_root(root);
+    let detection = detect_project(&root)?;
+    let index_status = crate::index::status(&root)?;
+    let provider = crate::lsp::provider_for_workspace(&root, &config.lsp);
+    let provider_health = crate::lsp::provider_health(&provider);
+    let active_profile = current_profile()?.map(|profile| profile.name);
+    let debug_profile_count = crate::debugger::list_profiles(&root).unwrap_or_default().len();
+    let dap_profile_count = crate::dap::list_profiles(&root).unwrap_or_default().len();
+    let mut recommended_tasks = Vec::new();
+    let mut blocking_warnings = Vec::new();
+
+    if !index_status.exists {
+        recommended_tasks.push("index build".to_string());
+    } else if index_status.is_stale || index_status.changed_tracked_files > 0 || index_status.missing_tracked_files > 0
+    {
+        recommended_tasks.push("index refresh".to_string());
+    }
+    if index_status.is_corrupt {
+        blocking_warnings.push("index cache is corrupt".to_string());
+        recommended_tasks.push("index repair".to_string());
+    }
+    if provider_health.status == crate::lsp::LspProviderHealthStatus::Unavailable {
+        recommended_tasks.push(format!("install or configure {}", provider.name()));
+    }
+    if debug_profile_count == 0 && dap_profile_count == 0 {
+        recommended_tasks.push("save a debug or DAP profile".to_string());
+    }
+    if detection.build_systems.is_empty() {
+        blocking_warnings.push("no build-system marker detected".to_string());
+    }
+
+    Ok(WorkspaceStartupPlan {
+        root,
+        active_profile,
+        project_type: detection.project_type,
+        languages: detection.languages,
+        build_systems: detection.build_systems,
+        index: WorkspaceStartupIndex {
+            exists: index_status.exists,
+            stale: index_status.is_stale,
+            corrupt: index_status.is_corrupt,
+            file_count: index_status.file_count,
+            symbol_count: index_status.symbol_count,
+            changed_tracked_files: index_status.changed_tracked_files,
+            missing_tracked_files: index_status.missing_tracked_files,
+            message: index_status.message,
+        },
+        lsp: WorkspaceStartupLsp {
+            provider: provider.name().to_string(),
+            command: provider.command().to_string(),
+            available: provider_health.status == crate::lsp::LspProviderHealthStatus::Available,
+            message: provider_health.message,
+        },
+        debug_profile_count,
+        dap_profile_count,
+        recommended_tasks,
+        blocking_warnings,
+    })
+}
+
+pub fn startup_plan_lines(plan: &WorkspaceStartupPlan) -> Vec<String> {
+    let profile = plan.active_profile.as_deref().unwrap_or("none");
+    let index_state = if plan.index.corrupt {
+        "corrupt"
+    } else if plan.index.stale {
+        "stale"
+    } else if plan.index.exists {
+        "ready"
+    } else {
+        "missing"
+    };
+    let lsp_state = if plan.lsp.available { "ready" } else { "missing" };
+    let mut lines = vec![
+        format!("profile: {profile}"),
+        format!("project: {} [{}]", plan.project_type, display_csv(&plan.languages)),
+        format!(
+            "index: {index_state} files={} symbols={}",
+            plan.index.file_count, plan.index.symbol_count
+        ),
+        format!("lsp: {} {lsp_state}", plan.lsp.provider),
+        "lazy: lsp and dap start on demand; index prewarm is explicit".to_string(),
+        format!(
+            "profiles: debug={} dap={}",
+            plan.debug_profile_count, plan.dap_profile_count
+        ),
+    ];
+    if !plan.recommended_tasks.is_empty() {
+        lines.push(format!("next: {}", display_csv(&plan.recommended_tasks)));
+    }
+    if !plan.blocking_warnings.is_empty() {
+        lines.push(format!("warn: {}", display_csv(&plan.blocking_warnings)));
+    }
+    lines
+}
+
+pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Result<Vec<DiagnosticWorkflow>> {
+    let root = normalize_root(root);
+    let plan = startup_plan(&root, config)?;
+    let provider = plan.lsp.provider;
+    let default_debug_binary = read_project_config(&root)?
+        .map(|config| config.default_debug_binary)
+        .filter(|binary| !binary.trim().is_empty())
+        .unwrap_or_else(|| "target/debug/app".to_string());
+    let root_arg = root.display().to_string();
+
+    Ok(vec![
+        DiagnosticWorkflow {
+            name: "crash-to-root-cause".to_string(),
+            goal: "Start from a crash location or suspicious trace entry, build evidence, then launch a DAP session"
+                .to_string(),
+            commands: vec![
+                format!("fcs workspace plan {root_arg}"),
+                format!("fcs query 'source:trace tag:crash status:open' {root_arg} --source trace"),
+                format!("fcs trace insights default --directory {root_arg}"),
+                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                "fcs tui --mode debug".to_string(),
+            ],
+            notes: vec![
+                "Use trace status/priority to keep only active evidence in the loop".to_string(),
+                "Switch to `dap adapter-session auto` after a profile has stable breakpoints".to_string(),
+            ],
+        },
+        DiagnosticWorkflow {
+            name: "symbol-to-callers".to_string(),
+            goal: "Find a symbol quickly, inspect incoming/outgoing relationships, then pin relevant call sites"
+                .to_string(),
+            commands: vec![
+                format!("fcs query 'name:<symbol> source:index' {root_arg} --source all"),
+                "fcs refs <path:line> --directory <workspace>".to_string(),
+                "fcs incoming <path:line> --directory <workspace>".to_string(),
+                "fcs outgoing <path:line> --directory <workspace>".to_string(),
+                "fcs graph semantic <path:line> incoming --depth 2 --fanout 20".to_string(),
+            ],
+            notes: vec![
+                format!("Semantic calls use {provider}; index-backed query remains useful when LSP is unavailable"),
+                "Prefer `query source:index` for broad symbol discovery before opening semantic call trees".to_string(),
+            ],
+        },
+        DiagnosticWorkflow {
+            name: "diagnostic-to-fix".to_string(),
+            goal: "Move from compiler/LSP diagnostics to surrounding symbols, references, and a focused trace report"
+                .to_string(),
+            commands: vec![
+                format!("fcs lsp health {root_arg}"),
+                "fcs diag <file> --directory <workspace>".to_string(),
+                "fcs lsp code-actions <path:line> --directory <workspace>".to_string(),
+                "fcs trace add <path:line> --kind evidence --tag diagnostic".to_string(),
+                "fcs trace structured default --directory <workspace>".to_string(),
+            ],
+            notes: vec![
+                "Keep fixes explicit: inspect code actions before applying them".to_string(),
+                "Use trace structured reports to separate hypotheses from evidence".to_string(),
+            ],
+        },
+        DiagnosticWorkflow {
+            name: "trace-to-debug-profile".to_string(),
+            goal: "Convert a trace session into verified breakpoints and a repeatable debug launch".to_string(),
+            commands: vec![
+                "fcs trace sessions".to_string(),
+                format!("fcs trace replay-plan default --directory {root_arg} --program {default_debug_binary}"),
+                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                "fcs dap adapters".to_string(),
+                format!("fcs dap adapter-session auto {default_debug_binary} --cwd {root_arg}"),
+            ],
+            notes: vec![
+                "Adapter discovery is best-effort and never installs tools automatically".to_string(),
+                "Verified breakpoint output should be checked before relying on a replay".to_string(),
+            ],
+        },
+    ])
+}
+
+pub fn format_diagnostic_workflows(workflows: &[DiagnosticWorkflow], format: &str) -> Result<String> {
+    match format {
+        "text" | "markdown" | "md" => {
+            let mut output = String::new();
+            for workflow in workflows {
+                output.push_str(&format!("## {}\n", workflow.name));
+                output.push_str(&format!("goal: {}\n", workflow.goal));
+                output.push_str("commands:\n");
+                for command in &workflow.commands {
+                    output.push_str(&format!("  {command}\n"));
+                }
+                output.push_str("notes:\n");
+                for note in &workflow.notes {
+                    output.push_str(&format!("  {note}\n"));
+                }
+                output.push('\n');
+            }
+            Ok(output)
+        }
+        "json" => serde_json::to_string_pretty(workflows)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported workflow output format: {other}"
+        ))),
+    }
 }
 
 pub fn advise_with_lsp_commands(
@@ -409,6 +685,161 @@ pub fn read_project_config(root: &Path) -> Result<Option<ProjectConfig>> {
         .map_err(|e| AppError::General(e.to_string()))
 }
 
+pub fn save_profile(
+    name: &str,
+    directory: Option<&String>,
+    description: Option<String>,
+    index_roots: &[String],
+) -> Result<WorkspaceProfile> {
+    let root = resolve_root(directory)?;
+    let detection = detect_project(&root)?;
+    let mut store = read_profile_store()?;
+    let profile = WorkspaceProfile {
+        name: name.to_string(),
+        root,
+        project_type: detection.project_type,
+        languages: detection.languages,
+        build_systems: detection.build_systems,
+        index_roots: if index_roots.is_empty() {
+            detection.index_roots
+        } else {
+            index_roots.to_vec()
+        },
+        description,
+        updated_at_unix: now_unix(),
+    };
+
+    store.profiles.retain(|existing| existing.name != profile.name);
+    store.profiles.push(profile.clone());
+    store.profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    write_profile_store(&store)?;
+    Ok(profile)
+}
+
+pub fn list_profiles() -> Result<WorkspaceProfileStore> {
+    read_profile_store()
+}
+
+pub fn get_profile(name: &str) -> Result<WorkspaceProfile> {
+    read_profile_store()?
+        .profiles
+        .into_iter()
+        .find(|profile| profile.name == name)
+        .ok_or_else(|| AppError::General(format!("Workspace profile not found: {name}")))
+}
+
+pub fn use_profile(name: &str) -> Result<WorkspaceProfile> {
+    let mut store = read_profile_store()?;
+    let profile = store
+        .profiles
+        .iter()
+        .find(|profile| profile.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::General(format!("Workspace profile not found: {name}")))?;
+    store.active = Some(name.to_string());
+    write_profile_store(&store)?;
+    Ok(profile)
+}
+
+pub fn current_profile() -> Result<Option<WorkspaceProfile>> {
+    let store = read_profile_store()?;
+    let Some(active) = store.active else {
+        return Ok(None);
+    };
+    Ok(store.profiles.into_iter().find(|profile| profile.name == active))
+}
+
+pub fn delete_profile(name: &str) -> Result<bool> {
+    let mut store = read_profile_store()?;
+    let before = store.profiles.len();
+    store.profiles.retain(|profile| profile.name != name);
+    if store.active.as_deref() == Some(name) {
+        store.active = None;
+    }
+    let deleted = store.profiles.len() != before;
+    if deleted {
+        write_profile_store(&store)?;
+    }
+    Ok(deleted)
+}
+
+pub fn config_diagnostics(root: &Path) -> Result<Vec<ConfigDiagnostic>> {
+    let mut diagnostics = Vec::new();
+    let path = root.join(".fcs.toml");
+    let Some(config) = read_project_config(root)? else {
+        diagnostics.push(ConfigDiagnostic {
+            name: "config-file".to_string(),
+            ok: false,
+            detail: format!("missing {}", path.display()),
+        });
+        return Ok(diagnostics);
+    };
+
+    diagnostics.push(ConfigDiagnostic {
+        name: "project-type".to_string(),
+        ok: !config.project_type.trim().is_empty(),
+        detail: config.project_type.clone(),
+    });
+    diagnostics.push(ConfigDiagnostic {
+        name: "index-roots".to_string(),
+        ok: !config.index_roots.is_empty() && config.index_roots.iter().all(|entry| !entry.trim().is_empty()),
+        detail: config.index_roots.join(", "),
+    });
+    for index_root in &config.index_roots {
+        diagnostics.push(ConfigDiagnostic {
+            name: format!("index-root:{index_root}"),
+            ok: root.join(index_root).exists(),
+            detail: root.join(index_root).display().to_string(),
+        });
+    }
+    diagnostics.push(ConfigDiagnostic {
+        name: "search-ignore".to_string(),
+        ok: config.search_ignore.iter().all(|entry| !entry.trim().is_empty()),
+        detail: format!("{} pattern(s)", config.search_ignore.len()),
+    });
+    diagnostics.push(ConfigDiagnostic {
+        name: "latency-warn-ms".to_string(),
+        ok: config.latency_warn_ms > 0,
+        detail: config.latency_warn_ms.to_string(),
+    });
+    diagnostics.push(ConfigDiagnostic {
+        name: "default-debug-binary".to_string(),
+        ok: !config.default_debug_binary.trim().is_empty(),
+        detail: config.default_debug_binary.clone(),
+    });
+
+    let mut action_names = BTreeSet::new();
+    for action in &config.actions {
+        let unique = action_names.insert(action.name.clone());
+        diagnostics.push(ConfigDiagnostic {
+            name: format!("action:{}", action.name),
+            ok: unique && !action.name.trim().is_empty() && !action.command.trim().is_empty(),
+            detail: format!("command={}", action.command),
+        });
+    }
+
+    Ok(diagnostics)
+}
+
+pub fn project_config_schema(format: &str) -> Result<String> {
+    let contents =
+        toml::to_string_pretty(&ProjectConfig::default()).map_err(|err| AppError::General(err.to_string()))?;
+    match format {
+        "toml" | "text" => Ok(contents),
+        "json" => serde_json::to_string_pretty(
+            &toml::from_str::<toml::Value>(&contents).map_err(|err| AppError::General(err.to_string()))?,
+        )
+        .map(|mut json| {
+            json.push('\n');
+            json
+        })
+        .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported project config schema format: {other}"
+        ))),
+    }
+}
+
 pub fn cache_dir_for_root(root: &Path) -> Result<PathBuf> {
     workspace_cache_dir(root)
 }
@@ -447,6 +878,18 @@ fn is_workspace_marker(path: &Path) -> bool {
         || path.join("compile_flags.txt").exists()
         || path.join("Cargo.toml").exists()
         || path.join("CMakeLists.txt").exists()
+}
+
+fn normalize_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
+fn display_csv(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 pub fn detect_project(root: &Path) -> Result<ProjectDetection> {
@@ -768,6 +1211,39 @@ fn workspace_cache_path(root: &Path, cache_root: &Path) -> PathBuf {
     cache_root.join(format!("{name}-{hash}"))
 }
 
+fn read_profile_store() -> Result<WorkspaceProfileStore> {
+    let path = profile_store_path()?;
+    if !path.exists() {
+        return Ok(WorkspaceProfileStore::default());
+    }
+
+    let contents = fs::read_to_string(&path)?;
+    toml::from_str(&contents).map_err(|err| AppError::General(format!("Failed to parse {}: {err}", path.display())))
+}
+
+fn write_profile_store(store: &WorkspaceProfileStore) -> Result<()> {
+    let path = profile_store_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = toml::to_string_pretty(store).map_err(|err| AppError::General(err.to_string()))?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn profile_store_path() -> Result<PathBuf> {
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| AppError::General("Could not find configuration directory".to_string()))?;
+    Ok(config_dir.join("fcs").join("workspace_profiles.toml"))
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,5 +1427,48 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn startup_plan_reports_non_blocking_workspace_tasks() {
+        let temp_dir = temp_workspace_dir("startup_plan");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let plan = startup_plan(&temp_dir, &crate::config::Config::default()).unwrap();
+        let lines = startup_plan_lines(&plan);
+
+        assert_eq!(plan.project_type, "rust");
+        assert!(!plan.index.exists);
+        assert!(plan.recommended_tasks.iter().any(|task| task == "index build"));
+        assert!(lines.iter().any(|line| line.starts_with("index: missing")));
+        assert!(lines
+            .iter()
+            .any(|line| line == "lazy: lsp and dap start on demand; index prewarm is explicit"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn diagnostic_workflows_include_trace_and_dap_paths() {
+        let temp_dir = temp_workspace_dir("diagnostic_workflows");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let workflows = diagnostic_workflows(&temp_dir, &crate::config::Config::default()).unwrap();
+        let text = format_diagnostic_workflows(&workflows, "text").unwrap();
+
+        assert!(workflows.iter().any(|workflow| workflow.name == "crash-to-root-cause"));
+        assert!(workflows
+            .iter()
+            .any(|workflow| workflow.name == "trace-to-debug-profile"));
+        assert!(text.contains("fcs dap adapters"));
+        assert!(text.contains("fcs trace replay-plan"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
