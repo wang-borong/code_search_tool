@@ -66,12 +66,19 @@
 - Added query `source:` field filters, query-plan explanation, latency output, and warning thresholds for `query` and `service query`.
 - Added `workspace workflows` diagnostic templates and lazy startup-plan guidance for on-demand LSP/DAP and explicit index prewarm.
 - Added P73-P80 smoke coverage for adapter discovery, query explanation/timing, source filtering, service query explanation, and workflow templates.
+- Added global config `schema_version` compatibility diagnostics for legacy and future `fcs.toml` files.
+- Added `scripts/release-check.sh fast|full` so local iteration can use a lightweight gate while release candidates still run the full package gate.
+- Added DAP attach request support, adapter templates, capability reporting, and process-id-aware launch/profile/session-smoke commands.
+- Added TUI DAP thread/frame selection plus variable expansion and paging commands for deeper debug-session inspection.
+- Added grouped query execution with `OR`, `NOT`, parentheses, richer explain filters, and semantic-to-index fallback when LSP is unavailable.
+- Added `index shards` planning reports for large workspaces and extended smoke coverage for shard planning, query AST explain, semantic fallback, DAP templates, and mock attach sessions.
 
 ### Verification
 
 - Expected release gate: `rtk cargo test`.
 - Recommended full local gate: `rtk scripts/smoke.sh`.
-- Recommended package gate: `rtk scripts/release-check.sh`.
+- Recommended fast package gate: `rtk scripts/release-check.sh fast`.
+- Recommended full package gate: `rtk scripts/release-check.sh full`.
 - Verified locally with `rtk cargo clippy -- -D warnings`, `rtk cargo test`, index/workspace/query/service/bench/graph/DAP/trace CLI smoke, and TUI startup/command-palette smoke.
 
 ## 0.6.3

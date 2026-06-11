@@ -228,6 +228,9 @@ fcs index list --kind files --limit 50
 # 查看缓存大小、语言分布、symbol kind 分布
 fcs index stats
 
+# 为大型 workspace 估算 shard 拆分建议
+fcs index shards . --target-symbols 5000 --format json
+
 # 查询缓存索引，不重新扫描项目
 fcs index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
 
@@ -249,7 +252,7 @@ fcs index daemon-status
 fcs index bench --limit 50 --query main
 ```
 
-索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
+索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index shards` 按目录 bucket 统计文件和符号分布，用于判断大型项目是否需要拆分缓存或并行预热。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
 
 ---
 
@@ -270,15 +273,20 @@ fcs query "session:bug-42 status:open tag:hot" . --source trace
 # 解释字段解析、source 选择和支持字段，不执行查询
 fcs query "source:index kind:function name:main" . --source all --explain
 
+# 支持分组、OR 和 NOT，用于更精确的代码追踪过滤
+fcs query "kind:function (name:parse or name:init) not path:target" . --source all --explain
+
 # 输出慢查询观测信息
 fcs query "source:index kind:function text:main" . --source all --timing --warn-ms 200
 
-# 只查 LSP workspace/symbol；默认 all 不会启动 LSP
+# 只查 LSP workspace/symbol；LSP 不可用时回退到本地 index 结果
 fcs query "name:parse_config" . --source semantic
 
 # 融合 index + trace + LSP；LSP 不可用时仍返回本地结果和状态项
 fcs query "kind:function text:main" . --source auto
 ```
+
+`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
 
 `fcs service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
 
@@ -467,6 +475,9 @@ fcs debug command target/debug/app -b src/main.c:42 --run
 # 只打印 launch request
 fcs dap launch target/debug/app -- --config dev.toml
 
+# 打印 attach request；当前 attach 模板需要 process id
+fcs dap launch target/debug/app --request attach --process-id 12345
+
 # 打印 setBreakpoints + launch 的请求数组
 fcs dap launch target/debug/app -b src/main.c:42 --bundle -- --config dev.toml
 
@@ -484,12 +495,15 @@ fcs dap session-smoke target/debug/app -b src/main.c:42 -- --config dev.toml
 # 查看本机可用的 DAP adapter 候选；不会自动安装
 fcs dap adapters
 
+# 查看内置 adapter 模板和声明的能力标签
+fcs dap templates
+
 # 使用真实 DAP adapter 进程做 initialize/launch/configurationDone 会话
 fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 ```
 
-`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect` 和 `dap jump/open`；Debug 面板会分区显示 session、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
+`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
@@ -674,9 +688,13 @@ TUI 已拆成小模块：
 `fcs` 首次运行时会在用户的配置目录中自动生成 `fcs.toml` 默认配置文件：
 - **Linux/macOS**: `~/.config/fcs/fcs.toml` 或 `$XDG_CONFIG_HOME/fcs/fcs.toml`
 
+全局配置文件带有顶层 `schema_version`。当前支持版本为 `1`；旧配置缺失该字段时仍会按兼容默认值读取，未来版本配置会给出明确错误，提示升级 `fcs` 或恢复到当前工具支持的配置版本。
+
 ### 默认配置内容及说明
 
 ```toml
+schema_version = 1
+
 [search]
 # 默认追加的 ripgrep 搜索参数（例如：["-S"] 开启默认智能大小写）
 rg_options = []
@@ -768,16 +786,22 @@ cargo test
 rtk cargo test
 ```
 
-发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、workspace profile/config doctor/schema、query/service/bench、trace export/graph/session edit/timeline/diff/structured/insights/replay-plan、index query/repair/bench/daemon、project action templates、plugin schema/plan、debug profile 和 DAP mock 流程；所有命令都通过 `rtk` 执行：
+发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、workspace profile/config doctor/schema、query/service/bench、trace export/graph/session edit/timeline/diff/structured/insights/replay-plan、index query/repair/bench/daemon/shards、project action templates、plugin schema/plan、debug profile、DAP mock launch/attach 和 adapter/template 发现流程；所有命令都通过 `rtk` 执行：
 
 ```bash
 rtk scripts/smoke.sh
 ```
 
-更完整的发布门禁可以执行：
+发布门禁分为快速和完整两级。日常改动推荐先跑 fast：
 
 ```bash
-rtk scripts/release-check.sh
+rtk scripts/release-check.sh fast
+```
+
+准备发版或交付候选版本时运行 full；不传参数时默认也是 full：
+
+```bash
+rtk scripts/release-check.sh full
 ```
 
 发布流程的逐项核查见 `RELEASE_CHECKLIST.md`，用户可见变更记录见 `CHANGELOG.md`。

@@ -140,6 +140,26 @@ pub struct IndexStats {
     pub symbol_kinds: Vec<IndexCount>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardBucket {
+    pub name: String,
+    pub files: usize,
+    pub symbols: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardReport {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub file_count: usize,
+    pub symbol_count: usize,
+    pub index_size_bytes: u64,
+    pub target_symbols_per_shard: usize,
+    pub recommended_shards: usize,
+    pub buckets: Vec<IndexShardBucket>,
+    pub recommendation: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexCompactReport {
     pub path: PathBuf,
@@ -458,6 +478,86 @@ pub fn stats(root: &Path) -> Result<IndexStats> {
         built_at_unix: Some(index.built_at_unix),
         languages: count_values(index.files.iter().map(|file| file.language.as_str())),
         symbol_kinds: count_values(index.symbols.iter().map(|symbol| symbol.kind.as_str())),
+    })
+}
+
+pub fn shard_report(root: &Path, target_symbols_per_shard: usize) -> Result<IndexShardReport> {
+    if target_symbols_per_shard == 0 {
+        return Err(AppError::General(
+            "target_symbols_per_shard must be greater than zero".to_string(),
+        ));
+    }
+
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
+    let index_size_bytes = fs::metadata(&path).ok().map_or(0, |metadata| metadata.len());
+    let Some(index) = load(&root)? else {
+        return Ok(IndexShardReport {
+            path,
+            exists: false,
+            file_count: 0,
+            symbol_count: 0,
+            index_size_bytes,
+            target_symbols_per_shard,
+            recommended_shards: 0,
+            buckets: Vec::new(),
+            recommendation: "build the index before planning shards".to_string(),
+        });
+    };
+
+    let mut buckets = BTreeMap::<String, IndexShardBucket>::new();
+    for file in &index.files {
+        let key = shard_key(&file.path);
+        let bucket = buckets.entry(key.clone()).or_insert_with(|| IndexShardBucket {
+            name: key,
+            files: 0,
+            symbols: 0,
+        });
+        bucket.files += 1;
+    }
+    for symbol in &index.symbols {
+        let key = shard_key(&symbol.path);
+        let bucket = buckets.entry(key.clone()).or_insert_with(|| IndexShardBucket {
+            name: key,
+            files: 0,
+            symbols: 0,
+        });
+        bucket.symbols += 1;
+    }
+
+    let symbol_count = index.symbols.len();
+    let recommended_shards = if symbol_count == 0 {
+        1
+    } else {
+        symbol_count.div_ceil(target_symbols_per_shard)
+    };
+    let recommendation = if recommended_shards <= 1 {
+        "single-file index is still appropriate".to_string()
+    } else {
+        format!(
+            "consider {} shard(s) at roughly {} symbols per shard",
+            recommended_shards, target_symbols_per_shard
+        )
+    };
+    let mut buckets = buckets.into_values().collect::<Vec<IndexShardBucket>>();
+    buckets.sort_by(|left, right| {
+        right
+            .symbols
+            .cmp(&left.symbols)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(IndexShardReport {
+        path,
+        exists: true,
+        file_count: index.files.len(),
+        symbol_count,
+        index_size_bytes,
+        target_symbols_per_shard,
+        recommended_shards,
+        buckets,
+        recommendation,
     })
 }
 
@@ -977,6 +1077,13 @@ fn file_metadata_by_path(files: &[IndexedFile]) -> HashMap<String, IndexedFile> 
         .collect::<HashMap<String, IndexedFile>>()
 }
 
+fn shard_key(path: &str) -> String {
+    path.split(['/', '\\'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("<root>")
+        .to_string()
+}
+
 fn count_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IndexCount> {
     let mut counts = BTreeMap::<String, usize>::new();
     for value in values {
@@ -1248,6 +1355,31 @@ mod tests {
         assert_eq!(status.version, Some(INDEX_VERSION));
         assert_eq!(status.changed_tracked_files, 0);
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn shard_report_sorts_heaviest_buckets_first() {
+        let temp_dir = temp_workspace_dir("shards");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("hot")).unwrap();
+        fs::create_dir_all(temp_dir.join("cold")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(
+            temp_dir.join("hot").join("lib.rs"),
+            "pub fn alpha() {}\npub fn beta() {}\npub fn gamma() {}\n",
+        )
+        .unwrap();
+        fs::write(temp_dir.join("cold").join("lib.rs"), "pub fn delta() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+
+        build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        let report = shard_report(&temp_dir, 2).unwrap();
+
+        assert_eq!(report.recommended_shards, 2);
+        assert_eq!(report.buckets[0].name, "hot");
+        assert!(report.buckets[0].symbols > report.buckets[1].symbols);
+        assert!(shard_report(&temp_dir, 0).is_err());
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

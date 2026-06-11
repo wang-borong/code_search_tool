@@ -901,6 +901,13 @@ pub enum DapAction {
         format: String,
     },
 
+    /// List adapter-specific DAP launch/attach templates
+    Templates {
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Print a DAP launch request for an executable
     Launch {
         /// Program binary to launch
@@ -909,6 +916,14 @@ pub enum DapAction {
         /// DAP adapter type label, e.g. cppdbg or codelldb
         #[arg(short, long, default_value = "cppdbg")]
         adapter: String,
+
+        /// DAP request type: launch or attach
+        #[arg(long, default_value = "launch")]
+        request: String,
+
+        /// Process id for attach requests
+        #[arg(long = "process-id")]
+        process_id: Option<u64>,
 
         /// Launch profile name; defaults to the program file name
         #[arg(short, long)]
@@ -950,6 +965,14 @@ pub enum DapAction {
         /// DAP adapter type label, e.g. cppdbg or codelldb
         #[arg(short, long, default_value = "cppdbg")]
         adapter: String,
+
+        /// DAP request type: launch or attach
+        #[arg(long, default_value = "launch")]
+        request: String,
+
+        /// Process id for attach requests
+        #[arg(long = "process-id")]
+        process_id: Option<u64>,
 
         /// Breakpoint location, repeatable: path:line[:column]
         #[arg(short = 'b', long = "break")]
@@ -998,6 +1021,14 @@ pub enum DapAction {
         #[arg(short, long, default_value = "cppdbg")]
         adapter: String,
 
+        /// DAP request type: launch or attach
+        #[arg(long, default_value = "launch")]
+        request: String,
+
+        /// Process id for attach requests
+        #[arg(long = "process-id")]
+        process_id: Option<u64>,
+
         /// Target workspace directory
         #[arg(short, long)]
         directory: Option<String>,
@@ -1042,6 +1073,14 @@ pub enum DapAction {
         #[arg(short, long, default_value = "mock")]
         adapter: String,
 
+        /// DAP request type: launch or attach
+        #[arg(long, default_value = "launch")]
+        request: String,
+
+        /// Process id for attach requests
+        #[arg(long = "process-id")]
+        process_id: Option<u64>,
+
         /// Launch profile name; defaults to the program file name
         #[arg(short, long)]
         name: Option<String>,
@@ -1078,6 +1117,14 @@ pub enum DapAction {
         /// DAP adapter type label used in initialize arguments
         #[arg(short, long, default_value = "cppdbg")]
         adapter: String,
+
+        /// DAP request type: launch or attach
+        #[arg(long, default_value = "launch")]
+        request: String,
+
+        /// Process id for attach requests
+        #[arg(long = "process-id")]
+        process_id: Option<u64>,
 
         /// Launch profile name; defaults to the program file name
         #[arg(short, long)]
@@ -1628,6 +1675,20 @@ pub enum IndexAction {
         directory: Option<String>,
     },
 
+    /// Show index shard planning guidance for large workspaces
+    Shards {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Target symbol count per recommended shard
+        #[arg(long, default_value_t = 5000)]
+        target_symbols: usize,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Rebuild the cached files/symbols index
     Build {
         /// Target directory
@@ -1967,6 +2028,16 @@ mod tests {
             &["fcs", "service", "stop", "."],
             &["fcs", "index", "doctor", "."],
             &["fcs", "index", "stats", "."],
+            &[
+                "fcs",
+                "index",
+                "shards",
+                ".",
+                "--target-symbols",
+                "1000",
+                "--format",
+                "json",
+            ],
             &["fcs", "index", "compact", ".", "--dry-run"],
             &["fcs", "index", "prewarm", "."],
             &["fcs", "index", "refresh", "."],
@@ -1993,6 +2064,15 @@ mod tests {
                 "all",
                 "--format",
                 "json",
+            ],
+            &[
+                "fcs",
+                "query",
+                "kind:function (name:main or name:init) not path:target",
+                ".",
+                "--source",
+                "semantic",
+                "--explain",
             ],
             &["fcs", "bench", "all", ".", "--format", "json", "--warn-ms", "10000"],
             &["fcs", "bench", "search", "main", ".", "--format", "json"],
@@ -2227,6 +2307,18 @@ mod tests {
                 "--help",
             ],
             &["fcs", "debug", "delete-profile", "smoke", "--directory", "."],
+            &["fcs", "dap", "templates", "--format", "json"],
+            &[
+                "fcs",
+                "dap",
+                "launch",
+                "target/debug/fcs",
+                "--request",
+                "attach",
+                "--process-id",
+                "1234",
+                "--bundle",
+            ],
             &[
                 "fcs",
                 "dap",
@@ -2240,6 +2332,16 @@ mod tests {
                 "FCS_SMOKE=1",
                 "--",
                 "--help",
+            ],
+            &[
+                "fcs",
+                "dap",
+                "session-smoke",
+                "target/debug/fcs",
+                "--request",
+                "attach",
+                "--process-id",
+                "1234",
             ],
             &[
                 "fcs",
@@ -2274,6 +2376,17 @@ mod tests {
                 "FCS_SMOKE=1",
                 "--",
                 "--help",
+            ],
+            &[
+                "fcs",
+                "dap",
+                "adapter-session",
+                "mock-adapter",
+                "target/debug/fcs",
+                "--request",
+                "attach",
+                "--process-id",
+                "1234",
             ],
             &["fcs", "complete", "bash"],
             &["fcs", "man", "--stdout"],

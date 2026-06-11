@@ -19,6 +19,22 @@ pub enum QuerySource {
 pub struct QueryExpression {
     pub terms: Vec<String>,
     pub fields: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub root: QueryNode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryNode {
+    #[default]
+    All,
+    Term(String),
+    Field {
+        field: String,
+        value: String,
+    },
+    Not(Box<QueryNode>),
+    And(Vec<QueryNode>),
+    Or(Vec<QueryNode>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +56,8 @@ pub struct QueryExplanation {
     pub selected_sources: Vec<String>,
     pub terms: Vec<String>,
     pub fields: BTreeMap<String, Vec<String>>,
+    pub execution_plan: String,
+    pub filters: Vec<String>,
     pub supported_fields: Vec<String>,
 }
 
@@ -95,26 +113,220 @@ impl QuerySource {
 }
 
 pub fn parse_expression(expression: &str) -> QueryExpression {
+    let tokens = tokenize(expression);
+    let root = QueryParser::new(&tokens).parse();
     let mut parsed = QueryExpression {
         terms: Vec::new(),
         fields: BTreeMap::new(),
+        root,
     };
+    collect_expression_summary(&parsed.root, &mut parsed.terms, &mut parsed.fields);
+    parsed
+}
 
-    for token in tokenize(expression) {
-        if let Some((field, value)) = token.split_once(':') {
-            let field = field.trim().to_ascii_lowercase();
-            let value = value.trim();
-            if is_supported_field(&field) && !value.is_empty() {
-                parsed.fields.entry(field).or_default().push(value.to_string());
-                continue;
-            }
-        }
-        if !token.trim().is_empty() {
-            parsed.terms.push(token);
-        }
+struct QueryParser<'a> {
+    tokens: &'a [String],
+    position: usize,
+}
+
+impl<'a> QueryParser<'a> {
+    fn new(tokens: &'a [String]) -> Self {
+        Self { tokens, position: 0 }
     }
 
-    parsed
+    fn parse(mut self) -> QueryNode {
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> QueryNode {
+        let mut branches = vec![self.parse_and()];
+        while self.is_keyword("or") && self.next_starts_factor() {
+            self.position += 1;
+            branches.push(self.parse_and());
+        }
+        make_or(branches)
+    }
+
+    fn parse_and(&mut self) -> QueryNode {
+        let mut nodes = Vec::new();
+        while let Some(token) = self.current() {
+            if token == ")" || (self.is_keyword("or") && !nodes.is_empty()) {
+                break;
+            }
+            if self.is_keyword("and") && !nodes.is_empty() && self.next_starts_factor() {
+                self.position += 1;
+                continue;
+            }
+            nodes.push(self.parse_not());
+        }
+        make_and(nodes)
+    }
+
+    fn parse_not(&mut self) -> QueryNode {
+        if self.is_keyword("not") && self.next_starts_factor() {
+            self.position += 1;
+            return QueryNode::Not(Box::new(self.parse_not()));
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> QueryNode {
+        if self.consume("(") {
+            let node = self.parse_or();
+            self.consume(")");
+            return node;
+        }
+
+        let Some(token) = self.current().cloned() else {
+            return QueryNode::All;
+        };
+        self.position += 1;
+        atom_from_token(&token)
+    }
+
+    fn current(&self) -> Option<&String> {
+        self.tokens.get(self.position)
+    }
+
+    fn consume(&mut self, expected: &str) -> bool {
+        if self.current().is_some_and(|token| token == expected) {
+            self.position += 1;
+            return true;
+        }
+        false
+    }
+
+    fn is_keyword(&self, expected: &str) -> bool {
+        self.current().is_some_and(|token| token.eq_ignore_ascii_case(expected))
+    }
+
+    fn next_starts_factor(&self) -> bool {
+        self.tokens
+            .get(self.position + 1)
+            .is_some_and(|token| token != ")" && !token.eq_ignore_ascii_case("or"))
+    }
+}
+
+fn atom_from_token(token: &str) -> QueryNode {
+    if let Some((field, value)) = token.split_once(':') {
+        let field = field.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if is_supported_field(&field) && !value.is_empty() {
+            return QueryNode::Field {
+                field,
+                value: value.to_string(),
+            };
+        }
+    }
+    if token.trim().is_empty() {
+        QueryNode::All
+    } else {
+        QueryNode::Term(token.to_string())
+    }
+}
+
+fn make_and(nodes: Vec<QueryNode>) -> QueryNode {
+    let nodes = flatten_nodes(nodes, true);
+    match nodes.len() {
+        0 => QueryNode::All,
+        1 => nodes.into_iter().next().unwrap_or(QueryNode::All),
+        _ => QueryNode::And(nodes),
+    }
+}
+
+fn make_or(nodes: Vec<QueryNode>) -> QueryNode {
+    let nodes = flatten_nodes(nodes, false);
+    match nodes.len() {
+        0 => QueryNode::All,
+        1 => nodes.into_iter().next().unwrap_or(QueryNode::All),
+        _ => QueryNode::Or(nodes),
+    }
+}
+
+fn flatten_nodes(nodes: Vec<QueryNode>, flatten_and: bool) -> Vec<QueryNode> {
+    let mut flattened = Vec::new();
+    for node in nodes {
+        match node {
+            QueryNode::All if flatten_and => {}
+            QueryNode::And(children) if flatten_and => flattened.extend(children),
+            QueryNode::Or(children) if !flatten_and => flattened.extend(children),
+            other => flattened.push(other),
+        }
+    }
+    flattened
+}
+
+fn collect_expression_summary(node: &QueryNode, terms: &mut Vec<String>, fields: &mut BTreeMap<String, Vec<String>>) {
+    match node {
+        QueryNode::All => {}
+        QueryNode::Term(term) => terms.push(term.clone()),
+        QueryNode::Field { field, value } => {
+            fields.entry(field.clone()).or_default().push(value.clone());
+        }
+        QueryNode::Not(child) => collect_expression_summary(child, terms, fields),
+        QueryNode::And(children) | QueryNode::Or(children) => {
+            for child in children {
+                collect_expression_summary(child, terms, fields);
+            }
+        }
+    }
+}
+
+fn render_query_plan(node: &QueryNode) -> String {
+    match node {
+        QueryNode::All => "ALL".to_string(),
+        QueryNode::Term(term) => format!("text:{term}"),
+        QueryNode::Field { field, value } => format!("{field}:{value}"),
+        QueryNode::Not(child) => format!("NOT({})", render_query_plan(child)),
+        QueryNode::And(children) => {
+            let parts = children.iter().map(render_query_plan).collect::<Vec<String>>();
+            format!("AND({})", parts.join(", "))
+        }
+        QueryNode::Or(children) => {
+            let parts = children.iter().map(render_query_plan).collect::<Vec<String>>();
+            format!("OR({})", parts.join(", "))
+        }
+    }
+}
+
+fn summarize_filters(node: &QueryNode) -> Vec<String> {
+    let mut filters = Vec::new();
+    collect_filter_summary(node, false, &mut filters);
+    filters
+}
+
+fn collect_filter_summary(node: &QueryNode, negated: bool, filters: &mut Vec<String>) {
+    match node {
+        QueryNode::All => {}
+        QueryNode::Term(term) => {
+            filters.push(format_filter(negated, &format!("text contains \"{term}\"")));
+        }
+        QueryNode::Field { field, value } => {
+            filters.push(format_filter(negated, &format!("{field}:{value}")));
+        }
+        QueryNode::Not(child) => collect_filter_summary(child, !negated, filters),
+        QueryNode::And(children) => {
+            for child in children {
+                collect_filter_summary(child, negated, filters);
+            }
+        }
+        QueryNode::Or(children) => {
+            let parts = children.iter().map(render_query_plan).collect::<Vec<String>>();
+            if negated {
+                filters.push(format!("exclude any of: {}", parts.join(" OR ")));
+            } else {
+                filters.push(format!("any of: {}", parts.join(" OR ")));
+            }
+        }
+    }
+}
+
+fn format_filter(negated: bool, filter: &str) -> String {
+    if negated {
+        format!("exclude {filter}")
+    } else {
+        format!("require {filter}")
+    }
 }
 
 pub fn run(root: &Path, expression: &str, source: QuerySource, limit: usize) -> Result<Vec<QueryMatch>> {
@@ -129,6 +341,8 @@ pub fn explain(expression: &str, source: QuerySource) -> QueryExplanation {
         selected_sources: source.selected_sources(),
         terms: parsed.terms,
         fields: parsed.fields,
+        execution_plan: render_query_plan(&parsed.root),
+        filters: summarize_filters(&parsed.root),
         supported_fields: supported_fields().iter().map(|field| (*field).to_string()).collect(),
     }
 }
@@ -144,12 +358,21 @@ pub fn format_explanation(explanation: &QueryExplanation, format: &str) -> Resul
                 explanation.selected_sources.join(", ")
             ));
             output.push_str(&format!("terms: {}\n", display_values(&explanation.terms)));
+            output.push_str(&format!("execution_plan: {}\n", explanation.execution_plan));
             output.push_str("fields:\n");
             if explanation.fields.is_empty() {
                 output.push_str("  none\n");
             } else {
                 for (field, values) in &explanation.fields {
                     output.push_str(&format!("  {field}: {}\n", display_values(values)));
+                }
+            }
+            output.push_str("filters:\n");
+            if explanation.filters.is_empty() {
+                output.push_str("  none\n");
+            } else {
+                for filter in &explanation.filters {
+                    output.push_str(&format!("  - {filter}\n"));
                 }
             }
             output.push_str(&format!(
@@ -200,9 +423,15 @@ pub fn run_with_config(
                         score: usize::MAX.saturating_sub(1),
                     });
                 }
+                Err(_) if source == QuerySource::Semantic => {
+                    matches.extend(semantic_fallback_matches(root, &parsed, "semantic unavailable")?);
+                }
                 Err(err) => return Err(err),
             },
             None if source == QuerySource::Auto => {}
+            None if source == QuerySource::Semantic => {
+                matches.extend(semantic_fallback_matches(root, &parsed, "semantic config missing")?);
+            }
             None => {
                 return Err(AppError::General(
                     "Semantic query requires an LSP config; use query::run_with_config".to_string(),
@@ -220,6 +449,27 @@ pub fn run_with_config(
             .then_with(|| left.label.cmp(&right.label))
     });
     Ok(dedup_matches(matches, limit.max(1)))
+}
+
+fn semantic_fallback_matches(root: &Path, expression: &QueryExpression, reason: &str) -> Result<Vec<QueryMatch>> {
+    let mut fallback = query_index(root, expression)?;
+    for item in &mut fallback {
+        item.source = format!("fallback:{}", item.source);
+        item.detail = format!("{reason}; {}", item.detail);
+    }
+    if fallback.is_empty() {
+        fallback.push(QueryMatch {
+            source: "fallback:index:empty".to_string(),
+            path: root.to_path_buf(),
+            line: None,
+            column: None,
+            label: "semantic query unavailable".to_string(),
+            kind: "status".to_string(),
+            detail: format!("{reason}; no index fallback results"),
+            score: usize::MAX.saturating_sub(1),
+        });
+    }
+    Ok(fallback)
 }
 
 pub fn format_matches(matches: &[QueryMatch], format: &str) -> Result<String> {
@@ -396,19 +646,49 @@ fn dedup_matches(matches: Vec<QueryMatch>, limit: usize) -> Vec<QueryMatch> {
 }
 
 fn lsp_query_text(expression: &QueryExpression, original_expression: &str) -> String {
-    if !expression.terms.is_empty() {
-        return expression.terms.join(" ");
-    }
-    if let Some(names) = expression.fields.get("name") {
-        if let Some(name) = names.first() {
-            return name.clone();
+    let mut terms = Vec::new();
+    collect_lsp_query_terms(&expression.root, false, &mut terms);
+    if terms.is_empty() {
+        terms.extend(expression.terms.clone());
+        if let Some(names) = expression.fields.get("name") {
+            terms.extend(names.clone());
         }
+        if let Some(text_values) = expression.fields.get("text") {
+            terms.extend(text_values.clone());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let terms = terms
+        .into_iter()
+        .filter(|term| !term.trim().is_empty())
+        .filter(|term| seen.insert(term.clone()))
+        .collect::<Vec<String>>();
+    if !terms.is_empty() {
+        return terms.join(" ");
     }
     original_expression
         .split_whitespace()
         .filter(|token| !token.contains(':'))
         .collect::<Vec<&str>>()
         .join(" ")
+}
+
+fn collect_lsp_query_terms(node: &QueryNode, negated: bool, terms: &mut Vec<String>) {
+    match node {
+        QueryNode::All => {}
+        QueryNode::Term(term) if !negated => terms.push(term.clone()),
+        QueryNode::Term(_) => {}
+        QueryNode::Field { field, value } if !negated && (field == "name" || field == "text") => {
+            terms.push(value.clone());
+        }
+        QueryNode::Field { .. } => {}
+        QueryNode::Not(child) => collect_lsp_query_terms(child, !negated, terms),
+        QueryNode::And(children) | QueryNode::Or(children) => {
+            for child in children {
+                collect_lsp_query_terms(child, negated, terms);
+            }
+        }
+    }
 }
 
 fn symbol_name_and_kind(detail: &str) -> (String, String) {
@@ -481,34 +761,62 @@ impl Candidate<'_> {
 }
 
 fn score_candidate(candidate: &Candidate<'_>, expression: &QueryExpression) -> Option<usize> {
-    let haystack = candidate.haystack().to_ascii_lowercase();
+    if matches!(expression.root, QueryNode::All) && (!expression.terms.is_empty() || !expression.fields.is_empty()) {
+        return score_flat_expression(candidate, expression);
+    }
+    score_node(candidate, &expression.root)
+}
+
+fn score_flat_expression(candidate: &Candidate<'_>, expression: &QueryExpression) -> Option<usize> {
     let mut score = 0;
 
     for term in &expression.terms {
-        let term = term.to_ascii_lowercase();
-        let position = haystack.find(&term)?;
-        score += position;
+        score += score_term(candidate, term)?;
     }
 
     for (field, values) in &expression.fields {
         for value in values {
-            let value = value.to_ascii_lowercase();
-            let field_value = field_value(candidate, field);
-            if !field_value
-                .iter()
-                .any(|candidate_value| candidate_value.contains(&value))
-            {
-                return None;
-            }
-            score += field_value
-                .iter()
-                .filter_map(|candidate_value| candidate_value.find(&value))
-                .min()
-                .unwrap_or(0);
+            score += score_field(candidate, field, value)?;
         }
     }
 
     Some(score)
+}
+
+fn score_node(candidate: &Candidate<'_>, node: &QueryNode) -> Option<usize> {
+    match node {
+        QueryNode::All => Some(0),
+        QueryNode::Term(term) => score_term(candidate, term),
+        QueryNode::Field { field, value } => score_field(candidate, field, value),
+        QueryNode::Not(child) => {
+            if score_node(candidate, child).is_some() {
+                None
+            } else {
+                Some(0)
+            }
+        }
+        QueryNode::And(children) => {
+            let mut score = 0;
+            for child in children {
+                score += score_node(candidate, child)?;
+            }
+            Some(score)
+        }
+        QueryNode::Or(children) => children.iter().filter_map(|child| score_node(candidate, child)).min(),
+    }
+}
+
+fn score_term(candidate: &Candidate<'_>, term: &str) -> Option<usize> {
+    let haystack = candidate.haystack().to_ascii_lowercase();
+    haystack.find(&term.to_ascii_lowercase())
+}
+
+fn score_field(candidate: &Candidate<'_>, field: &str, value: &str) -> Option<usize> {
+    let value = value.to_ascii_lowercase();
+    field_value(candidate, field)
+        .iter()
+        .filter_map(|candidate_value| candidate_value.find(&value))
+        .min()
 }
 
 fn field_value(candidate: &Candidate<'_>, field: &str) -> Vec<String> {
@@ -568,6 +876,13 @@ fn tokenize(expression: &str) -> Vec<String> {
             quoted = !quoted;
             continue;
         }
+        if !quoted && (ch == '(' || ch == ')') {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            tokens.push(ch.to_string());
+            continue;
+        }
         if ch.is_whitespace() && !quoted {
             if !current.is_empty() {
                 tokens.push(std::mem::take(&mut current));
@@ -596,6 +911,24 @@ fn normalize_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn test_candidate(source: &'static str, path: &str, label: &str, kind: &str, language: &str) -> Candidate<'static> {
+        Candidate {
+            source,
+            path: PathBuf::from(path),
+            line: Some(3),
+            column: None,
+            label: label.to_string(),
+            kind: kind.to_string(),
+            language: language.to_string(),
+            name: label.to_string(),
+            detail: format!("{kind} {label}"),
+            status: None,
+            priority: None,
+            session: None,
+            tags: Vec::new(),
+        }
+    }
+
     #[test]
     fn parses_fielded_query_terms() {
         let parsed = parse_expression(r#"kind:function lang:rust path:src source:index text:"main loop" loose"#);
@@ -608,6 +941,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_grouped_or_not_query() {
+        let parsed = parse_expression("kind:function (name:main or name:init) not path:target");
+
+        assert!(parsed.terms.is_empty());
+        assert_eq!(parsed.fields["kind"], vec!["function".to_string()]);
+        assert_eq!(parsed.fields["name"], vec!["main".to_string(), "init".to_string()]);
+        assert_eq!(parsed.fields["path"], vec!["target".to_string()]);
+        assert_eq!(
+            render_query_plan(&parsed.root),
+            "AND(kind:function, OR(name:main, name:init), NOT(path:target))"
+        );
+    }
+
+    #[test]
     fn parses_semantic_and_auto_sources() {
         assert_eq!(QuerySource::parse("semantic").unwrap(), QuerySource::Semantic);
         assert_eq!(QuerySource::parse("lsp").unwrap(), QuerySource::Semantic);
@@ -616,34 +963,81 @@ mod tests {
     }
 
     #[test]
-    fn semantic_source_requires_config_for_plain_run() {
-        let err = run(Path::new("."), "main", QuerySource::Semantic, 10).unwrap_err();
+    fn semantic_source_falls_back_to_index_without_config() {
+        let temp_dir = std::env::temp_dir().join(format!("fcs_query_semantic_fallback_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+        std::fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        std::fs::write(temp_dir.join("src").join("main.rs"), "pub fn main() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
 
-        assert!(err.to_string().contains("Semantic query requires"));
+        let matches = run(&temp_dir, "kind:function name:main", QuerySource::Semantic, 10).unwrap();
+
+        assert!(matches
+            .iter()
+            .any(|item| { item.source == "fallback:index:symbol" && item.detail.contains("semantic config missing") }));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn semantic_source_reports_empty_fallback_without_config() {
+        let temp_dir = std::env::temp_dir().join(format!("fcs_query_semantic_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let matches = run(&temp_dir, "name:missing", QuerySource::Semantic, 10).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source, "fallback:index:empty");
+        assert!(matches[0].detail.contains("semantic config missing"));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn lsp_query_text_uses_positive_or_terms() {
+        let parsed = parse_expression("kind:function (name:main or name:init) not path:target not name:skip");
+
+        assert_eq!(lsp_query_text(&parsed, ""), "main init");
     }
 
     #[test]
     fn scores_candidate_with_field_filters() {
         let expression = parse_expression("kind:function lang:rust source:index main");
-        let candidate = Candidate {
-            source: "index:symbol",
-            path: PathBuf::from("src/main.rs"),
-            line: Some(3),
-            column: None,
-            label: "main".to_string(),
-            kind: "function".to_string(),
-            language: "rust".to_string(),
-            name: "main".to_string(),
-            detail: "fn main()".to_string(),
-            status: None,
-            priority: None,
-            session: None,
-            tags: Vec::new(),
-        };
+        let candidate = test_candidate("index:symbol", "src/main.rs", "main", "function", "rust");
 
         assert!(score_candidate(&candidate, &expression).is_some());
         assert!(score_candidate(&candidate, &parse_expression("source:trace main")).is_none());
         assert!(score_candidate(&candidate, &parse_expression("kind:struct main")).is_none());
+    }
+
+    #[test]
+    fn scores_legacy_flat_expression_without_ast() {
+        let mut fields = BTreeMap::new();
+        fields.insert("kind".to_string(), vec!["function".to_string()]);
+        let expression = QueryExpression {
+            terms: vec!["main".to_string()],
+            fields,
+            root: QueryNode::All,
+        };
+        let candidate = test_candidate("index:symbol", "src/main.rs", "main", "function", "rust");
+
+        assert!(score_candidate(&candidate, &expression).is_some());
+    }
+
+    #[test]
+    fn scores_candidate_with_grouped_or_and_not_filters() {
+        let expression = parse_expression("kind:function (name:main or name:init) not path:target");
+        let main_candidate = test_candidate("index:symbol", "src/main.rs", "main", "function", "rust");
+        let init_candidate = test_candidate("index:symbol", "src/init.rs", "init", "function", "rust");
+        let target_candidate = test_candidate("index:symbol", "target/main.rs", "main", "function", "rust");
+        let other_candidate = test_candidate("index:symbol", "src/start.rs", "start", "function", "rust");
+
+        assert!(score_candidate(&main_candidate, &expression).is_some());
+        assert!(score_candidate(&init_candidate, &expression).is_some());
+        assert!(score_candidate(&target_candidate, &expression).is_none());
+        assert!(score_candidate(&other_candidate, &expression).is_none());
+        assert!(score_candidate(&main_candidate, &parse_expression("source:trace or source:index")).is_some());
     }
 
     #[test]
@@ -656,6 +1050,35 @@ mod tests {
         assert!(explanation.selected_sources.iter().any(|source| source == "index"));
         assert!(explanation.selected_sources.iter().any(|source| source == "trace"));
         assert!(explanation.selected_sources.iter().any(|source| source == "semantic"));
+        assert_eq!(explanation.execution_plan, "AND(source:trace, status:open, text:panic)");
+        assert!(explanation
+            .filters
+            .iter()
+            .any(|filter| filter == "require source:trace"));
+        assert!(text.contains("execution_plan: AND(source:trace, status:open, text:panic)"));
+        assert!(text.contains("filters:"));
         assert!(text.contains("supported_fields"));
+    }
+
+    #[test]
+    fn explains_grouped_filters() {
+        let explanation = explain(
+            "kind:function (name:main or name:init) not path:target",
+            QuerySource::All,
+        );
+        let text = format_explanation(&explanation, "text").unwrap();
+
+        assert_eq!(
+            explanation.execution_plan,
+            "AND(kind:function, OR(name:main, name:init), NOT(path:target))"
+        );
+        assert!(explanation
+            .filters
+            .iter()
+            .any(|filter| filter == "any of: name:main OR name:init"));
+        assert!(explanation.filters.iter().any(|filter| filter == "exclude path:target"));
+        assert!(text.contains("execution_plan: AND(kind:function, OR(name:main, name:init), NOT(path:target))"));
+        assert!(text.contains("  - any of: name:main OR name:init"));
+        assert!(text.contains("  - exclude path:target"));
     }
 }

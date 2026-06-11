@@ -18,6 +18,13 @@ pub(super) enum DapCommand {
     Next,
     StepIn,
     StepOut,
+    SelectThread(u64),
+    SelectFrame(usize),
+    ExpandVariables(u64),
+    VariablesPage {
+        start: usize,
+        count: usize,
+    },
     Evaluate(String),
     AddWatch(String),
     RemoveWatch(usize),
@@ -58,8 +65,13 @@ struct DapRuntime {
     status: String,
     watch_expressions: Vec<String>,
     breakpoint_results: Vec<crate::dap::DapBreakpointResult>,
+    capabilities: Vec<String>,
     last_evaluation: Option<String>,
     selected_thread_id: Option<u64>,
+    selected_frame_id: Option<u64>,
+    selected_variables_reference: Option<u64>,
+    variable_page_start: Option<usize>,
+    variable_page_count: Option<usize>,
     last_snapshot: crate::dap::DapSessionSnapshot,
 }
 
@@ -134,6 +146,10 @@ fn run_dap_request(
         DapCommand::Next => ("DAP next", control_runtime(runtime, "next")),
         DapCommand::StepIn => ("DAP step-in", control_runtime(runtime, "step-in")),
         DapCommand::StepOut => ("DAP step-out", control_runtime(runtime, "step-out")),
+        DapCommand::SelectThread(thread_id) => ("DAP thread", select_thread(runtime, thread_id)),
+        DapCommand::SelectFrame(index) => ("DAP frame", select_frame(runtime, index)),
+        DapCommand::ExpandVariables(reference) => ("DAP variable expand", expand_variables(runtime, reference)),
+        DapCommand::VariablesPage { start, count } => ("DAP variable page", variables_page(runtime, start, count)),
         DapCommand::Evaluate(expression) => ("DAP evaluate", evaluate_runtime(runtime, expression)),
         DapCommand::AddWatch(expression) => ("DAP watch add", add_watch(runtime, expression)),
         DapCommand::RemoveWatch(index) => ("DAP watch remove", remove_watch(runtime, index)),
@@ -163,8 +179,38 @@ fn start_mock_session(
         status: "stopped".to_string(),
         watch_expressions: Vec::new(),
         breakpoint_results: launch_report.breakpoint_results,
+        capabilities: launch_report
+            .capabilities
+            .as_ref()
+            .map(|capabilities| {
+                let mut lines = Vec::new();
+                if capabilities.supports_configuration_done_request {
+                    lines.push("configurationDone".to_string());
+                }
+                if capabilities.supports_conditional_breakpoints {
+                    lines.push("conditional-breakpoints".to_string());
+                }
+                if capabilities.supports_hit_conditional_breakpoints {
+                    lines.push("hit-conditions".to_string());
+                }
+                if capabilities.supports_log_points {
+                    lines.push("logpoints".to_string());
+                }
+                if capabilities.supports_evaluate_for_hovers {
+                    lines.push("hover-evaluate".to_string());
+                }
+                if capabilities.supports_set_variable {
+                    lines.push("set-variable".to_string());
+                }
+                lines
+            })
+            .unwrap_or_default(),
         last_evaluation: None,
         selected_thread_id: None,
+        selected_frame_id: None,
+        selected_variables_reference: None,
+        variable_page_start: None,
+        variable_page_count: Some(50),
         last_snapshot: empty_snapshot("mock", "stopped", "mock"),
     };
     let snapshot = session.refresh("stopped")?;
@@ -190,8 +236,38 @@ fn start_real_session(
         status: "stopped".to_string(),
         watch_expressions: Vec::new(),
         breakpoint_results: launch_report.breakpoint_results,
+        capabilities: launch_report
+            .capabilities
+            .as_ref()
+            .map(|capabilities| {
+                let mut lines = Vec::new();
+                if capabilities.supports_configuration_done_request {
+                    lines.push("configurationDone".to_string());
+                }
+                if capabilities.supports_conditional_breakpoints {
+                    lines.push("conditional-breakpoints".to_string());
+                }
+                if capabilities.supports_hit_conditional_breakpoints {
+                    lines.push("hit-conditions".to_string());
+                }
+                if capabilities.supports_log_points {
+                    lines.push("logpoints".to_string());
+                }
+                if capabilities.supports_evaluate_for_hovers {
+                    lines.push("hover-evaluate".to_string());
+                }
+                if capabilities.supports_set_variable {
+                    lines.push("set-variable".to_string());
+                }
+                lines
+            })
+            .unwrap_or_default(),
         last_evaluation: None,
         selected_thread_id: None,
+        selected_frame_id: None,
+        selected_variables_reference: None,
+        variable_page_start: None,
+        variable_page_count: Some(50),
         last_snapshot: empty_snapshot(&adapter, "launched", "real"),
     };
 
@@ -316,6 +392,69 @@ fn control_runtime(runtime: &mut Option<DapRuntime>, command: &str) -> Result<cr
     }
 }
 
+fn select_thread(runtime: &mut Option<DapRuntime>, thread_id: u64) -> Result<crate::dap::DapSessionSnapshot> {
+    let runtime = active_runtime(runtime)?;
+    if runtime.is_running() {
+        return Err(AppError::General(
+            "Cannot switch DAP thread while target is running; pause first".to_string(),
+        ));
+    }
+    runtime.selected_thread_id = Some(thread_id);
+    runtime.selected_frame_id = None;
+    runtime.selected_variables_reference = None;
+    runtime.refresh("thread selected")
+}
+
+fn select_frame(runtime: &mut Option<DapRuntime>, index: usize) -> Result<crate::dap::DapSessionSnapshot> {
+    let runtime = active_runtime(runtime)?;
+    if runtime.is_running() {
+        return Err(AppError::General(
+            "Cannot switch DAP frame while target is running; pause first".to_string(),
+        ));
+    }
+    let snapshot = runtime.refresh("selecting frame")?;
+    if index == 0 || index > snapshot.frame_items.len() {
+        return Err(AppError::General(format!("Frame index out of range: {index}")));
+    }
+    runtime.selected_frame_id = Some(snapshot.frame_items[index - 1].id);
+    runtime.selected_variables_reference = None;
+    runtime.refresh("frame selected")
+}
+
+fn expand_variables(
+    runtime: &mut Option<DapRuntime>,
+    variables_reference: u64,
+) -> Result<crate::dap::DapSessionSnapshot> {
+    let runtime = active_runtime(runtime)?;
+    if runtime.is_running() {
+        return Err(AppError::General(
+            "Cannot expand DAP variables while target is running; pause first".to_string(),
+        ));
+    }
+    runtime.selected_variables_reference = Some(variables_reference);
+    runtime.variable_page_start = Some(0);
+    runtime.refresh("variables expanded")
+}
+
+fn variables_page(
+    runtime: &mut Option<DapRuntime>,
+    start: usize,
+    count: usize,
+) -> Result<crate::dap::DapSessionSnapshot> {
+    let runtime = active_runtime(runtime)?;
+    if count == 0 {
+        return Err(AppError::General(
+            "Variable page count must be greater than zero".to_string(),
+        ));
+    }
+    runtime.variable_page_start = Some(start);
+    runtime.variable_page_count = Some(count);
+    if runtime.is_running() {
+        return Ok(runtime.fast_snapshot("variable page selected (running)"));
+    }
+    runtime.refresh("variable page selected")
+}
+
 fn evaluate_runtime(runtime: &mut Option<DapRuntime>, expression: String) -> Result<crate::dap::DapSessionSnapshot> {
     let runtime = active_runtime(runtime)?;
     if runtime.is_running() {
@@ -373,15 +512,22 @@ impl DapRuntime {
             return Ok(self.fast_snapshot("running (stack refresh skipped)"));
         }
 
-        let snapshot = self.client.refresh_session_snapshot(
-            &self.profile,
-            &self.adapter,
+        let snapshot = self.client.refresh_session_snapshot(crate::dap::DapSnapshotRequest {
+            profile: &self.profile,
+            adapter: &self.adapter,
             status,
-            &self.watch_expressions,
-            self.last_evaluation.clone(),
-            &self.breakpoint_results,
-        )?;
+            watch_expressions: &self.watch_expressions,
+            last_evaluation: self.last_evaluation.clone(),
+            breakpoint_results: &self.breakpoint_results,
+            selected_thread_id: self.selected_thread_id,
+            selected_frame_id: self.selected_frame_id,
+            variables_reference: self.selected_variables_reference,
+            variables_start: self.variable_page_start,
+            variables_count: self.variable_page_count,
+            capabilities: &self.capabilities,
+        })?;
         self.selected_thread_id = snapshot.selected_thread_id;
+        self.selected_frame_id = snapshot.selected_frame_id;
         self.last_snapshot = snapshot.clone();
         Ok(snapshot)
     }
@@ -396,10 +542,12 @@ impl DapRuntime {
         snapshot.status = status.to_string();
         snapshot.profile = self.profile.name.clone();
         snapshot.selected_thread_id = self.selected_thread_id.or(snapshot.selected_thread_id);
+        snapshot.selected_frame_id = self.selected_frame_id.or(snapshot.selected_frame_id);
         snapshot.request_count = self.client.request_count();
         snapshot.response_count = self.client.response_count();
         snapshot.commands = self.client.commands();
         snapshot.events = self.client.events();
+        snapshot.capabilities = self.capabilities.clone();
         snapshot.last_event = snapshot.events.last().cloned();
         if status.starts_with("running") {
             snapshot.stop_reason = None;
@@ -413,32 +561,11 @@ impl DapRuntime {
 impl DapRuntimeClient {
     fn refresh_session_snapshot(
         &mut self,
-        profile: &crate::dap::DapLaunchProfile,
-        adapter: &str,
-        status: &str,
-        watch_expressions: &[String],
-        last_evaluation: Option<String>,
-        breakpoint_results: &[crate::dap::DapBreakpointResult],
+        request: crate::dap::DapSnapshotRequest<'_>,
     ) -> Result<crate::dap::DapSessionSnapshot> {
         match self {
-            Self::Mock(client) => crate::dap::refresh_session_snapshot_with_breakpoints(
-                client,
-                profile,
-                adapter,
-                status,
-                watch_expressions,
-                last_evaluation,
-                breakpoint_results,
-            ),
-            Self::Process(client) => crate::dap::refresh_session_snapshot_with_breakpoints(
-                client,
-                profile,
-                adapter,
-                status,
-                watch_expressions,
-                last_evaluation,
-                breakpoint_results,
-            ),
+            Self::Mock(client) => crate::dap::refresh_session_snapshot_with_request(client, request),
+            Self::Process(client) => crate::dap::refresh_session_snapshot_with_request(client, request),
         }
     }
 
@@ -576,6 +703,7 @@ fn empty_snapshot(adapter: &str, status: &str, profile: &str) -> crate::dap::Dap
         scopes: Vec::new(),
         variables: Vec::new(),
         breakpoints: Vec::new(),
+        capabilities: Vec::new(),
         thread_items: Vec::new(),
         frame_items: Vec::new(),
         scope_items: Vec::new(),

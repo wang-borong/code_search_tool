@@ -229,7 +229,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         .split(area);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(3)])
+        .constraints([Constraint::Length(6), Constraint::Min(3)])
         .split(columns[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -247,6 +247,18 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
     ];
     if let Some(reason) = &snapshot.stop_reason {
         session.push(Line::from(format!("stop: {reason}")));
+    }
+    if !snapshot.capabilities.is_empty() {
+        session.push(Line::from(format!(
+            "caps: {}",
+            snapshot
+                .capabilities
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<String>>()
+                .join(", ")
+        )));
     }
     let session = Paragraph::new(session)
         .block(Block::default().title("Session").borders(Borders::ALL))

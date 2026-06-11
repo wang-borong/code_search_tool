@@ -75,6 +75,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" targ
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index status "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index build "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index stats "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shards "$SMOKE_ROOT" --target-symbols 2 --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index compact "$SMOKE_ROOT" --dry-run
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index prewarm "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index refresh "$SMOKE_ROOT"
@@ -97,9 +98,11 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index repair "$SMOKE_R
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index bench "$SMOKE_ROOT" --limit 5 --query main
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function lang:c text:main" "$SMOKE_ROOT" --source all --limit 10 --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function name:main" "$SMOKE_ROOT" --source all --limit 10 --explain
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function (name:main or name:smoke_added_symbol) not path:target" "$SMOKE_ROOT" --source all --limit 10 --explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function text:main" "$SMOKE_ROOT" --source all --limit 10 --timing --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:smoke_added_symbol" "$SMOKE_ROOT" --source index --limit 10
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function text:main" "$SMOKE_ROOT" --source auto --limit 10
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:main" "$SMOKE_ROOT" --source semantic --limit 10
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench search main "$SMOKE_ROOT" --format json --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench index "$SMOKE_ROOT" --format json --limit 5 --query main --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench trace --format json --warn-ms 10000
@@ -178,8 +181,13 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs debug run-profile "$PR
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs debug delete-profile "$PROFILE_NAME" --directory "$SMOKE_ROOT"
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap launch target/debug/fcs -b src/main.rs:1 --bundle -- --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap launch target/debug/fcs --request attach --process-id $$ --bundle
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapters
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapters --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap templates
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap templates --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs -b src/main.rs:1 --cwd . --env FCS_SMOKE=1 -- --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs --request attach --process-id $$ --cwd . --env FCS_SMOKE=1
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap from-trace "$TRACE_SESSION_NAME" target/debug/fcs --name "${DAP_PROFILE_NAME}-trace" --directory "$SMOKE_ROOT" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap save-profile "$DAP_PROFILE_NAME" target/debug/fcs -b src/main.rs:1 --directory "$SMOKE_ROOT" -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap profiles "$SMOKE_ROOT"

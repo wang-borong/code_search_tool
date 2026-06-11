@@ -352,6 +352,38 @@ fn handle_index_stats(directory: Option<&String>) -> Result<(), AppError> {
     Ok(())
 }
 
+fn handle_index_shards(directory: Option<&String>, target_symbols: usize, format: &str) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let report = fcs::index::shard_report(&root, target_symbols)?;
+    match format {
+        "text" => {
+            println!("Index: {}", report.path.display());
+            println!("exists: {}", report.exists);
+            println!("files: {}", report.file_count);
+            println!("symbols: {}", report.symbol_count);
+            println!("index_size_bytes: {}", report.index_size_bytes);
+            println!("target_symbols_per_shard: {}", report.target_symbols_per_shard);
+            println!("recommended_shards: {}", report.recommended_shards);
+            println!("recommendation: {}", report.recommendation);
+            for bucket in report.buckets.iter().take(20) {
+                println!(
+                    "bucket {} files={} symbols={}",
+                    bucket.name, bucket.files, bucket.symbols
+                );
+            }
+            Ok(())
+        }
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(AppError::General(format!("Unsupported index shards format: {other}"))),
+    }
+}
+
 fn handle_index_doctor(directory: Option<&String>) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
     let status = fcs::index::status(&root)?;
@@ -1917,6 +1949,8 @@ struct DapProfileInput<'a> {
     name: Option<&'a String>,
     program: &'a str,
     adapter: &'a str,
+    request: &'a str,
+    process_id: Option<u64>,
     breakpoints: &'a [String],
     cwd: Option<&'a String>,
     env: &'a [String],
@@ -1929,6 +1963,8 @@ struct DapFromTraceInput<'a> {
     program: &'a str,
     name: Option<&'a String>,
     adapter: &'a str,
+    request: &'a str,
+    process_id: Option<u64>,
     directory: Option<&'a String>,
     cwd: Option<&'a String>,
     env: &'a [String],
@@ -1951,6 +1987,7 @@ fn handle_dap_save_profile(input: DapProfileInput<'_>, directory: Option<&String
 }
 
 fn handle_dap_from_trace(input: DapFromTraceInput<'_>) -> Result<(), AppError> {
+    validate_dap_request(input.request, input.process_id)?;
     let (root, locations) = trace_session_breakpoints(input.session, input.directory)?;
     let env = input
         .env
@@ -1961,7 +1998,9 @@ fn handle_dap_from_trace(input: DapFromTraceInput<'_>) -> Result<(), AppError> {
     let profile = fcs::dap::DapLaunchProfile {
         name: profile_name.clone(),
         adapter: input.adapter.to_string(),
+        request: input.request.to_string(),
         program: PathBuf::from(input.program),
+        process_id: input.process_id,
         cwd: input.cwd.map(PathBuf::from),
         args: input.args.to_vec(),
         env,
@@ -2013,12 +2052,18 @@ fn handle_dap_adapters(format: &str) -> Result<(), AppError> {
             }
             for adapter in adapters {
                 let state = if adapter.available { "available" } else { "missing" };
+                let capabilities = if adapter.capabilities.is_empty() {
+                    "-".to_string()
+                } else {
+                    adapter.capabilities.join(",")
+                };
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     adapter.adapter,
                     state,
                     adapter.command_line(),
-                    adapter.detail
+                    adapter.detail,
+                    capabilities
                 );
             }
             Ok(())
@@ -2031,6 +2076,34 @@ fn handle_dap_adapters(format: &str) -> Result<(), AppError> {
             Ok(())
         }
         other => Err(AppError::General(format!("Unsupported DAP adapter format: {other}"))),
+    }
+}
+
+fn handle_dap_templates(format: &str) -> Result<(), AppError> {
+    let templates = fcs::dap::adapter_templates();
+    match format {
+        "text" => {
+            for template in templates {
+                let capabilities = if template.capabilities.is_empty() {
+                    "-".to_string()
+                } else {
+                    template.capabilities.join(",")
+                };
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    template.adapter, template.request, template.command, template.detail, capabilities
+                );
+            }
+            Ok(())
+        }
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&templates).map_err(|err| AppError::General(err.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(AppError::General(format!("Unsupported DAP template format: {other}"))),
     }
 }
 
@@ -2113,6 +2186,7 @@ fn handle_dap_adapter_session(
 }
 
 fn build_dap_profile(input: DapProfileInput<'_>) -> Result<fcs::dap::DapLaunchProfile, AppError> {
+    validate_dap_request(input.request, input.process_id)?;
     let program_path = PathBuf::from(input.program);
     let profile_name = input.name.cloned().unwrap_or_else(|| {
         program_path
@@ -2138,13 +2212,28 @@ fn build_dap_profile(input: DapProfileInput<'_>) -> Result<fcs::dap::DapLaunchPr
     Ok(fcs::dap::DapLaunchProfile {
         name: profile_name,
         adapter: input.adapter.to_string(),
+        request: input.request.to_string(),
         program: program_path,
+        process_id: input.process_id,
         cwd: input.cwd.map(PathBuf::from),
         args: input.args.to_vec(),
         env,
         breakpoints,
         stop_on_entry: input.stop_on_entry,
     })
+}
+
+fn validate_dap_request(request: &str, process_id: Option<u64>) -> Result<(), AppError> {
+    match request {
+        "launch" => Ok(()),
+        "attach" if process_id.is_some() => Ok(()),
+        "attach" => Err(AppError::General(
+            "DAP attach requires --process-id for the current fcs attach template".to_string(),
+        )),
+        other => Err(AppError::General(format!(
+            "Unsupported DAP request type: {other}. Use launch or attach"
+        ))),
+    }
 }
 
 fn print_dap_request(profile: &fcs::dap::DapLaunchProfile, bundle: bool) -> Result<(), AppError> {
@@ -2666,6 +2755,13 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             }
             IndexAction::Stats { directory } => {
                 handle_index_stats(directory.as_ref())?;
+            }
+            IndexAction::Shards {
+                directory,
+                target_symbols,
+                format,
+            } => {
+                handle_index_shards(directory.as_ref(), target_symbols, &format)?;
             }
             IndexAction::Build { directory, option } => {
                 handle_index_build(directory.as_ref(), &option, &config)?;
@@ -3285,9 +3381,14 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             DapAction::Adapters { format } => {
                 handle_dap_adapters(&format)?;
             }
+            DapAction::Templates { format } => {
+                handle_dap_templates(&format)?;
+            }
             DapAction::Launch {
                 program,
                 adapter,
+                request,
+                process_id,
                 name,
                 breakpoints,
                 cwd,
@@ -3301,6 +3402,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         name: name.as_ref(),
                         program: &program,
                         adapter: &adapter,
+                        request: &request,
+                        process_id,
                         breakpoints: &breakpoints,
                         cwd: cwd.as_ref(),
                         env: &env,
@@ -3314,6 +3417,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 name,
                 program,
                 adapter,
+                request,
+                process_id,
                 breakpoints,
                 directory,
                 cwd,
@@ -3326,6 +3431,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         name: Some(&name),
                         program: &program,
                         adapter: &adapter,
+                        request: &request,
+                        process_id,
                         breakpoints: &breakpoints,
                         cwd: cwd.as_ref(),
                         env: &env,
@@ -3343,6 +3450,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 program,
                 name,
                 adapter,
+                request,
+                process_id,
                 directory,
                 cwd,
                 env,
@@ -3354,6 +3463,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     program: &program,
                     name: name.as_ref(),
                     adapter: &adapter,
+                    request: &request,
+                    process_id,
                     directory: directory.as_ref(),
                     cwd: cwd.as_ref(),
                     env: &env,
@@ -3371,6 +3482,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             DapAction::SessionSmoke {
                 program,
                 adapter,
+                request,
+                process_id,
                 name,
                 breakpoints,
                 cwd,
@@ -3382,6 +3495,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     name: name.as_ref(),
                     program: &program,
                     adapter: &adapter,
+                    request: &request,
+                    process_id,
                     breakpoints: &breakpoints,
                     cwd: cwd.as_ref(),
                     env: &env,
@@ -3393,6 +3508,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 adapter_command,
                 program,
                 adapter,
+                request,
+                process_id,
                 name,
                 breakpoints,
                 cwd,
@@ -3408,6 +3525,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         name: name.as_ref(),
                         program: &program,
                         adapter: &adapter,
+                        request: &request,
+                        process_id,
                         breakpoints: &breakpoints,
                         cwd: cwd.as_ref(),
                         env: &env,

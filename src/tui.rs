@@ -838,7 +838,9 @@ impl AppState {
         crate::dap::DapLaunchProfile {
             name,
             adapter: "mock".to_string(),
+            request: "launch".to_string(),
             program: session.binary,
+            process_id: None,
             cwd: session.cwd,
             args: session.args,
             env: session
@@ -928,13 +930,35 @@ impl AppState {
             .take(6)
             .map(|adapter| {
                 let state = if adapter.available { "ok" } else { "missing" };
-                format!("{}={} ({state})", adapter.adapter, adapter.command_line())
+                let capabilities = if adapter.capabilities.is_empty() {
+                    "-".to_string()
+                } else {
+                    adapter.capabilities.join(",")
+                };
+                format!(
+                    "{}={} ({state}; {})",
+                    adapter.adapter,
+                    adapter.command_line(),
+                    capabilities
+                )
             })
             .collect::<Vec<String>>();
         if adapters.is_empty() {
             self.set_warning("No DAP adapter candidates configured");
         } else {
             self.set_status(format!("DAP adapters: {}", adapters.join("; ")));
+        }
+    }
+
+    fn show_dap_templates(&mut self) {
+        let templates = crate::dap::adapter_templates()
+            .into_iter()
+            .map(|template| format!("{}:{} via {}", template.adapter, template.request, template.command))
+            .collect::<Vec<String>>();
+        if templates.is_empty() {
+            self.set_warning("No DAP adapter templates configured");
+        } else {
+            self.set_status(format!("DAP templates: {}", templates.join("; ")));
         }
     }
 
@@ -952,6 +976,10 @@ impl AppState {
             "stop" => self.queue_dap_command("DAP stop", DapCommand::Stop),
             "adapters" => {
                 self.show_dap_adapters();
+                Ok(())
+            }
+            "templates" => {
+                self.show_dap_templates();
                 Ok(())
             }
             other => {
@@ -1500,6 +1528,18 @@ impl AppState {
                 self.queue_dap_start_profile(profile_name)?;
                 return Ok(true);
             }
+            if let Some(thread_id) = rest.strip_prefix("thread ") {
+                let thread_id = thread_id
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|err| crate::errors::AppError::General(format!("Invalid DAP thread id: {err}")))?;
+                self.queue_dap_command("DAP thread", DapCommand::SelectThread(thread_id))?;
+                return Ok(true);
+            }
+            if let Some(frame_index) = rest.strip_prefix("frame ") {
+                self.queue_dap_command("DAP frame", DapCommand::SelectFrame(parse_index(frame_index)?))?;
+                return Ok(true);
+            }
             match rest {
                 "smoke" | "mock" | "session" => self.queue_dap_mock_session()?,
                 "start" | "launch" => self.queue_dap_start()?,
@@ -1507,11 +1547,43 @@ impl AppState {
                 "break" | "breakpoint" => self.add_dap_stopped_breakpoint(),
                 "jump" | "open" => self.jump_to_dap_stopped_location(),
                 "adapters" | "adapter" => self.show_dap_adapters(),
+                "templates" | "template" => self.show_dap_templates(),
                 "refresh" | "continue" | "cont" | "c" | "pause" | "next" | "n" | "step" | "step-in" | "in"
                 | "step-out" | "out" | "restart" | "terminate" | "disconnect" | "stop" => {
                     self.queue_dap_control(rest)?
                 }
                 other => self.set_warning(format!("Unknown DAP command: {other}")),
+            }
+            return Ok(true);
+        }
+
+        if let Some(rest) = command
+            .strip_prefix("var ")
+            .or_else(|| command.strip_prefix("vars "))
+            .or_else(|| command.strip_prefix("variables "))
+        {
+            let rest = rest.trim();
+            if let Some(reference) = rest.strip_prefix("expand ") {
+                let reference = reference
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|err| crate::errors::AppError::General(format!("Invalid variables reference: {err}")))?;
+                self.queue_dap_command("DAP variable expand", DapCommand::ExpandVariables(reference))?;
+            } else if let Some(page) = rest.strip_prefix("page ") {
+                let parts = page.split_whitespace().collect::<Vec<&str>>();
+                if parts.len() != 2 {
+                    self.set_warning("Usage: var page <start> <count>");
+                } else {
+                    let start = parts[0].parse::<usize>().map_err(|err| {
+                        crate::errors::AppError::General(format!("Invalid variable page start: {err}"))
+                    })?;
+                    let count = parts[1].parse::<usize>().map_err(|err| {
+                        crate::errors::AppError::General(format!("Invalid variable page count: {err}"))
+                    })?;
+                    self.queue_dap_command("DAP variable page", DapCommand::VariablesPage { start, count })?;
+                }
+            } else {
+                self.set_warning(format!("Unknown variable command: {rest}"));
             }
             return Ok(true);
         }
@@ -1855,6 +1927,7 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
         scopes: Vec::new(),
         variables: Vec::new(),
         breakpoints: Vec::new(),
+        capabilities: Vec::new(),
         thread_items: Vec::new(),
         frame_items: Vec::new(),
         scope_items: Vec::new(),
@@ -2145,6 +2218,8 @@ fn palette_command_names() -> &'static [&'static str] {
         "dap start",
         "dap start ",
         "dap real ",
+        "dap thread ",
+        "dap frame ",
         "dap sync",
         "dap next",
         "dap continue",
@@ -2156,6 +2231,7 @@ fn palette_command_names() -> &'static [&'static str] {
         "dap terminate",
         "dap disconnect",
         "dap adapters",
+        "dap templates",
         "dap stop",
         "dap jump",
         "dap break",
@@ -2165,6 +2241,8 @@ fn palette_command_names() -> &'static [&'static str] {
         "watch del ",
         "watch clear",
         "watch refresh",
+        "var expand ",
+        "var page ",
         "eval ",
         "break if ",
         "break hit ",

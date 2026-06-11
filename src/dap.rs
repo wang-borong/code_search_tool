@@ -54,7 +54,11 @@ impl DapBreakpoint {
 pub struct DapLaunchProfile {
     pub name: String,
     pub adapter: String,
+    #[serde(default = "default_dap_request")]
+    pub request: String,
     pub program: PathBuf,
+    #[serde(rename = "processId", default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u64>,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
     #[serde(default)]
@@ -97,6 +101,8 @@ pub struct DapAdapterDiscovery {
     pub args: Vec<String>,
     pub available: bool,
     pub detail: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 impl DapAdapterDiscovery {
@@ -119,15 +125,18 @@ impl DapAdapterDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapLaunchArguments {
     pub name: String,
-    pub program: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<PathBuf>,
+    #[serde(rename = "processId", skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    #[serde(rename = "stopOnEntry")]
-    pub stop_on_entry: bool,
+    #[serde(rename = "stopOnEntry", skip_serializing_if = "Option::is_none")]
+    pub stop_on_entry: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +245,10 @@ pub struct DapScopesArguments {
 pub struct DapVariablesArguments {
     #[serde(rename = "variablesReference")]
     pub variables_reference: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +340,38 @@ pub struct DapContinueBody {
 pub struct DapDisconnectArguments {
     #[serde(rename = "terminateDebuggee")]
     pub terminate_debuggee: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DapCapabilities {
+    #[serde(rename = "supportsConfigurationDoneRequest", default)]
+    pub supports_configuration_done_request: bool,
+    #[serde(rename = "supportsFunctionBreakpoints", default)]
+    pub supports_function_breakpoints: bool,
+    #[serde(rename = "supportsConditionalBreakpoints", default)]
+    pub supports_conditional_breakpoints: bool,
+    #[serde(rename = "supportsHitConditionalBreakpoints", default)]
+    pub supports_hit_conditional_breakpoints: bool,
+    #[serde(rename = "supportsLogPoints", default)]
+    pub supports_log_points: bool,
+    #[serde(rename = "supportsEvaluateForHovers", default)]
+    pub supports_evaluate_for_hovers: bool,
+    #[serde(rename = "supportsSetVariable", default)]
+    pub supports_set_variable: bool,
+    #[serde(rename = "supportsStepBack", default)]
+    pub supports_step_back: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DapAdapterTemplate {
+    pub adapter: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub request: String,
+    pub detail: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +500,7 @@ pub struct DapLaunchSessionReport {
     pub response_count: usize,
     pub breakpoint_response_count: usize,
     pub breakpoint_results: Vec<DapBreakpointResult>,
+    pub capabilities: Option<DapCapabilities>,
     pub initialized: bool,
     pub launch_completed: bool,
     pub commands: Vec<String>,
@@ -481,6 +527,8 @@ pub struct DapSessionSnapshot {
     #[serde(default)]
     pub breakpoints: Vec<String>,
     #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
     pub thread_items: Vec<DapThread>,
     #[serde(default)]
     pub frame_items: Vec<DapStackFrame>,
@@ -502,6 +550,22 @@ pub struct DapSessionSnapshot {
     pub stopped_location: Option<DapStoppedLocation>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DapSnapshotRequest<'a> {
+    pub profile: &'a DapLaunchProfile,
+    pub adapter: &'a str,
+    pub status: &'a str,
+    pub watch_expressions: &'a [String],
+    pub last_evaluation: Option<String>,
+    pub breakpoint_results: &'a [DapBreakpointResult],
+    pub selected_thread_id: Option<u64>,
+    pub selected_frame_id: Option<u64>,
+    pub variables_reference: Option<u64>,
+    pub variables_start: Option<usize>,
+    pub variables_count: Option<usize>,
+    pub capabilities: &'a [String],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapStoppedLocation {
     pub path: PathBuf,
@@ -518,7 +582,7 @@ pub fn launch_request(profile: &DapLaunchProfile, seq: u64) -> DapRequest<DapLau
     DapRequest {
         seq,
         message_type: "request".to_string(),
-        command: "launch".to_string(),
+        command: profile.request.clone(),
         arguments: launch_arguments(profile),
     }
 }
@@ -771,6 +835,17 @@ impl<T: DapTransport> DapClient<T> {
         self.send_request("initialize", Some(json_value(DapInitializeArguments::new(adapter_id))?))
     }
 
+    pub fn initialize_data(&mut self, adapter_id: &str) -> Result<DapCapabilities> {
+        let response = self.initialize(adapter_id)?;
+        response
+            .body
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AppError::General(format!("Failed to parse DAP capabilities: {err}")))?
+            .ok_or_else(|| AppError::General("DAP initialize response did not include capabilities".to_string()))
+    }
+
     pub fn set_breakpoints(&mut self, path: PathBuf, breakpoints: Vec<DapSourceBreakpoint>) -> Result<DapResponse> {
         self.send_request(
             "setBreakpoints",
@@ -799,11 +874,11 @@ impl<T: DapTransport> DapClient<T> {
     }
 
     pub fn launch(&mut self, profile: &DapLaunchProfile) -> Result<DapResponse> {
-        self.send_request("launch", Some(json_value(launch_arguments(profile))?))
+        self.send_request(&profile.request, Some(json_value(launch_arguments(profile))?))
     }
 
     pub fn send_launch(&mut self, profile: &DapLaunchProfile) -> Result<u64> {
-        self.send_request_without_wait("launch", Some(json_value(launch_arguments(profile))?))
+        self.send_request_without_wait(&profile.request, Some(json_value(launch_arguments(profile))?))
     }
 
     pub fn configuration_done(&mut self) -> Result<DapResponse> {
@@ -869,14 +944,36 @@ impl<T: DapTransport> DapClient<T> {
     }
 
     pub fn variables(&mut self, variables_reference: u64) -> Result<DapResponse> {
+        self.variables_range(variables_reference, None, None)
+    }
+
+    pub fn variables_range(
+        &mut self,
+        variables_reference: u64,
+        start: Option<usize>,
+        count: Option<usize>,
+    ) -> Result<DapResponse> {
         self.send_request(
             "variables",
-            Some(json_value(DapVariablesArguments { variables_reference })?),
+            Some(json_value(DapVariablesArguments {
+                variables_reference,
+                start,
+                count,
+            })?),
         )
     }
 
     pub fn variables_data(&mut self, variables_reference: u64) -> Result<Vec<DapVariable>> {
-        let response = self.variables(variables_reference)?;
+        self.variables_range_data(variables_reference, None, None)
+    }
+
+    pub fn variables_range_data(
+        &mut self,
+        variables_reference: u64,
+        start: Option<usize>,
+        count: Option<usize>,
+    ) -> Result<Vec<DapVariable>> {
+        let response = self.variables_range(variables_reference, start, count)?;
         Ok(response_body_as::<DapVariablesBody>(&response, "variables")?.variables)
     }
 
@@ -1072,6 +1169,10 @@ impl MockDapAdapter {
             "initialize" => Some(json!({
                 "supportsConfigurationDoneRequest": true,
                 "supportsFunctionBreakpoints": false,
+                "supportsConditionalBreakpoints": true,
+                "supportsHitConditionalBreakpoints": true,
+                "supportsLogPoints": true,
+                "supportsEvaluateForHovers": true,
                 "supportsSetVariable": true
             })),
             "setBreakpoints" => Some(json!({
@@ -1105,16 +1206,42 @@ impl MockDapAdapter {
                     }
                 ]
             })),
-            "variables" => Some(json!({
-                "variables": [
+            "variables" => {
+                let start = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("start"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let count = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("count"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(usize::MAX);
+                let variables = vec![
                     {
-                        "name": "argc",
-                        "value": "1",
-                        "type": "int",
-                        "variablesReference": 0
-                    }
-                ]
-            })),
+                        json!({
+                            "name": "argc",
+                            "value": "1",
+                            "type": "int",
+                            "variablesReference": 0
+                        })
+                    },
+                    {
+                        json!({
+                            "name": "argv",
+                            "value": "0x1000",
+                            "type": "char **",
+                            "variablesReference": 200
+                        })
+                    },
+                ];
+                Some(json!({
+                    "variables": variables.into_iter().skip(start).take(count).collect::<Vec<Value>>()
+                }))
+            }
             "evaluate" => {
                 let expression = request
                     .arguments
@@ -1149,7 +1276,7 @@ impl DapTransport for MockDapAdapter {
 
         let body = Self::response_body(&request);
         self.queue_response(&request, body)?;
-        if request.command == "launch" {
+        if matches!(request.command.as_str(), "launch" | "attach") {
             self.queue_event("initialized", None)?;
         }
         self.requests.push(request);
@@ -1169,13 +1296,19 @@ pub fn run_launch_session<T: DapTransport>(
     let response_start = client.received_responses().len();
     let event_start = client.events().len();
 
-    client.initialize(&profile.adapter)?;
+    let initialize_data = client.initialize_data(&profile.adapter)?;
+    let supports_configuration_done = initialize_data.supports_configuration_done_request;
+    let capabilities = Some(initialize_data);
     let launch_seq = client.send_launch(profile)?;
-    client.wait_for_event_from("initialized", event_start)?;
+    if profile.request != "attach" {
+        client.wait_for_event_from("initialized", event_start)?;
+    }
     let breakpoint_responses = client.set_profile_breakpoints(profile)?;
     let breakpoint_response_count = breakpoint_responses.len();
     let breakpoint_results = breakpoint_results_from_responses(&breakpoint_responses);
-    client.configuration_done()?;
+    if supports_configuration_done {
+        client.configuration_done()?;
+    }
     client.wait_for_response_seq(launch_seq)?;
 
     let commands = client.sent_requests()[request_start..]
@@ -1192,6 +1325,7 @@ pub fn run_launch_session<T: DapTransport>(
         response_count: client.received_responses().len() - response_start,
         breakpoint_response_count,
         breakpoint_results,
+        capabilities,
         initialized: events.iter().any(|event| event == "initialized"),
         launch_completed: true,
         commands,
@@ -1234,6 +1368,11 @@ pub fn collect_session_snapshot<T: DapTransport>(
     if !launch_report.launch_completed {
         snapshot.status = "launch incomplete".to_string();
     }
+    snapshot.capabilities = launch_report
+        .capabilities
+        .as_ref()
+        .map(format_capabilities)
+        .unwrap_or_default();
     Ok(snapshot)
 }
 
@@ -1265,15 +1404,50 @@ pub fn refresh_session_snapshot_with_breakpoints<T: DapTransport>(
     last_evaluation: Option<String>,
     breakpoint_results: &[DapBreakpointResult],
 ) -> Result<DapSessionSnapshot> {
+    refresh_session_snapshot_with_request(
+        client,
+        DapSnapshotRequest {
+            profile,
+            adapter,
+            status,
+            watch_expressions,
+            last_evaluation,
+            breakpoint_results,
+            selected_thread_id: None,
+            selected_frame_id: None,
+            variables_reference: None,
+            variables_start: None,
+            variables_count: None,
+            capabilities: &[],
+        },
+    )
+}
+
+pub fn refresh_session_snapshot_with_request<T: DapTransport>(
+    client: &mut DapClient<T>,
+    request: DapSnapshotRequest<'_>,
+) -> Result<DapSessionSnapshot> {
     let threads = client.threads_data()?;
-    let thread_id = threads.first().map(|thread| thread.id).unwrap_or(1);
+    let thread_id = request
+        .selected_thread_id
+        .filter(|selected| threads.iter().any(|thread| thread.id == *selected))
+        .or_else(|| threads.first().map(|thread| thread.id))
+        .unwrap_or(1);
     let stack_trace = client.stack_trace_data(thread_id)?;
-    let frame_id = stack_trace.stack_frames.first().map(|frame| frame.id).unwrap_or(1);
+    let frame_id = request
+        .selected_frame_id
+        .filter(|selected| stack_trace.stack_frames.iter().any(|frame| frame.id == *selected))
+        .or_else(|| stack_trace.stack_frames.first().map(|frame| frame.id))
+        .unwrap_or(1);
     let scopes = client.scopes_data(frame_id)?;
-    let variables_reference = scopes.first().map(|scope| scope.variables_reference).unwrap_or(100);
-    let variables = client.variables_data(variables_reference)?;
+    let variables_reference = request
+        .variables_reference
+        .or_else(|| scopes.first().map(|scope| scope.variables_reference))
+        .unwrap_or(100);
+    let variables =
+        client.variables_range_data(variables_reference, request.variables_start, request.variables_count)?;
     let mut watches = Vec::new();
-    for expression in watch_expressions {
+    for expression in request.watch_expressions {
         match client.evaluate_data(expression, Some(frame_id), "watch") {
             Ok(result) => watches.push(format_evaluation(expression, &result)),
             Err(err) => watches.push(format!("{expression} ! {err}")),
@@ -1289,9 +1463,9 @@ pub fn refresh_session_snapshot_with_breakpoints<T: DapTransport>(
     let last_event = events.last().cloned();
 
     Ok(DapSessionSnapshot {
-        adapter: adapter.to_string(),
-        status: status.to_string(),
-        profile: profile.name.clone(),
+        adapter: request.adapter.to_string(),
+        status: request.status.to_string(),
+        profile: request.profile.name.clone(),
         selected_thread_id: Some(thread_id),
         selected_frame_id: Some(frame_id),
         request_count: client.sent_requests().len(),
@@ -1312,13 +1486,14 @@ pub fn refresh_session_snapshot_with_breakpoints<T: DapTransport>(
             .map(|scope| format!("{} ref={}", scope.name, scope.variables_reference))
             .collect(),
         variables: variables.iter().map(format_variable).collect(),
-        breakpoints: format_breakpoints(profile, breakpoint_results),
+        breakpoints: format_breakpoints(request.profile, request.breakpoint_results),
+        capabilities: request.capabilities.to_vec(),
         thread_items: threads,
         frame_items: stack_trace.stack_frames,
         scope_items: scopes,
         variable_items: variables,
         watches,
-        last_evaluation,
+        last_evaluation: request.last_evaluation,
         stop_reason,
         last_event,
         error: None,
@@ -1387,6 +1562,61 @@ pub fn best_adapter_for_profile(profile: &DapLaunchProfile) -> Option<DapAdapter
         .or_else(|| discoveries.into_iter().find(|candidate| candidate.available))
 }
 
+pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
+    vec![
+        DapAdapterTemplate {
+            adapter: "codelldb".to_string(),
+            command: "codelldb".to_string(),
+            args: Vec::new(),
+            request: "launch".to_string(),
+            detail: "Native C/C++/Rust launch via CodeLLDB".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "hit-conditions".to_string(),
+                "logpoints".to_string(),
+                "evaluate".to_string(),
+            ],
+        },
+        DapAdapterTemplate {
+            adapter: "lldb-dap".to_string(),
+            command: "lldb-dap".to_string(),
+            args: Vec::new(),
+            request: "launch".to_string(),
+            detail: "LLVM LLDB DAP launch/attach template".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "hit-conditions".to_string(),
+                "logpoints".to_string(),
+                "attach".to_string(),
+            ],
+        },
+        DapAdapterTemplate {
+            adapter: "cppdbg".to_string(),
+            command: "OpenDebugAD7".to_string(),
+            args: Vec::new(),
+            request: "launch".to_string(),
+            detail: "VS Code cpptools OpenDebugAD7 launch template".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "hit-conditions".to_string(),
+                "logpoints".to_string(),
+            ],
+        },
+        DapAdapterTemplate {
+            adapter: "debugpy".to_string(),
+            command: "python3".to_string(),
+            args: vec!["-m".to_string(), "debugpy.adapter".to_string()],
+            request: "launch".to_string(),
+            detail: "Python debugpy adapter template".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "logpoints".to_string(),
+                "attach".to_string(),
+            ],
+        },
+    ]
+}
+
 pub fn save_profile(root: &Path, profile: DapLaunchProfile) -> Result<()> {
     let path = profile_path(root)?;
     save_profile_to_path(&path, profile)
@@ -1425,13 +1655,26 @@ fn env_map(env: &[DapEnvVar]) -> BTreeMap<String, String> {
 }
 
 fn launch_arguments(profile: &DapLaunchProfile) -> DapLaunchArguments {
+    if profile.request == "attach" {
+        return DapLaunchArguments {
+            name: profile.name.clone(),
+            program: None,
+            process_id: profile.process_id,
+            cwd: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            stop_on_entry: None,
+        };
+    }
+
     DapLaunchArguments {
         name: profile.name.clone(),
-        program: profile.program.clone(),
+        program: Some(profile.program.clone()),
+        process_id: profile.process_id,
         cwd: profile.cwd.clone(),
         args: profile.args.clone(),
         env: env_map(&profile.env),
-        stop_on_entry: profile.stop_on_entry,
+        stop_on_entry: Some(profile.stop_on_entry),
     }
 }
 
@@ -1463,6 +1706,10 @@ fn json_with_newline<T: Serialize>(value: &T) -> Result<String> {
             json
         })
         .map_err(|err| AppError::General(err.to_string()))
+}
+
+fn default_dap_request() -> String {
+    "launch".to_string()
 }
 
 fn json_value<T: Serialize>(value: T) -> Result<Value> {
@@ -1684,6 +1931,35 @@ fn format_breakpoint_result(result: &DapBreakpointResult) -> String {
         .unwrap_or_else(|| "unverified".to_string())
 }
 
+fn format_capabilities(capabilities: &DapCapabilities) -> Vec<String> {
+    let mut lines = Vec::new();
+    if capabilities.supports_configuration_done_request {
+        lines.push("configurationDone".to_string());
+    }
+    if capabilities.supports_conditional_breakpoints {
+        lines.push("conditional-breakpoints".to_string());
+    }
+    if capabilities.supports_hit_conditional_breakpoints {
+        lines.push("hit-conditions".to_string());
+    }
+    if capabilities.supports_log_points {
+        lines.push("logpoints".to_string());
+    }
+    if capabilities.supports_evaluate_for_hovers {
+        lines.push("hover-evaluate".to_string());
+    }
+    if capabilities.supports_set_variable {
+        lines.push("set-variable".to_string());
+    }
+    if capabilities.supports_step_back {
+        lines.push("step-back".to_string());
+    }
+    if lines.is_empty() {
+        lines.push("basic".to_string());
+    }
+    lines
+}
+
 fn format_stack_frame(frame: &DapStackFrame) -> String {
     let path = frame
         .source
@@ -1697,19 +1973,45 @@ fn format_stack_frame(frame: &DapStackFrame) -> String {
 
 fn adapter_candidates() -> Vec<DapAdapterDiscovery> {
     let mut candidates = Vec::new();
-    for (adapter, command, detail) in [
-        ("codelldb", "codelldb", "CodeLLDB adapter"),
-        ("lldb-dap", "lldb-dap", "LLVM lldb-dap adapter"),
-        ("lldb-vscode", "lldb-vscode", "legacy LLDB VS Code adapter"),
-        ("cppdbg", "OpenDebugAD7", "cpptools OpenDebugAD7 adapter"),
-        ("js-debug", "js-debug-adapter", "VS Code JavaScript debug adapter"),
+    for (adapter, command, detail, capabilities) in [
+        (
+            "codelldb",
+            "codelldb",
+            "CodeLLDB adapter",
+            &["conditional-breakpoints", "hit-conditions", "logpoints", "evaluate"][..],
+        ),
+        (
+            "lldb-dap",
+            "lldb-dap",
+            "LLVM lldb-dap adapter",
+            &["conditional-breakpoints", "hit-conditions", "logpoints", "attach"][..],
+        ),
+        (
+            "lldb-vscode",
+            "lldb-vscode",
+            "legacy LLDB VS Code adapter",
+            &["conditional-breakpoints", "hit-conditions"][..],
+        ),
+        (
+            "cppdbg",
+            "OpenDebugAD7",
+            "cpptools OpenDebugAD7 adapter",
+            &["conditional-breakpoints", "hit-conditions", "logpoints"][..],
+        ),
+        (
+            "js-debug",
+            "js-debug-adapter",
+            "VS Code JavaScript debug adapter",
+            &["conditional-breakpoints", "logpoints"][..],
+        ),
         (
             "node",
             "node",
             "Node runtime; use with a JS DAP adapter when configured",
+            &["runtime"][..],
         ),
     ] {
-        candidates.push(discovery_for_command(adapter, command, &[], detail));
+        candidates.push(discovery_for_command(adapter, command, &[], detail, capabilities));
     }
 
     if let Some(python) = command_on_path("python3").or_else(|| command_on_path("python")) {
@@ -1719,6 +2021,11 @@ fn adapter_candidates() -> Vec<DapAdapterDiscovery> {
             args: vec!["-m".to_string(), "debugpy.adapter".to_string()],
             available: true,
             detail: "Python is available; debugpy module is checked when the adapter starts".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "logpoints".to_string(),
+                "attach".to_string(),
+            ],
         });
     } else {
         candidates.push(DapAdapterDiscovery {
@@ -1727,23 +2034,39 @@ fn adapter_candidates() -> Vec<DapAdapterDiscovery> {
             args: vec!["-m".to_string(), "debugpy.adapter".to_string()],
             available: false,
             detail: "python was not found on PATH".to_string(),
+            capabilities: vec![
+                "conditional-breakpoints".to_string(),
+                "logpoints".to_string(),
+                "attach".to_string(),
+            ],
         });
     }
     candidates
 }
 
-fn discovery_for_command(adapter: &str, command: &str, args: &[&str], detail: &str) -> DapAdapterDiscovery {
+fn discovery_for_command(
+    adapter: &str,
+    command: &str,
+    args: &[&str],
+    detail: &str,
+    capabilities: &[&str],
+) -> DapAdapterDiscovery {
     let resolved = command_on_path(command);
+    let available = resolved.is_some();
     DapAdapterDiscovery {
         adapter: adapter.to_string(),
         command: resolved.unwrap_or_else(|| PathBuf::from(command)),
         args: args.iter().map(|arg| (*arg).to_string()).collect(),
-        available: command_on_path(command).is_some(),
-        detail: if command_on_path(command).is_some() {
+        available,
+        detail: if available {
             detail.to_string()
         } else {
             format!("{command} was not found on PATH")
         },
+        capabilities: capabilities
+            .iter()
+            .map(|capability| (*capability).to_string())
+            .collect(),
     }
 }
 
@@ -1872,7 +2195,9 @@ mod tests {
         DapLaunchProfile {
             name: name.to_string(),
             adapter: "cppdbg".to_string(),
+            request: "launch".to_string(),
             program: PathBuf::from("target/debug/app"),
+            process_id: None,
             cwd: Some(PathBuf::from("/tmp/project")),
             args: vec!["--case".to_string(), "42".to_string()],
             env: vec![
@@ -1926,6 +2251,20 @@ mod tests {
         assert!(json.contains("\"program\": \"target/debug/app\""));
         assert!(json.contains("\"RUST_LOG\": \"debug\""));
         assert!(json.contains("\"stopOnEntry\": true"));
+    }
+
+    #[test]
+    fn builds_attach_request_json_with_process_id() {
+        let mut profile = profile("attach");
+        profile.request = "attach".to_string();
+        profile.process_id = Some(4242);
+        let json = launch_request_json(&profile).unwrap();
+
+        assert!(json.contains("\"command\": \"attach\""));
+        assert!(json.contains("\"processId\": 4242"));
+        assert!(!json.contains("\"program\""));
+        assert!(!json.contains("\"stopOnEntry\""));
+        assert!(!json.contains("\"args\""));
     }
 
     #[test]
@@ -2080,6 +2419,31 @@ mod tests {
     }
 
     #[test]
+    fn mock_client_pages_variables() {
+        let mut client = DapClient::new(MockDapAdapter::default());
+
+        let variables = client.variables_range_data(100, Some(1), Some(1)).unwrap();
+
+        assert_eq!(variables.len(), 1);
+        assert_eq!(variables[0].name, "argv");
+        assert!(client.sent_requests().iter().any(|request| {
+            request.command == "variables"
+                && request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("start"))
+                    .and_then(Value::as_u64)
+                    == Some(1)
+                && request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("count"))
+                    .and_then(Value::as_u64)
+                    == Some(1)
+        }));
+    }
+
+    #[test]
     fn mock_client_evaluates_expressions() {
         let mut client = DapClient::new(MockDapAdapter::default());
 
@@ -2120,6 +2484,19 @@ mod tests {
         assert_eq!(report.request_count, report.response_count);
         assert!(report.events.iter().any(|event| event == "initialized"));
         assert!(report.events.iter().any(|event| event == "stopped"));
+    }
+
+    #[test]
+    fn mock_session_smoke_covers_attach_flow() {
+        let mut profile = profile("attach");
+        profile.request = "attach".to_string();
+        profile.process_id = Some(4242);
+        let report = run_mock_session_smoke(&profile).unwrap();
+
+        assert!(report.commands.iter().any(|item| item == "attach"));
+        assert!(!report.commands.iter().any(|item| item == "launch"));
+        assert_eq!(report.request_count, report.response_count);
+        assert!(report.events.iter().any(|event| event == "initialized"));
     }
 
     #[test]
