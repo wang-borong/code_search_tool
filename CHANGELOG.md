@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added lightweight syntax highlighting for the ratatui preview pane and richer color styling across results, trace, debug, and activity panels.
 - Added release readiness documentation for the ratatui tracing workspace, CLI smoke checks, trace export, and debug profile workflows.
 - Added `scripts/smoke.sh` as a repeatable release smoke entrypoint. The script uses `rtk` for every shell command and keeps debug profile state under `/tmp` by default.
 - Added lightweight clap command-tree tests to catch invalid CLI definitions before release.
@@ -72,6 +73,14 @@
 - Added TUI DAP thread/frame selection plus variable expansion and paging commands for deeper debug-session inspection.
 - Added grouped query execution with `OR`, `NOT`, parentheses, richer explain filters, and semantic-to-index fallback when LSP is unavailable.
 - Added `index shards` planning reports for large workspaces and extended smoke coverage for shard planning, query AST explain, semantic fallback, DAP templates, and mock attach sessions.
+- Added DAP adapter template schemas with launch/attach field lists, notes, and argument previews, plus DAP session state, last request/error, and variable page metadata in snapshots.
+- Added richer TUI Debug panel status lines for DAP state, selected thread/frame, variable paging, and last request/error.
+- Added a `search-to-debug-loop` workflow that connects query results, trace entries, semantic graph fallback, DAP profile generation, and the TUI debug surface.
+- Added Query Engine v2 matching controls: `--mode fuzzy|exact|regex`, built-in query macros, saved workspace queries, and score explanations for `query` and `service query`.
+- Added writable index shard caches with `index shards --write`, `index shard-status`, and `index shard-query`, including automatic fallback to the main index when shard metadata is stale.
+- Added `graph semantic --fallback index` so semantic graph commands can still return index-derived edges when LSP is unavailable or empty.
+- Added `workspace doctor-bundle` text/json support bundles with workspace, config, index, service, DAP, workflow, and saved-query diagnostics.
+- Added P89-P96 unit and smoke coverage for DAP template/state metadata, Query v2, shard cache query/status, graph fallback, diagnostic workflows, and doctor bundles.
 
 ### Verification
 

@@ -139,6 +139,35 @@ pub struct DapLaunchArguments {
     pub stop_on_entry: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DapSessionState {
+    #[default]
+    Idle,
+    Starting,
+    Initialized,
+    Running,
+    Stopped,
+    Terminated,
+    Disconnected,
+    Errored,
+}
+
+impl DapSessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Starting => "starting",
+            Self::Initialized => "initialized",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Terminated => "terminated",
+            Self::Disconnected => "disconnected",
+            Self::Errored => "errored",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapSource {
     pub path: PathBuf,
@@ -372,6 +401,14 @@ pub struct DapAdapterTemplate {
     pub detail: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub launch_fields: Vec<String>,
+    #[serde(default)]
+    pub attach_fields: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    #[serde(default)]
+    pub arguments_preview: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +538,9 @@ pub struct DapLaunchSessionReport {
     pub breakpoint_response_count: usize,
     pub breakpoint_results: Vec<DapBreakpointResult>,
     pub capabilities: Option<DapCapabilities>,
+    pub state: DapSessionState,
+    pub last_request: Option<String>,
+    pub last_error: Option<String>,
     pub initialized: bool,
     pub launch_completed: bool,
     pub commands: Vec<String>,
@@ -510,12 +550,20 @@ pub struct DapLaunchSessionReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapSessionSnapshot {
     pub adapter: String,
+    #[serde(default)]
+    pub state: DapSessionState,
     pub status: String,
     pub profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_thread_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_frame_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_reference: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_start: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_count: Option<usize>,
     pub request_count: usize,
     pub response_count: usize,
     pub commands: Vec<String>,
@@ -544,6 +592,10 @@ pub struct DapSessionSnapshot {
     pub stop_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1319,6 +1371,7 @@ pub fn run_launch_session<T: DapTransport>(
         .iter()
         .map(|event| event.event.clone())
         .collect::<Vec<String>>();
+    let state = infer_session_state("launch completed", &events, None);
 
     Ok(DapLaunchSessionReport {
         request_count: commands.len(),
@@ -1326,6 +1379,9 @@ pub fn run_launch_session<T: DapTransport>(
         breakpoint_response_count,
         breakpoint_results,
         capabilities,
+        state,
+        last_request: commands.last().cloned(),
+        last_error: None,
         initialized: events.iter().any(|event| event == "initialized"),
         launch_completed: true,
         commands,
@@ -1367,12 +1423,16 @@ pub fn collect_session_snapshot<T: DapTransport>(
     )?;
     if !launch_report.launch_completed {
         snapshot.status = "launch incomplete".to_string();
+        snapshot.state = DapSessionState::Errored;
     }
     snapshot.capabilities = launch_report
         .capabilities
         .as_ref()
         .map(format_capabilities)
         .unwrap_or_default();
+    snapshot.state = launch_report.state;
+    snapshot.last_request = launch_report.last_request;
+    snapshot.last_error = launch_report.last_error;
     Ok(snapshot)
 }
 
@@ -1461,13 +1521,19 @@ pub fn refresh_session_snapshot_with_request<T: DapTransport>(
         .collect::<Vec<String>>();
     let stop_reason = latest_stopped_reason(client.events());
     let last_event = events.last().cloned();
+    let last_request = client.sent_requests().last().map(|request| request.command.clone());
+    let state = infer_session_state(request.status, &events, None);
 
     Ok(DapSessionSnapshot {
         adapter: request.adapter.to_string(),
+        state,
         status: request.status.to_string(),
         profile: request.profile.name.clone(),
         selected_thread_id: Some(thread_id),
         selected_frame_id: Some(frame_id),
+        variables_reference: Some(variables_reference),
+        variables_start: request.variables_start,
+        variables_count: request.variables_count,
         request_count: client.sent_requests().len(),
         response_count: client.received_responses().len(),
         commands: client
@@ -1496,6 +1562,8 @@ pub fn refresh_session_snapshot_with_request<T: DapTransport>(
         last_evaluation: request.last_evaluation,
         stop_reason,
         last_event,
+        last_request,
+        last_error: None,
         error: None,
         stopped_location,
     })
@@ -1576,6 +1644,13 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
                 "logpoints".to_string(),
                 "evaluate".to_string(),
             ],
+            launch_fields: common_launch_fields(),
+            attach_fields: common_attach_fields(),
+            notes: vec![
+                "Use `request=attach` with `processId` for an existing native process".to_string(),
+                "CodeLLDB may require adapter-specific source map settings outside this generic profile".to_string(),
+            ],
+            arguments_preview: native_arguments_preview("codelldb"),
         },
         DapAdapterTemplate {
             adapter: "lldb-dap".to_string(),
@@ -1589,6 +1664,13 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
                 "logpoints".to_string(),
                 "attach".to_string(),
             ],
+            launch_fields: common_launch_fields(),
+            attach_fields: common_attach_fields(),
+            notes: vec![
+                "LLDB DAP accepts the generic launch/attach profile used by fcs".to_string(),
+                "Attach uses `processId`; launch uses `program`, `cwd`, `args`, and `env`".to_string(),
+            ],
+            arguments_preview: native_arguments_preview("lldb-dap"),
         },
         DapAdapterTemplate {
             adapter: "cppdbg".to_string(),
@@ -1601,6 +1683,13 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
                 "hit-conditions".to_string(),
                 "logpoints".to_string(),
             ],
+            launch_fields: common_launch_fields(),
+            attach_fields: common_attach_fields(),
+            notes: vec![
+                "OpenDebugAD7 is discovered from VS Code cpptools installations when available".to_string(),
+                "For MI debugger customization, store extra adapter settings in your external launch config".to_string(),
+            ],
+            arguments_preview: native_arguments_preview("cppdbg"),
         },
         DapAdapterTemplate {
             adapter: "debugpy".to_string(),
@@ -1613,8 +1702,109 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
                 "logpoints".to_string(),
                 "attach".to_string(),
             ],
+            launch_fields: vec![
+                "name".to_string(),
+                "program".to_string(),
+                "cwd".to_string(),
+                "args".to_string(),
+                "env".to_string(),
+                "stopOnEntry".to_string(),
+            ],
+            attach_fields: vec![
+                "name".to_string(),
+                "processId".to_string(),
+                "connect/listen".to_string(),
+            ],
+            notes: vec![
+                "fcs emits process attach with `processId` when the profile request is `attach`".to_string(),
+                "Remote debugpy attach still needs adapter-specific `connect` or `listen` config outside the generic profile"
+                    .to_string(),
+            ],
+            arguments_preview: debugpy_arguments_preview(),
         },
     ]
+}
+
+fn common_launch_fields() -> Vec<String> {
+    vec![
+        "name".to_string(),
+        "program".to_string(),
+        "cwd".to_string(),
+        "args".to_string(),
+        "env".to_string(),
+        "stopOnEntry".to_string(),
+        "breakpoints".to_string(),
+    ]
+}
+
+fn common_attach_fields() -> Vec<String> {
+    vec!["name".to_string(), "processId".to_string(), "breakpoints".to_string()]
+}
+
+fn native_arguments_preview(adapter: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "launch".to_string(),
+            json!({
+                "request": "launch",
+                "adapter": adapter,
+                "arguments": {
+                    "name": "default",
+                    "program": "target/debug/app",
+                    "cwd": ".",
+                    "args": [],
+                    "env": {},
+                    "stopOnEntry": false
+                }
+            }),
+        ),
+        (
+            "attach".to_string(),
+            json!({
+                "request": "attach",
+                "adapter": adapter,
+                "arguments": {
+                    "name": "default",
+                    "processId": 12345
+                }
+            }),
+        ),
+    ])
+}
+
+fn debugpy_arguments_preview() -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "launch".to_string(),
+            json!({
+                "request": "launch",
+                "adapter": "debugpy",
+                "arguments": {
+                    "name": "python",
+                    "program": "app.py",
+                    "cwd": ".",
+                    "args": [],
+                    "env": {},
+                    "stopOnEntry": false
+                }
+            }),
+        ),
+        (
+            "attach".to_string(),
+            json!({
+                "request": "attach",
+                "adapter": "debugpy",
+                "arguments": {
+                    "name": "python",
+                    "processId": 12345,
+                    "connect": {
+                        "host": "127.0.0.1",
+                        "port": 5678
+                    }
+                }
+            }),
+        ),
+    ])
 }
 
 pub fn save_profile(root: &Path, profile: DapLaunchProfile) -> Result<()> {
@@ -1884,6 +2074,47 @@ fn latest_stopped_reason(events: &[DapEvent]) -> Option<String> {
         .and_then(|body| body.get("reason"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn infer_session_state(status: &str, events: &[String], error: Option<&str>) -> DapSessionState {
+    if error.is_some() {
+        return DapSessionState::Errored;
+    }
+
+    let normalized_status = status.to_ascii_lowercase();
+    if normalized_status.contains("error") || normalized_status.contains("failed") {
+        return DapSessionState::Errored;
+    }
+    if normalized_status.contains("disconnect") {
+        return DapSessionState::Disconnected;
+    }
+    if normalized_status.contains("terminate") {
+        return DapSessionState::Terminated;
+    }
+    if normalized_status.contains("stop") || normalized_status.contains("pause") {
+        return DapSessionState::Stopped;
+    }
+    if normalized_status.contains("start") || normalized_status.contains("launching") {
+        return DapSessionState::Starting;
+    }
+
+    for event in events.iter().rev() {
+        match event.as_str() {
+            "terminated" => return DapSessionState::Terminated,
+            "exited" => return DapSessionState::Terminated,
+            "disconnect" | "disconnected" => return DapSessionState::Disconnected,
+            "stopped" => return DapSessionState::Stopped,
+            "continued" | "thread" => return DapSessionState::Running,
+            "initialized" => return DapSessionState::Initialized,
+            _ => {}
+        }
+    }
+
+    if normalized_status.contains("launch completed") || normalized_status.contains("running") {
+        DapSessionState::Running
+    } else {
+        DapSessionState::Idle
+    }
 }
 
 fn format_breakpoints(profile: &DapLaunchProfile, results: &[DapBreakpointResult]) -> Vec<String> {
@@ -2487,6 +2718,17 @@ mod tests {
     }
 
     #[test]
+    fn launch_session_report_tracks_state_and_last_request() {
+        let mut client = DapClient::new(MockDapAdapter::default());
+        let report = run_launch_session(&mut client, &profile("report")).unwrap();
+
+        assert_eq!(report.state, DapSessionState::Initialized);
+        assert_eq!(report.last_request.as_deref(), Some("configurationDone"));
+        assert_eq!(report.last_error, None);
+        assert!(report.initialized);
+    }
+
+    #[test]
     fn mock_session_smoke_covers_attach_flow() {
         let mut profile = profile("attach");
         profile.request = "attach".to_string();
@@ -2503,16 +2745,52 @@ mod tests {
     fn mock_snapshot_includes_typed_debug_items() {
         let snapshot = run_mock_session_snapshot(&profile("typed")).unwrap();
 
+        assert_eq!(snapshot.state, DapSessionState::Initialized);
         assert_eq!(snapshot.thread_items[0].id, 1);
         assert_eq!(snapshot.frame_items[0].name, "main");
         assert_eq!(snapshot.scope_items[0].name, "Locals");
         assert_eq!(snapshot.variable_items[0].name, "argc");
         assert!(snapshot.stop_reason.is_some());
         assert_eq!(snapshot.last_event.as_deref(), Some("stopped"));
+        assert_eq!(snapshot.last_request.as_deref(), Some("configurationDone"));
+        assert_eq!(snapshot.last_error, None);
         assert!(snapshot
             .breakpoints
             .iter()
             .any(|breakpoint| breakpoint.contains("verified")));
+    }
+
+    #[test]
+    fn snapshot_request_tracks_variable_paging() {
+        let profile = profile("paged");
+        let mut client = DapClient::new(MockDapAdapter::default());
+        let report = run_launch_session(&mut client, &profile).unwrap();
+        let snapshot = refresh_session_snapshot_with_request(
+            &mut client,
+            DapSnapshotRequest {
+                profile: &profile,
+                adapter: "mock",
+                status: "stopped at breakpoint",
+                watch_expressions: &[],
+                last_evaluation: None,
+                breakpoint_results: &report.breakpoint_results,
+                selected_thread_id: Some(1),
+                selected_frame_id: Some(1),
+                variables_reference: Some(100),
+                variables_start: Some(1),
+                variables_count: Some(1),
+                capabilities: &[],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.state, DapSessionState::Stopped);
+        assert_eq!(snapshot.variables_reference, Some(100));
+        assert_eq!(snapshot.variables_start, Some(1));
+        assert_eq!(snapshot.variables_count, Some(1));
+        assert_eq!(snapshot.variable_items.len(), 1);
+        assert_eq!(snapshot.variable_items[0].name, "argv");
+        assert_eq!(snapshot.last_request.as_deref(), Some("variables"));
     }
 
     #[test]
@@ -2522,5 +2800,26 @@ mod tests {
         assert!(adapters.iter().any(|adapter| adapter.adapter == "codelldb"));
         assert!(adapters.iter().any(|adapter| adapter.adapter == "debugpy"));
         assert!(adapters.iter().any(|adapter| adapter.adapter == "node"));
+    }
+
+    #[test]
+    fn adapter_templates_include_schema_and_argument_previews() {
+        let templates = adapter_templates();
+        let codelldb = templates
+            .iter()
+            .find(|template| template.adapter == "codelldb")
+            .unwrap();
+        let debugpy = templates.iter().find(|template| template.adapter == "debugpy").unwrap();
+
+        assert!(codelldb.launch_fields.iter().any(|field| field == "program"));
+        assert!(codelldb.attach_fields.iter().any(|field| field == "processId"));
+        assert!(codelldb.notes.iter().any(|note| note.contains("processId")));
+        assert!(codelldb.arguments_preview.contains_key("launch"));
+        assert!(codelldb.arguments_preview.contains_key("attach"));
+        assert!(debugpy.attach_fields.iter().any(|field| field == "connect/listen"));
+        assert!(debugpy
+            .arguments_preview
+            .get("attach")
+            .is_some_and(|preview| preview.to_string().contains("processId")));
     }
 }

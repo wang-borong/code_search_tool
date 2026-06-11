@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::config::LspConfig;
@@ -13,6 +15,36 @@ pub enum QuerySource {
     Trace,
     Semantic,
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueryMode {
+    #[default]
+    Fuzzy,
+    Exact,
+    Regex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRunOptions {
+    pub mode: QueryMode,
+    pub macros: Vec<String>,
+    pub score_explain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQuery {
+    pub name: String,
+    pub expression: String,
+    pub source: String,
+    pub mode: QueryMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQueryStore {
+    #[serde(default)]
+    pub queries: Vec<SavedQuery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +141,37 @@ impl QuerySource {
             sources.push("semantic".to_string());
         }
         sources
+    }
+}
+
+impl QueryMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "fuzzy" | "substring" | "default" => Ok(Self::Fuzzy),
+            "exact" => Ok(Self::Exact),
+            "regex" | "regexp" => Ok(Self::Regex),
+            other => Err(AppError::General(format!(
+                "Unsupported query mode: {other}. Use fuzzy, exact, or regex"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fuzzy => "fuzzy",
+            Self::Exact => "exact",
+            Self::Regex => "regex",
+        }
+    }
+}
+
+impl Default for QueryRunOptions {
+    fn default() -> Self {
+        Self {
+            mode: QueryMode::Fuzzy,
+            macros: Vec::new(),
+            score_explain: false,
+        }
     }
 }
 
@@ -334,9 +397,14 @@ pub fn run(root: &Path, expression: &str, source: QuerySource, limit: usize) -> 
 }
 
 pub fn explain(expression: &str, source: QuerySource) -> QueryExplanation {
-    let parsed = parse_expression(expression);
+    explain_with_options(expression, source, &QueryRunOptions::default())
+}
+
+pub fn explain_with_options(expression: &str, source: QuerySource, options: &QueryRunOptions) -> QueryExplanation {
+    let expanded = expand_query_macros(expression, &options.macros).unwrap_or_else(|_| expression.to_string());
+    let parsed = parse_expression(&expanded);
     QueryExplanation {
-        expression: expression.to_string(),
+        expression: expanded,
         source: source.as_str().to_string(),
         selected_sources: source.selected_sources(),
         terms: parsed.terms,
@@ -391,6 +459,72 @@ pub fn format_explanation(explanation: &QueryExplanation, format: &str) -> Resul
     }
 }
 
+pub fn expand_query_macros(expression: &str, macros: &[String]) -> Result<String> {
+    let mut expanded = expression.to_string();
+    for macro_name in macros {
+        let token = if macro_name.starts_with('@') {
+            macro_name.clone()
+        } else {
+            format!("@{macro_name}")
+        };
+        expanded.push(' ');
+        expanded.push_str(&token);
+    }
+
+    for (token, replacement) in builtin_query_macros() {
+        expanded = expanded.replace(token, replacement);
+    }
+
+    let unknown = expanded
+        .split_whitespace()
+        .find(|part| part.starts_with('@'))
+        .map(str::to_string);
+    if let Some(unknown) = unknown {
+        return Err(AppError::General(format!("Unsupported query macro: {unknown}")));
+    }
+
+    Ok(expanded)
+}
+
+pub fn list_saved_queries(root: &Path) -> Result<Vec<SavedQuery>> {
+    let mut store = load_query_store(root)?;
+    store.queries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(store.queries)
+}
+
+pub fn save_query(root: &Path, name: &str, expression: &str, source: QuerySource, mode: QueryMode) -> Result<()> {
+    validate_saved_query_name(name)?;
+    let mut store = load_query_store(root)?;
+    store.queries.retain(|query| query.name != name);
+    store.queries.push(SavedQuery {
+        name: name.to_string(),
+        expression: expression.to_string(),
+        source: source.as_str().to_string(),
+        mode,
+    });
+    store.queries.sort_by(|left, right| left.name.cmp(&right.name));
+    write_query_store(root, &store)
+}
+
+pub fn load_saved_query(root: &Path, name: &str) -> Result<SavedQuery> {
+    load_query_store(root)?
+        .queries
+        .into_iter()
+        .find(|query| query.name == name)
+        .ok_or_else(|| AppError::General(format!("Saved query not found: {name}")))
+}
+
+pub fn delete_saved_query(root: &Path, name: &str) -> Result<bool> {
+    let mut store = load_query_store(root)?;
+    let before = store.queries.len();
+    store.queries.retain(|query| query.name != name);
+    let deleted = store.queries.len() != before;
+    if deleted {
+        write_query_store(root, &store)?;
+    }
+    Ok(deleted)
+}
+
 pub fn run_with_config(
     root: &Path,
     expression: &str,
@@ -398,18 +532,31 @@ pub fn run_with_config(
     limit: usize,
     lsp_config: Option<&LspConfig>,
 ) -> Result<Vec<QueryMatch>> {
-    let parsed = parse_expression(expression);
+    run_with_options(root, expression, source, limit, lsp_config, &QueryRunOptions::default())
+}
+
+pub fn run_with_options(
+    root: &Path,
+    expression: &str,
+    source: QuerySource,
+    limit: usize,
+    lsp_config: Option<&LspConfig>,
+    options: &QueryRunOptions,
+) -> Result<Vec<QueryMatch>> {
+    let expanded = expand_query_macros(expression, &options.macros)?;
+    validate_expression_for_mode(&expanded, options.mode)?;
+    let parsed = parse_expression(&expanded);
     let mut matches = Vec::new();
 
     if source.includes_index() {
-        matches.extend(query_index(root, &parsed)?);
+        matches.extend(query_index_with_options(root, &parsed, options)?);
     }
     if source.includes_trace() {
-        matches.extend(query_trace(root, &parsed)?);
+        matches.extend(query_trace_with_options(root, &parsed, options)?);
     }
     if source.includes_lsp() {
         match lsp_config {
-            Some(config) => match query_lsp(root, &parsed, expression, config) {
+            Some(config) => match query_lsp_with_options(root, &parsed, &expanded, config, options) {
                 Ok(items) => matches.extend(items),
                 Err(err) if source == QuerySource::Auto => {
                     matches.push(QueryMatch {
@@ -424,13 +571,23 @@ pub fn run_with_config(
                     });
                 }
                 Err(_) if source == QuerySource::Semantic => {
-                    matches.extend(semantic_fallback_matches(root, &parsed, "semantic unavailable")?);
+                    matches.extend(semantic_fallback_matches_with_options(
+                        root,
+                        &parsed,
+                        "semantic unavailable",
+                        options,
+                    )?);
                 }
                 Err(err) => return Err(err),
             },
             None if source == QuerySource::Auto => {}
             None if source == QuerySource::Semantic => {
-                matches.extend(semantic_fallback_matches(root, &parsed, "semantic config missing")?);
+                matches.extend(semantic_fallback_matches_with_options(
+                    root,
+                    &parsed,
+                    "semantic config missing",
+                    options,
+                )?);
             }
             None => {
                 return Err(AppError::General(
@@ -448,11 +605,22 @@ pub fn run_with_config(
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.label.cmp(&right.label))
     });
-    Ok(dedup_matches(matches, limit.max(1)))
+    let mut matches = dedup_matches(matches, limit.max(1));
+    if options.score_explain {
+        for item in &mut matches {
+            item.detail = format!("{}; score={} mode={}", item.detail, item.score, options.mode.as_str());
+        }
+    }
+    Ok(matches)
 }
 
-fn semantic_fallback_matches(root: &Path, expression: &QueryExpression, reason: &str) -> Result<Vec<QueryMatch>> {
-    let mut fallback = query_index(root, expression)?;
+fn semantic_fallback_matches_with_options(
+    root: &Path,
+    expression: &QueryExpression,
+    reason: &str,
+    options: &QueryRunOptions,
+) -> Result<Vec<QueryMatch>> {
+    let mut fallback = query_index_with_options(root, expression, options)?;
     for item in &mut fallback {
         item.source = format!("fallback:{}", item.source);
         item.detail = format!("{reason}; {}", item.detail);
@@ -506,7 +674,11 @@ pub fn format_matches(matches: &[QueryMatch], format: &str) -> Result<String> {
     }
 }
 
-fn query_index(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMatch>> {
+fn query_index_with_options(
+    root: &Path,
+    expression: &QueryExpression,
+    options: &QueryRunOptions,
+) -> Result<Vec<QueryMatch>> {
     let Some(index) = crate::index::load(root)? else {
         return Ok(Vec::new());
     };
@@ -528,7 +700,7 @@ fn query_index(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMat
             session: None,
             tags: Vec::new(),
         };
-        if let Some(score) = score_candidate(&candidate, expression) {
+        if let Some(score) = score_candidate_with_mode(&candidate, expression, options.mode)? {
             matches.push(candidate.into_match(score));
         }
     }
@@ -549,7 +721,7 @@ fn query_index(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMat
             session: None,
             tags: Vec::new(),
         };
-        if let Some(score) = score_candidate(&candidate, expression) {
+        if let Some(score) = score_candidate_with_mode(&candidate, expression, options.mode)? {
             matches.push(candidate.into_match(score));
         }
     }
@@ -557,7 +729,11 @@ fn query_index(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMat
     Ok(matches)
 }
 
-fn query_trace(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMatch>> {
+fn query_trace_with_options(
+    root: &Path,
+    expression: &QueryExpression,
+    options: &QueryRunOptions,
+) -> Result<Vec<QueryMatch>> {
     let root = normalize_path(root);
     let mut matches = Vec::new();
     for entry in crate::trace::list()? {
@@ -580,7 +756,7 @@ fn query_trace(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMat
             session: entry.session,
             tags: entry.tags,
         };
-        if let Some(score) = score_candidate(&candidate, expression) {
+        if let Some(score) = score_candidate_with_mode(&candidate, expression, options.mode)? {
             matches.push(candidate.into_match(score));
         }
     }
@@ -588,11 +764,12 @@ fn query_trace(root: &Path, expression: &QueryExpression) -> Result<Vec<QueryMat
     Ok(matches)
 }
 
-fn query_lsp(
+fn query_lsp_with_options(
     root: &Path,
     expression: &QueryExpression,
     original_expression: &str,
     config: &LspConfig,
+    options: &QueryRunOptions,
 ) -> Result<Vec<QueryMatch>> {
     let mut client = crate::lsp::LspClient::start_for_workspace(root, config)?;
     let query = lsp_query_text(expression, original_expression);
@@ -617,7 +794,7 @@ fn query_lsp(
             session: None,
             tags: Vec::new(),
         };
-        if let Some(score) = score_candidate(&candidate, expression) {
+        if let Some(score) = score_candidate_with_mode(&candidate, expression, options.mode)? {
             matches.push(candidate.into_match(score));
         }
     }
@@ -643,6 +820,84 @@ fn dedup_matches(matches: Vec<QueryMatch>, limit: usize) -> Vec<QueryMatch> {
         }
     }
     deduped
+}
+
+fn validate_expression_for_mode(expression: &str, mode: QueryMode) -> Result<()> {
+    if mode != QueryMode::Regex {
+        return Ok(());
+    }
+
+    let parsed = parse_expression(expression);
+    validate_regex_node(&parsed.root)
+}
+
+fn validate_regex_node(node: &QueryNode) -> Result<()> {
+    match node {
+        QueryNode::All => Ok(()),
+        QueryNode::Term(term) => validate_regex_pattern(term),
+        QueryNode::Field { value, .. } => validate_regex_pattern(value),
+        QueryNode::Not(child) => validate_regex_node(child),
+        QueryNode::And(children) | QueryNode::Or(children) => {
+            for child in children {
+                validate_regex_node(child)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_regex_pattern(pattern: &str) -> Result<()> {
+    build_query_regex(pattern)
+        .map(|_| ())
+        .map_err(|err| AppError::General(format!("Invalid query regex `{pattern}`: {err}")))
+}
+
+fn builtin_query_macros() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("@functions", "kind:function"),
+        ("@function", "kind:function"),
+        ("@structs", "(kind:struct OR kind:class OR kind:interface)"),
+        ("@tests", "(path:test OR path:tests OR name:test OR name:should)"),
+        ("@todo", "(text:TODO OR text:FIXME OR text:todo)"),
+        ("@rust", "lang:rust"),
+        ("@c", "(lang:c OR lang:cpp OR lang:h)"),
+        ("@debug", "(tag:debug OR source:trace OR kind:breakpoint)"),
+    ]
+}
+
+fn query_store_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join("queries.toml"))
+}
+
+fn load_query_store(root: &Path) -> Result<SavedQueryStore> {
+    let path = query_store_path(root)?;
+    if !path.exists() {
+        return Ok(SavedQueryStore::default());
+    }
+    let contents = fs::read_to_string(&path)?;
+    toml::from_str(&contents).map_err(|err| AppError::General(format!("Corrupt saved query store: {err}")))
+}
+
+fn write_query_store(root: &Path, store: &SavedQueryStore) -> Result<()> {
+    let path = query_store_path(root)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = toml::to_string_pretty(store).map_err(|err| AppError::General(err.to_string()))?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn validate_saved_query_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(AppError::General("Saved query name cannot be empty".to_string()));
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err(AppError::General(
+            "Saved query name cannot contain whitespace".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn lsp_query_text(expression: &QueryExpression, original_expression: &str) -> String {
@@ -767,6 +1022,46 @@ fn score_candidate(candidate: &Candidate<'_>, expression: &QueryExpression) -> O
     score_node(candidate, &expression.root)
 }
 
+fn score_candidate_with_mode(
+    candidate: &Candidate<'_>,
+    expression: &QueryExpression,
+    mode: QueryMode,
+) -> Result<Option<usize>> {
+    if mode == QueryMode::Fuzzy {
+        return Ok(score_candidate(candidate, expression));
+    }
+    if matches!(expression.root, QueryNode::All) && (!expression.terms.is_empty() || !expression.fields.is_empty()) {
+        return score_flat_expression_with_mode(candidate, expression, mode);
+    }
+    score_node_with_mode(candidate, &expression.root, mode)
+}
+
+fn score_flat_expression_with_mode(
+    candidate: &Candidate<'_>,
+    expression: &QueryExpression,
+    mode: QueryMode,
+) -> Result<Option<usize>> {
+    let mut score = 0;
+
+    for term in &expression.terms {
+        let Some(term_score) = match_term(candidate, term, mode)? else {
+            return Ok(None);
+        };
+        score += term_score;
+    }
+
+    for (field, values) in &expression.fields {
+        for value in values {
+            let Some(field_score) = match_field(candidate, field, value, mode)? else {
+                return Ok(None);
+            };
+            score += field_score;
+        }
+    }
+
+    Ok(Some(score))
+}
+
 fn score_flat_expression(candidate: &Candidate<'_>, expression: &QueryExpression) -> Option<usize> {
     let mut score = 0;
 
@@ -806,6 +1101,60 @@ fn score_node(candidate: &Candidate<'_>, node: &QueryNode) -> Option<usize> {
     }
 }
 
+fn score_node_with_mode(candidate: &Candidate<'_>, node: &QueryNode, mode: QueryMode) -> Result<Option<usize>> {
+    if mode == QueryMode::Fuzzy {
+        return Ok(score_node(candidate, node));
+    }
+
+    match node {
+        QueryNode::All => Ok(Some(0)),
+        QueryNode::Term(term) => match_term(candidate, term, mode),
+        QueryNode::Field { field, value } => match_field(candidate, field, value, mode),
+        QueryNode::Not(child) => {
+            if score_node_with_mode(candidate, child, mode)?.is_some() {
+                Ok(None)
+            } else {
+                Ok(Some(0))
+            }
+        }
+        QueryNode::And(children) => {
+            let mut score = 0;
+            for child in children {
+                let Some(child_score) = score_node_with_mode(candidate, child, mode)? else {
+                    return Ok(None);
+                };
+                score += child_score;
+            }
+            Ok(Some(score))
+        }
+        QueryNode::Or(children) => {
+            let mut best = None;
+            for child in children {
+                if let Some(score) = score_node_with_mode(candidate, child, mode)? {
+                    best = Some(best.map_or(score, |current: usize| current.min(score)));
+                }
+            }
+            Ok(best)
+        }
+    }
+}
+
+fn match_term(candidate: &Candidate<'_>, term: &str, mode: QueryMode) -> Result<Option<usize>> {
+    match mode {
+        QueryMode::Fuzzy => Ok(score_term(candidate, term)),
+        QueryMode::Exact => Ok(exact_term_score(candidate, term)),
+        QueryMode::Regex => regex_score(&candidate.haystack(), term),
+    }
+}
+
+fn match_field(candidate: &Candidate<'_>, field: &str, value: &str, mode: QueryMode) -> Result<Option<usize>> {
+    match mode {
+        QueryMode::Fuzzy => Ok(score_field(candidate, field, value)),
+        QueryMode::Exact => Ok(exact_field_score(candidate, field, value)),
+        QueryMode::Regex => regex_field_score(candidate, field, value),
+    }
+}
+
 fn score_term(candidate: &Candidate<'_>, term: &str) -> Option<usize> {
     let haystack = candidate.haystack().to_ascii_lowercase();
     haystack.find(&term.to_ascii_lowercase())
@@ -817,6 +1166,39 @@ fn score_field(candidate: &Candidate<'_>, field: &str, value: &str) -> Option<us
         .iter()
         .filter_map(|candidate_value| candidate_value.find(&value))
         .min()
+}
+
+fn exact_term_score(candidate: &Candidate<'_>, term: &str) -> Option<usize> {
+    let needle = term.to_ascii_lowercase();
+    candidate
+        .haystack()
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.'))
+        .position(|token| token.eq_ignore_ascii_case(&needle))
+}
+
+fn exact_field_score(candidate: &Candidate<'_>, field: &str, value: &str) -> Option<usize> {
+    field_value(candidate, field)
+        .iter()
+        .position(|candidate_value| candidate_value.eq_ignore_ascii_case(value))
+}
+
+fn regex_score(haystack: &str, pattern: &str) -> Result<Option<usize>> {
+    let regex = build_query_regex(pattern)
+        .map_err(|err| AppError::General(format!("Invalid query regex `{pattern}`: {err}")))?;
+    Ok(regex.find(haystack).map(|matched| matched.start()))
+}
+
+fn regex_field_score(candidate: &Candidate<'_>, field: &str, pattern: &str) -> Result<Option<usize>> {
+    let regex = build_query_regex(pattern)
+        .map_err(|err| AppError::General(format!("Invalid query regex `{pattern}`: {err}")))?;
+    Ok(field_value(candidate, field)
+        .iter()
+        .filter_map(|candidate_value| regex.find(candidate_value).map(|matched| matched.start()))
+        .min())
+}
+
+fn build_query_regex(pattern: &str) -> std::result::Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern).case_insensitive(true).build()
 }
 
 fn field_value(candidate: &Candidate<'_>, field: &str) -> Vec<String> {
@@ -929,6 +1311,10 @@ mod tests {
         }
     }
 
+    fn temp_query_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("fcs_query_{name}_{}", std::process::id()))
+    }
+
     #[test]
     fn parses_fielded_query_terms() {
         let parsed = parse_expression(r#"kind:function lang:rust path:src source:index text:"main loop" loose"#);
@@ -960,6 +1346,30 @@ mod tests {
         assert_eq!(QuerySource::parse("lsp").unwrap(), QuerySource::Semantic);
         assert_eq!(QuerySource::parse("auto").unwrap(), QuerySource::Auto);
         assert!(QuerySource::parse("remote").is_err());
+    }
+
+    #[test]
+    fn parses_query_modes_and_aliases() {
+        assert_eq!(QueryMode::parse("fuzzy").unwrap(), QueryMode::Fuzzy);
+        assert_eq!(QueryMode::parse("substring").unwrap(), QueryMode::Fuzzy);
+        assert_eq!(QueryMode::parse("exact").unwrap(), QueryMode::Exact);
+        assert_eq!(QueryMode::parse("regexp").unwrap(), QueryMode::Regex);
+        assert!(QueryMode::parse("phonetic").is_err());
+    }
+
+    #[test]
+    fn expands_builtin_query_macros() {
+        let expanded = expand_query_macros(
+            "panic",
+            &["functions".to_string(), "@rust".to_string(), "todo".to_string()],
+        )
+        .unwrap();
+
+        assert!(expanded.contains("panic"));
+        assert!(expanded.contains("kind:function"));
+        assert!(expanded.contains("lang:rust"));
+        assert!(expanded.contains("TODO"));
+        assert!(expand_query_macros("main @missing", &[]).is_err());
     }
 
     #[test]
@@ -1012,6 +1422,37 @@ mod tests {
     }
 
     #[test]
+    fn scores_exact_and_regex_modes() {
+        let candidate = test_candidate("index:symbol", "src/main.rs", "smoke_added_symbol", "function", "rust");
+
+        assert!(score_candidate_with_mode(
+            &candidate,
+            &parse_expression("name:smoke_added_symbol"),
+            QueryMode::Exact
+        )
+        .unwrap()
+        .is_some());
+        assert!(
+            score_candidate_with_mode(&candidate, &parse_expression("name:smoke_added"), QueryMode::Exact)
+                .unwrap()
+                .is_none()
+        );
+        assert!(score_candidate_with_mode(
+            &candidate,
+            &parse_expression(r#"path:src/.*\.rs name:smoke_.*_symbol"#),
+            QueryMode::Regex
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_regex_mode_patterns() {
+        assert!(validate_expression_for_mode("name:[", QueryMode::Regex).is_err());
+        assert!(validate_expression_for_mode("name:main", QueryMode::Regex).is_ok());
+    }
+
+    #[test]
     fn scores_legacy_flat_expression_without_ast() {
         let mut fields = BTreeMap::new();
         fields.insert("kind".to_string(), vec!["function".to_string()]);
@@ -1038,6 +1479,72 @@ mod tests {
         assert!(score_candidate(&target_candidate, &expression).is_none());
         assert!(score_candidate(&other_candidate, &expression).is_none());
         assert!(score_candidate(&main_candidate, &parse_expression("source:trace or source:index")).is_some());
+    }
+
+    #[test]
+    fn saved_queries_round_trip_and_delete() {
+        let temp_dir = temp_query_dir("saved_round_trip");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        save_query(&temp_dir, "zeta", "name:beta", QuerySource::Index, QueryMode::Exact).unwrap();
+        save_query(
+            &temp_dir,
+            "alpha",
+            "@functions name:main",
+            QuerySource::Auto,
+            QueryMode::Fuzzy,
+        )
+        .unwrap();
+
+        let saved = list_saved_queries(&temp_dir).unwrap();
+        let loaded = load_saved_query(&temp_dir, "alpha").unwrap();
+
+        assert_eq!(
+            saved.iter().map(|query| query.name.as_str()).collect::<Vec<&str>>(),
+            vec!["alpha", "zeta"]
+        );
+        assert_eq!(loaded.expression, "@functions name:main");
+        assert_eq!(loaded.source, "auto");
+        assert_eq!(loaded.mode, QueryMode::Fuzzy);
+        assert!(save_query(&temp_dir, "bad name", "main", QuerySource::Index, QueryMode::Fuzzy).is_err());
+        assert!(delete_saved_query(&temp_dir, "zeta").unwrap());
+        assert!(!delete_saved_query(&temp_dir, "zeta").unwrap());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn run_with_options_appends_score_explanation() {
+        let temp_dir = temp_query_dir("score_explain");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("main.rs"), "pub fn main() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
+
+        let matches = run_with_options(
+            &temp_dir,
+            "kind:function name:main.*",
+            QuerySource::Index,
+            10,
+            None,
+            &QueryRunOptions {
+                mode: QueryMode::Regex,
+                macros: Vec::new(),
+                score_explain: true,
+            },
+        )
+        .unwrap();
+
+        assert!(matches.iter().any(|item| {
+            item.detail.contains("main [function]")
+                && item.detail.contains("score=")
+                && item.detail.contains("mode=regex")
+        }));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

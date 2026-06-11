@@ -1,5 +1,6 @@
 mod actions;
 mod dap_worker;
+mod highlight;
 mod lsp_worker;
 mod preview_cache;
 mod render;
@@ -23,7 +24,7 @@ use crate::errors::Result;
 use actions::{action_for_key, goto_action_for_key, AppAction};
 use dap_worker::{DapCommand, DapWorker};
 use lsp_worker::{LspCommand, LspPayload, LspWorker};
-use preview_cache::PreviewCache;
+use preview_cache::{PreviewCache, PreviewWindow};
 use sources::{
     fuzzy_score, parse_mode, resolve_ignore_file, source_mode_after, tracking_mode_after, SourceMode, SourceWorker,
 };
@@ -953,7 +954,17 @@ impl AppState {
     fn show_dap_templates(&mut self) {
         let templates = crate::dap::adapter_templates()
             .into_iter()
-            .map(|template| format!("{}:{} via {}", template.adapter, template.request, template.command))
+            .map(|template| {
+                let attach = if template.attach_fields.is_empty() {
+                    "attach:-".to_string()
+                } else {
+                    format!("attach:{}", template.attach_fields.join(","))
+                };
+                format!(
+                    "{}:{} via {} ({attach})",
+                    template.adapter, template.request, template.command
+                )
+            })
             .collect::<Vec<String>>();
         if templates.is_empty() {
             self.set_warning("No DAP adapter templates configured");
@@ -1182,14 +1193,14 @@ impl AppState {
         self.set_status("Jumped to DAP stopped location");
     }
 
-    fn preview_for_current(&self, height: u16) -> String {
+    fn preview_window_for_current(&self, height: u16) -> PreviewWindow {
         self.preview_location()
             .map(|location| {
                 self.preview_cache
                     .borrow_mut()
-                    .text_with_scroll(&location, height, self.preview_scroll)
+                    .window_with_scroll(&location, height, self.preview_scroll)
             })
-            .unwrap_or_else(|| "No selection".to_string())
+            .unwrap_or_else(|| PreviewWindow::message("No selection"))
     }
 
     fn preview_location(&self) -> Option<Location> {
@@ -1914,10 +1925,14 @@ fn saved_items_to_code_items(items: Vec<TuiSavedItem>) -> Vec<CodeItem> {
 fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
     crate::dap::DapSessionSnapshot {
         adapter: "mock".to_string(),
+        state: crate::dap::DapSessionState::Idle,
         status: "DAP mock: idle".to_string(),
         profile: "none".to_string(),
         selected_thread_id: None,
         selected_frame_id: None,
+        variables_reference: None,
+        variables_start: None,
+        variables_count: None,
         request_count: 0,
         response_count: 0,
         commands: Vec::new(),
@@ -1936,6 +1951,8 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
         last_evaluation: None,
         stop_reason: None,
         last_event: None,
+        last_request: None,
+        last_error: None,
         error: None,
         stopped_location: None,
     }
@@ -1943,12 +1960,40 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
 
 fn dap_panel_lines(snapshot: &crate::dap::DapSessionSnapshot) -> Vec<String> {
     let mut lines = vec![
-        format!("{} [{}:{}]", snapshot.status, snapshot.adapter, snapshot.profile),
+        format!(
+            "{} [{}:{}:{}]",
+            snapshot.status,
+            snapshot.adapter,
+            snapshot.profile,
+            snapshot.state.as_str()
+        ),
         format!(
             "DAP requests/responses: {}/{}",
             snapshot.request_count, snapshot.response_count
         ),
     ];
+    let mut selection = Vec::new();
+    if let Some(thread_id) = snapshot.selected_thread_id {
+        selection.push(format!("thread={thread_id}"));
+    }
+    if let Some(frame_id) = snapshot.selected_frame_id {
+        selection.push(format!("frame={frame_id}"));
+    }
+    if let Some(reference) = snapshot.variables_reference {
+        let page = match (snapshot.variables_start, snapshot.variables_count) {
+            (Some(start), Some(count)) => format!("vars_ref={reference} page={start}..{}", start + count),
+            (Some(start), None) => format!("vars_ref={reference} start={start}"),
+            (None, Some(count)) => format!("vars_ref={reference} count={count}"),
+            (None, None) => format!("vars_ref={reference}"),
+        };
+        selection.push(page);
+    }
+    if !selection.is_empty() {
+        lines.push(format!("Selected: {}", selection.join(" ")));
+    }
+    if let Some(request) = &snapshot.last_request {
+        lines.push(format!("Last request: {request}"));
+    }
     if !snapshot.threads.is_empty() {
         lines.push(format!("Threads: {}", limited_join(&snapshot.threads, 2)));
     }
@@ -1975,6 +2020,9 @@ fn dap_panel_lines(snapshot: &crate::dap::DapSessionSnapshot) -> Vec<String> {
     }
     if let Some(error) = &snapshot.error {
         lines.push(format!("Error: {error}"));
+    }
+    if let Some(error) = &snapshot.last_error {
+        lines.push(format!("Last error: {error}"));
     }
     if let Some(location) = &snapshot.stopped_location {
         let column = location.column.map(|column| format!(":{column}")).unwrap_or_default();

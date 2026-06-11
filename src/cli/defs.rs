@@ -64,14 +64,22 @@ pub enum Commands {
     /// Query index and trace data with field filters
     Query {
         /// Query expression, e.g. 'kind:function lang:rust path:src text:main'
-        expression: String,
+        expression: Option<String>,
 
         /// Target workspace directory
         directory: Option<String>,
 
         /// Query source: index, trace, or all
-        #[arg(short, long, default_value = "all")]
-        source: String,
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// Query matching mode: fuzzy, exact, or regex
+        #[arg(long)]
+        mode: Option<String>,
+
+        /// Apply a built-in query macro, e.g. functions, tests, todo
+        #[arg(long = "macro")]
+        macros: Vec<String>,
 
         /// Maximum entries to print
         #[arg(short, long, default_value_t = 50)]
@@ -92,6 +100,26 @@ pub enum Commands {
         /// Print a warning when query latency exceeds this threshold
         #[arg(long)]
         warn_ms: Option<u128>,
+
+        /// Save the expression as a named workspace query before running it
+        #[arg(long)]
+        save: Option<String>,
+
+        /// Run a saved workspace query by name
+        #[arg(long = "use")]
+        use_query: Option<String>,
+
+        /// List saved workspace queries
+        #[arg(long)]
+        list_saved: bool,
+
+        /// Delete a saved workspace query by name
+        #[arg(long)]
+        delete_saved: Option<String>,
+
+        /// Append score and mode details to each match
+        #[arg(long)]
+        score_explain: bool,
     },
 
     /// Measure search, index, trace, and preview latency
@@ -1421,6 +1449,20 @@ pub enum WorkspaceAction {
         directory: Option<String>,
     },
 
+    /// Build a support bundle with workspace, index, LSP, DAP, workflow, and query diagnostics
+    DoctorBundle {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Write the bundle to this path instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Print diagnostic workflow templates for this workspace
     Workflows {
         /// Target directory
@@ -1528,6 +1570,14 @@ pub enum ServiceAction {
         #[arg(short, long, default_value = "all")]
         source: String,
 
+        /// Query matching mode: fuzzy, exact, or regex
+        #[arg(long, default_value = "fuzzy")]
+        mode: String,
+
+        /// Apply a built-in query macro, e.g. functions, tests, todo
+        #[arg(long = "macro")]
+        macros: Vec<String>,
+
         /// Maximum entries to print
         #[arg(short, long, default_value_t = 50)]
         limit: usize,
@@ -1547,6 +1597,10 @@ pub enum ServiceAction {
         /// Print a warning when query latency exceeds this threshold
         #[arg(long)]
         warn_ms: Option<u128>,
+
+        /// Append score and mode details to each match
+        #[arg(long)]
+        score_explain: bool,
     },
 
     /// Request a running foreground service to stop
@@ -1687,6 +1741,45 @@ pub enum IndexAction {
         /// Output format: text or json
         #[arg(short, long, default_value = "text")]
         format: String,
+
+        /// Write shard cache files and a manifest
+        #[arg(long)]
+        write: bool,
+    },
+
+    /// Show shard cache freshness
+    ShardStatus {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Query cached index shards, falling back to the main index when stale
+    ShardQuery {
+        /// Query text
+        query: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Entry kind: files or symbols
+        #[arg(short, long, default_value = "symbols")]
+        kind: String,
+
+        /// Maximum entries to print
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Print query latency
+        #[arg(long)]
+        timing: bool,
+
+        /// Warn on stderr when query latency exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u64>,
     },
 
     /// Rebuild the cached files/symbols index
@@ -1862,6 +1955,10 @@ pub enum GraphAction {
         #[arg(long = "exclude")]
         exclude: Vec<String>,
 
+        /// Fallback provider when LSP fails or returns no edges: none or index
+        #[arg(long, default_value = "none")]
+        fallback: String,
+
         /// Workspace directory override
         #[arg(short, long)]
         directory: Option<String>,
@@ -1984,6 +2081,7 @@ mod tests {
             &["fcs", "workspace", "status", "."],
             &["fcs", "workspace", "detect", "."],
             &["fcs", "workspace", "doctor", "."],
+            &["fcs", "workspace", "doctor-bundle", ".", "--format", "json"],
             &["fcs", "workspace", "config-doctor", ".", "--strict"],
             &["fcs", "workspace", "config-schema", "--format", "json"],
             &[
@@ -2024,6 +2122,9 @@ mod tests {
                 ".",
                 "--source",
                 "index",
+                "--mode",
+                "exact",
+                "--score-explain",
             ],
             &["fcs", "service", "stop", "."],
             &["fcs", "index", "doctor", "."],
@@ -2037,6 +2138,30 @@ mod tests {
                 "1000",
                 "--format",
                 "json",
+            ],
+            &[
+                "fcs",
+                "index",
+                "shards",
+                ".",
+                "--target-symbols",
+                "1000",
+                "--format",
+                "json",
+                "--write",
+            ],
+            &["fcs", "index", "shard-status", ".", "--format", "json"],
+            &[
+                "fcs",
+                "index",
+                "shard-query",
+                "main",
+                ".",
+                "--kind",
+                "symbols",
+                "--limit",
+                "5",
+                "--timing",
             ],
             &["fcs", "index", "compact", ".", "--dry-run"],
             &["fcs", "index", "prewarm", "."],
@@ -2065,6 +2190,34 @@ mod tests {
                 "--format",
                 "json",
             ],
+            &[
+                "fcs",
+                "query",
+                "name:smoke_.*",
+                ".",
+                "--source",
+                "index",
+                "--mode",
+                "regex",
+                "--macro",
+                "functions",
+                "--score-explain",
+            ],
+            &[
+                "fcs",
+                "query",
+                "kind:function name:main",
+                ".",
+                "--source",
+                "index",
+                "--mode",
+                "exact",
+                "--save",
+                "main",
+            ],
+            &["fcs", "query", "--use", "main", "--source", "index"],
+            &["fcs", "query", "--list-saved"],
+            &["fcs", "query", "--delete-saved", "main"],
             &[
                 "fcs",
                 "query",
@@ -2201,6 +2354,8 @@ mod tests {
                 "1",
                 "--fanout",
                 "8",
+                "--fallback",
+                "index",
             ],
             &["fcs", "type-def", "src/main.rs:1:1"],
             &["fcs", "doc-symbols", "src/main.rs"],

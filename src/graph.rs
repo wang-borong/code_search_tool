@@ -68,6 +68,42 @@ pub fn lsp_edges(origin: &Location, relation: &str, items: &[CodeItem]) -> Vec<G
         .collect()
 }
 
+pub fn index_fallback_edges(
+    root: &Path,
+    origin: &Location,
+    relation: &str,
+    reason: &str,
+    options: &GraphOptions,
+) -> Result<Vec<GraphEdge>> {
+    let Some(index) = crate::index::load(root)? else {
+        return Ok(Vec::new());
+    };
+    let origin_path = relative_path(&normalize_root(root), origin.path());
+    let origin_line = origin.line.unwrap_or(1);
+    let mut symbols = index
+        .symbols
+        .into_iter()
+        .filter(|symbol| symbol.path == origin_path)
+        .collect::<Vec<_>>();
+    symbols.sort_by_key(|symbol| {
+        let distance = symbol.line.abs_diff(origin_line);
+        (distance, symbol.line, symbol.name.clone())
+    });
+
+    let from = location_label(origin);
+    let edges = symbols
+        .into_iter()
+        .take(options.limit.max(1))
+        .map(|symbol| GraphEdge {
+            from: from.clone(),
+            to: format!("{}:{} {}", symbol.path, symbol.line, symbol.name),
+            kind: format!("fallback:index:{relation}"),
+            detail: format!("{reason}; {} {}", symbol.kind, symbol.detail),
+        })
+        .collect::<Vec<GraphEdge>>();
+    Ok(apply_options(&dedupe_edges(edges), options))
+}
+
 pub fn apply_options(edges: &[GraphEdge], options: &GraphOptions) -> Vec<GraphEdge> {
     if options.depth == 0 || options.limit == 0 {
         return Vec::new();
@@ -748,6 +784,44 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_ne!(filtered[0].kind, "call");
+    }
+
+    #[test]
+    fn index_fallback_edges_use_nearby_index_symbols() {
+        let temp_dir = temp_graph_dir("index_fallback");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+        std::fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        std::fs::write(
+            temp_dir.join("src").join("main.rs"),
+            "pub fn helper() {}\npub fn main() { helper(); }\n",
+        )
+        .unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
+
+        let origin = Location::new(temp_dir.join("src").join("main.rs"), Some(2), Some(1));
+        let edges = index_fallback_edges(
+            &temp_dir,
+            &origin,
+            "references",
+            "lsp returned no edges",
+            &GraphOptions {
+                limit: 5,
+                depth: 1,
+                fanout: 0,
+                exclude: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(edges.iter().any(|edge| {
+            edge.kind == "fallback:index:references"
+                && edge.to.contains("main")
+                && edge.detail.contains("lsp returned no edges")
+        }));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

@@ -16,7 +16,54 @@ struct PreviewKey {
 pub(super) struct PreviewCache {
     capacity: usize,
     keys: VecDeque<PreviewKey>,
-    entries: HashMap<PreviewKey, String>,
+    entries: HashMap<PreviewKey, PreviewWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PreviewLine {
+    pub(super) number: usize,
+    pub(super) text: String,
+    pub(super) is_target: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PreviewWindow {
+    pub(super) path: PathBuf,
+    pub(super) target_line: usize,
+    pub(super) target_column: Option<usize>,
+    pub(super) lines: Vec<PreviewLine>,
+    pub(super) message: Option<String>,
+}
+
+impl PreviewWindow {
+    pub(super) fn message(message: impl Into<String>) -> Self {
+        Self {
+            path: PathBuf::new(),
+            target_line: 1,
+            target_column: None,
+            lines: Vec::new(),
+            message: Some(message.into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn plain_text(&self) -> String {
+        if let Some(message) = &self.message {
+            return message.clone();
+        }
+
+        let mut output = String::new();
+        for line in &self.lines {
+            let marker = if line.is_target { ">" } else { " " };
+            output.push_str(&format!("{marker} {:>5} | {}\n", line.number, line.text));
+        }
+
+        if output.is_empty() {
+            format!("No preview lines in {}", self.path.display())
+        } else {
+            output
+        }
+    }
 }
 
 impl PreviewCache {
@@ -33,7 +80,12 @@ impl PreviewCache {
         self.text_with_scroll(location, height, 0)
     }
 
+    #[cfg(test)]
     pub(super) fn text_with_scroll(&mut self, location: &Location, height: u16, scroll: isize) -> String {
+        self.window_with_scroll(location, height, scroll).plain_text()
+    }
+
+    pub(super) fn window_with_scroll(&mut self, location: &Location, height: u16, scroll: isize) -> PreviewWindow {
         let key = PreviewKey {
             path: location.path.clone(),
             line: location.line.unwrap_or(1),
@@ -41,23 +93,23 @@ impl PreviewCache {
             scroll,
         };
 
-        if let Some(text) = self.entries.get(&key) {
-            return text.clone();
+        if let Some(window) = self.entries.get(&key) {
+            return window.clone();
         }
 
-        let text = read_preview_window(location, height.max(1), scroll);
-        self.insert(key, text.clone());
-        text
+        let window = read_preview_window(location, height.max(1), scroll);
+        self.insert(key, window.clone());
+        window
     }
 
-    fn insert(&mut self, key: PreviewKey, text: String) {
+    fn insert(&mut self, key: PreviewKey, window: PreviewWindow) {
         if let Some(entry) = self.entries.get_mut(&key) {
-            *entry = text;
+            *entry = window;
             return;
         }
 
         self.keys.push_back(key.clone());
-        self.entries.insert(key, text);
+        self.entries.insert(key, window);
 
         while self.entries.len() > self.capacity {
             let Some(old_key) = self.keys.pop_front() else {
@@ -68,11 +120,11 @@ impl PreviewCache {
     }
 }
 
-fn read_preview_window(location: &Location, height: u16, scroll: isize) -> String {
+fn read_preview_window(location: &Location, height: u16, scroll: isize) -> PreviewWindow {
     let line = location.line.unwrap_or(1);
     let path = location.path();
     let Ok(file) = std::fs::File::open(path) else {
-        return format!("Could not read {}", path.display());
+        return PreviewWindow::message(format!("Could not read {}", path.display()));
     };
 
     let context = (height as usize).saturating_sub(2).max(3);
@@ -84,7 +136,7 @@ fn read_preview_window(location: &Location, height: u16, scroll: isize) -> Strin
         base_start.saturating_add(scroll as usize).max(1)
     };
     let end = start + context;
-    let mut output = String::new();
+    let mut lines = Vec::new();
     let reader = std::io::BufReader::new(file);
 
     for (index, text) in reader.lines().enumerate() {
@@ -95,15 +147,24 @@ fn read_preview_window(location: &Location, height: u16, scroll: isize) -> Strin
         if number > end {
             break;
         }
-        let marker = if number == line { ">" } else { " " };
         let text = text.unwrap_or_default();
-        output.push_str(&format!("{marker} {number:>5} | {text}\n"));
+        lines.push(PreviewLine {
+            number,
+            text,
+            is_target: number == line,
+        });
     }
 
-    if output.is_empty() {
-        format!("No preview lines in {}", path.display())
+    if lines.is_empty() {
+        PreviewWindow::message(format!("No preview lines in {}", path.display()))
     } else {
-        output
+        PreviewWindow {
+            path: path.to_path_buf(),
+            target_line: line,
+            target_column: location.column,
+            lines,
+            message: None,
+        }
     }
 }
 

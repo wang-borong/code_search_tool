@@ -5,6 +5,7 @@ pub mod config;
 pub mod core;
 pub mod dap;
 pub mod debugger;
+pub mod doctor;
 pub mod editor;
 pub mod errors;
 pub mod files;

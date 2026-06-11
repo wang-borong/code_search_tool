@@ -215,6 +215,25 @@ fn handle_workspace_workflows(
     Ok(())
 }
 
+fn handle_workspace_doctor_bundle(
+    directory: Option<&String>,
+    format: &str,
+    out: Option<&String>,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let bundle = fcs::doctor::build_bundle(&root, config)?;
+    let contents = fcs::doctor::format_bundle(&bundle, format)?;
+    if let Some(out) = out {
+        let path = PathBuf::from(out);
+        fcs::doctor::write_bundle(&path, &contents)?;
+        println!("Wrote doctor bundle: {}", path.display());
+    } else {
+        print!("{contents}");
+    }
+    Ok(())
+}
+
 fn handle_workspace_profile(action: WorkspaceProfileAction) -> Result<(), AppError> {
     match action {
         WorkspaceProfileAction::Save {
@@ -352,8 +371,42 @@ fn handle_index_stats(directory: Option<&String>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn handle_index_shards(directory: Option<&String>, target_symbols: usize, format: &str) -> Result<(), AppError> {
+fn handle_index_shards(
+    directory: Option<&String>,
+    target_symbols: usize,
+    format: &str,
+    write: bool,
+) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
+    if write {
+        let report = fcs::index::build_shards(&root, target_symbols)?;
+        match format {
+            "text" => {
+                println!("Shard manifest: {}", report.manifest_path.display());
+                println!("Shard dir: {}", report.shard_dir.display());
+                println!("wrote: {}", report.wrote);
+                println!("shards: {}", report.shard_count);
+                println!("files: {}", report.file_count);
+                println!("symbols: {}", report.symbol_count);
+                for shard in report.shards.iter().take(20) {
+                    println!(
+                        "shard {} file={} files={} symbols={}",
+                        shard.name, shard.file_name, shard.files, shard.symbols
+                    );
+                }
+                return Ok(());
+            }
+            "json" => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
+                );
+                return Ok(());
+            }
+            other => return Err(AppError::General(format!("Unsupported index shards format: {other}"))),
+        }
+    }
+
     let report = fcs::index::shard_report(&root, target_symbols)?;
     match format {
         "text" => {
@@ -381,6 +434,33 @@ fn handle_index_shards(directory: Option<&String>, target_symbols: usize, format
             Ok(())
         }
         other => Err(AppError::General(format!("Unsupported index shards format: {other}"))),
+    }
+}
+
+fn handle_index_shard_status(directory: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let status = fcs::index::shard_status(&root)?;
+    match format {
+        "text" => {
+            println!("Shard manifest: {}", status.manifest_path.display());
+            println!("exists: {}", status.exists);
+            println!("stale: {}", status.stale);
+            println!("reason: {}", status.reason);
+            println!("shards: {}", status.shard_count);
+            println!("files: {}", status.file_count);
+            println!("symbols: {}", status.symbol_count);
+            Ok(())
+        }
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).map_err(|err| AppError::General(err.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(AppError::General(format!(
+            "Unsupported index shard status format: {other}"
+        ))),
     }
 }
 
@@ -611,6 +691,40 @@ fn handle_index_query(
     Ok(())
 }
 
+fn handle_index_shard_query(
+    directory: Option<&String>,
+    kind: &str,
+    query: &str,
+    limit: usize,
+    timing: bool,
+    warn_ms: Option<u64>,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let kind = fcs::index::IndexListKind::parse(kind)?;
+    let start = Instant::now();
+    let entries = fcs::index::query_shards(&root, kind, query, limit)?;
+    let elapsed_ms = start.elapsed().as_millis();
+
+    if entries.is_empty() {
+        println!("No indexed shard entries matched");
+        if timing {
+            println!("timing_ms: {elapsed_ms}");
+        }
+        return Ok(());
+    }
+
+    for entry in entries {
+        println!("{entry}");
+    }
+    if timing {
+        println!("timing_ms: {elapsed_ms}");
+    }
+    if warn_ms.is_some_and(|threshold| elapsed_ms > threshold as u128) {
+        eprintln!("warning: index shard query took {elapsed_ms}ms");
+    }
+    Ok(())
+}
+
 fn handle_index_repair(
     directory: Option<&String>,
     options: &[String],
@@ -681,26 +795,89 @@ fn handle_index_bench(
 }
 
 struct QueryRequest<'a> {
-    expression: &'a str,
+    expression: Option<&'a str>,
     directory: Option<&'a String>,
-    source: &'a str,
+    source: Option<&'a String>,
+    mode: Option<&'a String>,
+    macros: &'a [String],
     limit: usize,
     format: &'a str,
     explain: bool,
     timing: bool,
     warn_ms: Option<u128>,
+    save: Option<&'a String>,
+    use_query: Option<&'a String>,
+    list_saved: bool,
+    delete_saved: Option<&'a String>,
+    score_explain: bool,
 }
 
 fn handle_query(request: QueryRequest<'_>, config: &fcs::config::Config) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(request.directory)?;
-    let source = fcs::query::QuerySource::parse(request.source)?;
+    if request.list_saved {
+        let saved = fcs::query::list_saved_queries(&root)?;
+        if saved.is_empty() {
+            println!("No saved queries");
+        } else {
+            for query in saved {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    query.name,
+                    query.source,
+                    query.mode.as_str(),
+                    query.expression
+                );
+            }
+        }
+        return Ok(());
+    }
+    if let Some(name) = request.delete_saved {
+        if fcs::query::delete_saved_query(&root, name)? {
+            println!("Deleted saved query: {name}");
+        } else {
+            println!("Saved query not found: {name}");
+        }
+        return Ok(());
+    }
+    let saved_query = request
+        .use_query
+        .map(|name| fcs::query::load_saved_query(&root, name))
+        .transpose()?;
+    let source_text = request
+        .source
+        .map(String::as_str)
+        .or_else(|| saved_query.as_ref().map(|query| query.source.as_str()))
+        .unwrap_or("all");
+    let mode_text = request
+        .mode
+        .map(String::as_str)
+        .or_else(|| saved_query.as_ref().map(|query| query.mode.as_str()))
+        .unwrap_or("fuzzy");
+    let source = fcs::query::QuerySource::parse(source_text)?;
+    let mode = fcs::query::QueryMode::parse(mode_text)?;
+    let expression = request
+        .expression
+        .map(str::to_string)
+        .or_else(|| saved_query.as_ref().map(|query| query.expression.clone()))
+        .ok_or_else(|| {
+            AppError::General("Query expression is required unless --use or --list-saved is provided".to_string())
+        })?;
+    if let Some(name) = request.save {
+        fcs::query::save_query(&root, name, &expression, source, mode)?;
+        println!("Saved query: {name}");
+    }
+    let options = fcs::query::QueryRunOptions {
+        mode,
+        macros: request.macros.to_vec(),
+        score_explain: request.score_explain,
+    };
     if request.explain {
-        let explanation = fcs::query::explain(request.expression, source);
+        let explanation = fcs::query::explain_with_options(&expression, source, &options);
         print!("{}", fcs::query::format_explanation(&explanation, request.format)?);
         return Ok(());
     }
     let start = Instant::now();
-    let matches = fcs::query::run_with_config(&root, request.expression, source, request.limit, Some(&config.lsp))?;
+    let matches = fcs::query::run_with_options(&root, &expression, source, request.limit, Some(&config.lsp), &options)?;
     let elapsed_ms = start.elapsed().as_millis();
     print!("{}", fcs::query::format_matches(&matches, request.format)?);
     if request.timing {
@@ -1285,6 +1462,7 @@ struct GraphSemanticInput<'a> {
     depth: usize,
     fanout: usize,
     exclude: &'a [String],
+    fallback: &'a str,
     directory: Option<&'a String>,
     config: &'a fcs::config::Config,
 }
@@ -1292,30 +1470,55 @@ struct GraphSemanticInput<'a> {
 fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(input.directory)?;
     let location = resolve_location_for_root(parse_location_arg(input.target)?, &root);
-    let mut client = fcs::lsp::LspClient::start_for_path(location.path(), &root, &input.config.lsp)?;
-    let items = match input.relation {
-        "references" | "refs" => client.references(&location)?,
-        "definition" | "def" => client.definition(&location)?,
-        "type" | "type-definition" | "type-def" => client.type_definition(&location)?,
-        "implementation" | "impl" => client.implementation(&location)?,
-        "incoming" | "incoming-calls" => client.incoming_calls(&location)?,
-        "outgoing" | "outgoing-calls" => client.outgoing_calls(&location)?,
-        other => {
-            return Err(AppError::General(format!(
-                "Unsupported semantic graph relation: {other}"
-            )));
-        }
-    };
+    if !matches!(input.fallback, "none" | "index") {
+        return Err(AppError::General(format!(
+            "Unsupported semantic graph fallback: {}. Use none or index",
+            input.fallback
+        )));
+    }
     let options = fcs::graph::GraphOptions {
         limit: usize::MAX,
         depth: input.depth,
         fanout: input.fanout,
         exclude: input.exclude.to_vec(),
     };
-    let edges = fcs::graph::apply_options(&fcs::graph::lsp_edges(&location, input.relation, &items), &options);
+    let items = run_semantic_relation(&location, &root, input.relation, input.config);
+    let edges = match items {
+        Ok(items) if !items.is_empty() => {
+            fcs::graph::apply_options(&fcs::graph::lsp_edges(&location, input.relation, &items), &options)
+        }
+        Ok(_) if input.fallback == "index" => {
+            fcs::graph::index_fallback_edges(&root, &location, input.relation, "lsp returned no edges", &options)?
+        }
+        Err(err) if input.fallback == "index" => {
+            fcs::graph::index_fallback_edges(&root, &location, input.relation, &err.to_string(), &options)?
+        }
+        Ok(_) => Vec::new(),
+        Err(err) => return Err(err),
+    };
     let format = fcs::graph::GraphFormat::parse(input.format)?;
     print!("{}", fcs::graph::format_edges(&edges, format)?);
     Ok(())
+}
+
+fn run_semantic_relation(
+    location: &fcs::core::Location,
+    root: &Path,
+    relation: &str,
+    config: &fcs::config::Config,
+) -> Result<Vec<fcs::core::CodeItem>, AppError> {
+    let mut client = fcs::lsp::LspClient::start_for_path(location.path(), root, &config.lsp)?;
+    match relation {
+        "references" | "refs" => client.references(location),
+        "definition" | "def" => client.definition(location),
+        "type" | "type-definition" | "type-def" => client.type_definition(location),
+        "implementation" | "impl" => client.implementation(location),
+        "incoming" | "incoming-calls" => client.incoming_calls(location),
+        "outgoing" | "outgoing-calls" => client.outgoing_calls(location),
+        other => Err(AppError::General(format!(
+            "Unsupported semantic graph relation: {other}"
+        ))),
+    }
 }
 
 fn handle_graph_imports(
@@ -2090,9 +2293,18 @@ fn handle_dap_templates(format: &str) -> Result<(), AppError> {
                     template.capabilities.join(",")
                 };
                 println!(
-                    "{}\t{}\t{}\t{}\t{}",
-                    template.adapter, template.request, template.command, template.detail, capabilities
+                    "{}\t{}\t{}\t{}\t{}\tlaunch=[{}]\tattach=[{}]",
+                    template.adapter,
+                    template.request,
+                    template.command,
+                    template.detail,
+                    capabilities,
+                    template.launch_fields.join(","),
+                    template.attach_fields.join(",")
                 );
+                for note in &template.notes {
+                    println!("  note: {note}");
+                }
             }
             Ok(())
         }
@@ -2694,6 +2906,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             WorkspaceAction::Doctor { directory } => {
                 handle_workspace_advise(directory.as_ref(), &config)?;
             }
+            WorkspaceAction::DoctorBundle { directory, format, out } => {
+                handle_workspace_doctor_bundle(directory.as_ref(), &format, out.as_ref(), &config)?;
+            }
             WorkspaceAction::Workflows { directory, format } => {
                 handle_workspace_workflows(directory.as_ref(), &format, &config)?;
             }
@@ -2725,22 +2940,32 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 expression,
                 directory,
                 source,
+                mode,
+                macros,
                 limit,
                 format,
                 explain,
                 timing,
                 warn_ms,
+                score_explain,
             } => {
                 handle_query(
                     QueryRequest {
-                        expression: &expression,
+                        expression: Some(&expression),
                         directory: directory.as_ref(),
-                        source: &source,
+                        source: Some(&source),
+                        mode: Some(&mode),
+                        macros: &macros,
                         limit,
                         format: &format,
                         explain,
                         timing,
                         warn_ms,
+                        save: None,
+                        use_query: None,
+                        list_saved: false,
+                        delete_saved: None,
+                        score_explain,
                     },
                     &config,
                 )?;
@@ -2760,8 +2985,22 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 directory,
                 target_symbols,
                 format,
+                write,
             } => {
-                handle_index_shards(directory.as_ref(), target_symbols, &format)?;
+                handle_index_shards(directory.as_ref(), target_symbols, &format, write)?;
+            }
+            IndexAction::ShardStatus { directory, format } => {
+                handle_index_shard_status(directory.as_ref(), &format)?;
+            }
+            IndexAction::ShardQuery {
+                query,
+                directory,
+                kind,
+                limit,
+                timing,
+                warn_ms,
+            } => {
+                handle_index_shard_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
             }
             IndexAction::Build { directory, option } => {
                 handle_index_build(directory.as_ref(), &option, &config)?;
@@ -2831,22 +3070,36 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             expression,
             directory,
             source,
+            mode,
+            macros,
             limit,
             format,
             explain,
             timing,
             warn_ms,
+            save,
+            use_query,
+            list_saved,
+            delete_saved,
+            score_explain,
         } => {
             handle_query(
                 QueryRequest {
-                    expression: &expression,
+                    expression: expression.as_deref(),
                     directory: directory.as_ref(),
-                    source: &source,
+                    source: source.as_ref(),
+                    mode: mode.as_ref(),
+                    macros: &macros,
                     limit,
                     format: &format,
                     explain,
                     timing,
                     warn_ms,
+                    save: save.as_ref(),
+                    use_query: use_query.as_ref(),
+                    list_saved,
+                    delete_saved: delete_saved.as_ref(),
+                    score_explain,
                 },
                 &config,
             )?;
@@ -2910,6 +3163,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 depth,
                 fanout,
                 exclude,
+                fallback,
                 directory,
             } => {
                 handle_graph_semantic(GraphSemanticInput {
@@ -2919,6 +3173,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     depth,
                     fanout,
                     exclude: &exclude,
+                    fallback: &fallback,
                     directory: directory.as_ref(),
                     config: &config,
                 })?;

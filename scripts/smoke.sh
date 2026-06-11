@@ -16,6 +16,7 @@ PROFILE_NAME="fcs-smoke-$$"
 DAP_PROFILE_NAME="fcs-dap-smoke-$$"
 TRACE_SESSION_NAME="fcs-trace-smoke-$$"
 WORKSPACE_PROFILE_NAME="fcs-workspace-smoke-$$"
+QUERY_NAME="fcs-query-smoke-$$"
 SMOKE_ROOT="/tmp/fcs-smoke-workspace-${RANDOM}-$$"
 
 rtk mkdir -p "$SMOKE_ROOT"
@@ -62,6 +63,8 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace advise "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace plan "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace workflows "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor-bundle "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor-bundle "$SMOKE_ROOT" --out "$SMOKE_ROOT/doctor-bundle.txt"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace detect "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace config-schema --format json >/dev/null
@@ -76,6 +79,9 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index status "$SMOKE_R
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index build "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index stats "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shards "$SMOKE_ROOT" --target-symbols 2 --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shards "$SMOKE_ROOT" --target-symbols 2 --format json --write >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shard-status "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shard-query main "$SMOKE_ROOT" --kind symbols --limit 5 --timing --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index compact "$SMOKE_ROOT" --dry-run
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index prewarm "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index refresh "$SMOKE_ROOT"
@@ -101,6 +107,11 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index ki
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function (name:main or name:smoke_added_symbol) not path:target" "$SMOKE_ROOT" --source all --limit 10 --explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function text:main" "$SMOKE_ROOT" --source all --limit 10 --timing --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:smoke_added_symbol" "$SMOKE_ROOT" --source index --limit 10
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "name:smoke_.*" "$SMOKE_ROOT" --source index --mode regex --macro functions --limit 10 --score-explain
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:main" --source index --mode exact --save "$QUERY_NAME" --limit 1
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query --list-saved
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query --use "$QUERY_NAME" --source index --mode exact --limit 1
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query --delete-saved "$QUERY_NAME"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function text:main" "$SMOKE_ROOT" --source auto --limit 10
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:main" "$SMOKE_ROOT" --source semantic --limit 10
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench search main "$SMOKE_ROOT" --format json --warn-ms 10000
@@ -123,6 +134,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs lsp organize-imports -
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph imports "$SMOKE_ROOT" --limit 5 --format text
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph modules "$SMOKE_ROOT" --limit 5 --format dot --depth 2
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph calls "$SMOKE_ROOT" --limit 5 --format json --fanout 4
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format text --fallback index
 if rtk clangd --version >/dev/null 2>&1; then
 	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format text
 	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "name:main" "$SMOKE_ROOT" --source semantic --limit 10
@@ -151,6 +163,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" targ
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service status "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service snapshot "$SMOKE_ROOT" --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service query "kind:function text:main" "$SMOKE_ROOT" --source index --limit 10 --format json
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service query "kind:function name:main" "$SMOKE_ROOT" --source index --mode exact --limit 10 --format json --score-explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service query "source:index kind:function text:main" "$SMOKE_ROOT" --source all --limit 10 --explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service query "kind:function text:main" "$SMOKE_ROOT" --source auto --limit 10 --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs service stop "$SMOKE_ROOT"

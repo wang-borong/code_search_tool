@@ -76,7 +76,7 @@ fcs --version
 
 ### 1. Ratatui 工作台 (`tui`)
 
-`fcs tui` 是新的主工作流入口。它不是一次性 picker，而是一个常驻代码追踪工作台：左侧切换 source，中间查看结果，右侧预览代码，下方显示 trace 和 debug 命令。
+`fcs tui` 是新的主工作流入口。它不是一次性 picker，而是一个常驻代码追踪工作台：左侧切换 source，中间查看结果，右侧用语法高亮预览代码，下方显示带状态配色的 trace 和 debug 命令。
 
 ```bash
 # 默认进入 search mode
@@ -231,6 +231,11 @@ fcs index stats
 # 为大型 workspace 估算 shard 拆分建议
 fcs index shards . --target-symbols 5000 --format json
 
+# 写入 shard cache、检查新鲜度，并在 shard 上查询；stale 时自动回退主索引
+fcs index shards . --target-symbols 5000 --write
+fcs index shard-status .
+fcs index shard-query parse_config . --kind symbols --limit 20
+
 # 查询缓存索引，不重新扫描项目
 fcs index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
 
@@ -252,7 +257,7 @@ fcs index daemon-status
 fcs index bench --limit 50 --query main
 ```
 
-索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index shards` 按目录 bucket 统计文件和符号分布，用于判断大型项目是否需要拆分缓存或并行预热。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
+索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index shards --write` 会把大仓库按目录 bucket 写成 shard cache 和 manifest，`shard-query` 在 manifest stale/missing 时自动回退主索引。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
 
 ---
 
@@ -279,6 +284,16 @@ fcs query "kind:function (name:parse or name:init) not path:target" . --source a
 # 输出慢查询观测信息
 fcs query "source:index kind:function text:main" . --source all --timing --warn-ms 200
 
+# 切换匹配模式、使用内置 macro，并在结果 detail 中输出 score
+fcs query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
+fcs query "kind:function name:parse_config" . --source index --mode exact
+
+# 保存、复用、列出和删除当前 workspace 的常用查询
+fcs query "kind:function name:parse_config" . --source index --mode exact --save parse-config
+fcs query --use parse-config --source index --mode exact
+fcs query --list-saved
+fcs query --delete-saved parse-config
+
 # 只查 LSP workspace/symbol；LSP 不可用时回退到本地 index 结果
 fcs query "name:parse_config" . --source semantic
 
@@ -286,7 +301,7 @@ fcs query "name:parse_config" . --source semantic
 fcs query "kind:function text:main" . --source auto
 ```
 
-`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
+`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--mode fuzzy|exact|regex` 可在快速模糊匹配、严格 token 匹配和正则匹配之间切换；`--macro functions|tests|todo|rust|c|debug` 用于把常见过滤器拼进表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
 
 `fcs service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
 
@@ -351,6 +366,7 @@ fcs workspace workflows
 # 只查看项目自动识别结果，或执行更完整健康检查
 fcs workspace detect
 fcs workspace doctor
+fcs workspace doctor-bundle . --format json --out /tmp/fcs-doctor.json
 
 # 初始化 fcs 的非侵入式 workspace 缓存元数据
 fcs workspace init
@@ -387,6 +403,8 @@ fcs lsp call-tree src/main.c:42:5
 fcs lsp health
 fcs lsp health --file src/main.c
 ```
+
+`workspace doctor-bundle` 会把 startup plan、config diagnostics、index status/stats/shards、service snapshot、DAP profiles/adapters/templates、workflow 模板和 saved queries 打包成 text/json，适合提交 issue 或做 release 前环境快照。`workspace workflows` 现在包含 `search-to-debug-loop`，把 query、trace、`graph semantic --fallback index`、DAP profile 和 TUI debug 面板串成一个可重复的追踪循环。
 
 ### 8. 语义图与导入图 (`graph`)
 
@@ -503,7 +521,7 @@ fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd
 fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 ```
 
-`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
+`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
@@ -669,7 +687,7 @@ TUI 内通过 `a` 加书签，通过 `B` 把当前 workspace trace 批量转换�
 
 - 搜索 worker 会取消队列中的旧请求，并对正在执行的 ripgrep-library 搜索做协作式取消；极短搜索可能在取消信号到达前自然结束。
 - LSP worker 已经避免 UI 主线程阻塞，但 clangd 本身超时仍取决于 `request_timeout_ms`。
-- TUI preview 读取目标行附近窗口并做缓存，不做完整 bat 语法高亮；脚本化预览仍可使用 `fcs preview`。
+- TUI preview 读取目标行附近窗口并做缓存，内置 Rust/C/C++/Python/Shell/TOML/JSON/Markdown 等常见语法的轻量高亮；脚本化预览仍可使用 bat 风格的 `fcs preview`。
 
 ### 内部结构
 
@@ -678,6 +696,7 @@ TUI 已拆成小模块：
 - `tui/sources.rs`：`SourceMode`、source worker、Search/Files/Symbols 的 `SourceProvider`。
 - `tui/lsp_worker.rs`：长生命周期 clangd worker。
 - `tui/render.rs`：ratatui 渲染层。
+- `tui/highlight.rs`：TUI preview 语法高亮和结果/trace/debug/activity 面板配色。
 - `tui/preview_cache.rs`：preview 窗口缓存。
 - `tui/state.rs`：workspace-scoped TUI state，保存上次 mode/query、pins、jump stack、breakpoints、preview lock 和命令历史。
 
@@ -786,7 +805,7 @@ cargo test
 rtk cargo test
 ```
 
-发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、workspace profile/config doctor/schema、query/service/bench、trace export/graph/session edit/timeline/diff/structured/insights/replay-plan、index query/repair/bench/daemon/shards、project action templates、plugin schema/plan、debug profile、DAP mock launch/attach 和 adapter/template 发现流程；所有命令都通过 `rtk` 执行：
+发布前推荐执行完整 smoke 脚本。脚本会覆盖单测、clippy、CLI help、workspace profile/config doctor/schema/doctor-bundle、query mode/macro/saved-query、service query mode、bench、trace export/graph/session edit/timeline/diff/structured/insights/replay-plan、semantic graph index fallback、index query/repair/bench/daemon/shards write/status/query、project action templates、plugin schema/plan、debug profile、DAP mock launch/attach 和 adapter/template schema 发现流程；所有命令都通过 `rtk` 执行：
 
 ```bash
 rtk scripts/smoke.sh

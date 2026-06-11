@@ -276,7 +276,10 @@ fn start_real_session(
         Err(err) => {
             session.status = "running".to_string();
             let mut snapshot = session.fast_snapshot("running (launch completed; stack pending)");
-            snapshot.error = Some(err.to_string());
+            let error = err.to_string();
+            snapshot.state = crate::dap::DapSessionState::Running;
+            snapshot.error = Some(error.clone());
+            snapshot.last_error = Some(error);
             session.last_snapshot = snapshot.clone();
             snapshot
         }
@@ -345,7 +348,10 @@ fn stop_runtime(runtime: &mut Option<DapRuntime>) -> Result<crate::dap::DapSessi
         Err(err) => {
             *runtime = None;
             let mut snapshot = stopped_snapshot();
-            snapshot.error = Some(err.to_string());
+            let error = err.to_string();
+            snapshot.state = crate::dap::DapSessionState::Errored;
+            snapshot.error = Some(error.clone());
+            snapshot.last_error = Some(error);
             Ok(snapshot)
         }
     }
@@ -540,15 +546,20 @@ impl DapRuntime {
         let mut snapshot = self.last_snapshot.clone();
         snapshot.adapter = self.adapter.clone();
         snapshot.status = status.to_string();
+        snapshot.state = dap_state_for_status(status);
         snapshot.profile = self.profile.name.clone();
         snapshot.selected_thread_id = self.selected_thread_id.or(snapshot.selected_thread_id);
         snapshot.selected_frame_id = self.selected_frame_id.or(snapshot.selected_frame_id);
+        snapshot.variables_start = self.variable_page_start;
+        snapshot.variables_count = self.variable_page_count;
         snapshot.request_count = self.client.request_count();
         snapshot.response_count = self.client.response_count();
         snapshot.commands = self.client.commands();
         snapshot.events = self.client.events();
         snapshot.capabilities = self.capabilities.clone();
         snapshot.last_event = snapshot.events.last().cloned();
+        snapshot.last_request = snapshot.commands.last().cloned();
+        snapshot.last_error = None;
         if status.starts_with("running") {
             snapshot.stop_reason = None;
             snapshot.stopped_location = None;
@@ -690,10 +701,14 @@ fn stopped_snapshot() -> crate::dap::DapSessionSnapshot {
 fn empty_snapshot(adapter: &str, status: &str, profile: &str) -> crate::dap::DapSessionSnapshot {
     crate::dap::DapSessionSnapshot {
         adapter: adapter.to_string(),
+        state: crate::dap::DapSessionState::Idle,
         status: status.to_string(),
         profile: profile.to_string(),
         selected_thread_id: None,
         selected_frame_id: None,
+        variables_reference: None,
+        variables_start: None,
+        variables_count: None,
         request_count: 0,
         response_count: 0,
         commands: Vec::new(),
@@ -712,6 +727,8 @@ fn empty_snapshot(adapter: &str, status: &str, profile: &str) -> crate::dap::Dap
         last_evaluation: None,
         stop_reason: None,
         last_event: None,
+        last_request: None,
+        last_error: None,
         error: None,
         stopped_location: None,
     }
@@ -730,4 +747,21 @@ fn command_names(requests: &[crate::dap::DapClientRequest]) -> Vec<String> {
 
 fn event_names(events: &[crate::dap::DapEvent]) -> Vec<String> {
     events.iter().map(|event| event.event.clone()).collect()
+}
+
+fn dap_state_for_status(status: &str) -> crate::dap::DapSessionState {
+    let normalized = status.to_ascii_lowercase();
+    if normalized.contains("error") || normalized.contains("failed") {
+        crate::dap::DapSessionState::Errored
+    } else if normalized.contains("disconnect") {
+        crate::dap::DapSessionState::Disconnected
+    } else if normalized.contains("terminate") {
+        crate::dap::DapSessionState::Terminated
+    } else if normalized.contains("pause") || normalized.contains("stop") {
+        crate::dap::DapSessionState::Stopped
+    } else if normalized.contains("running") {
+        crate::dap::DapSessionState::Running
+    } else {
+        crate::dap::DapSessionState::Idle
+    }
 }

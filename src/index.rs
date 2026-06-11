@@ -12,6 +12,8 @@ use crate::errors::{AppError, Result};
 
 const INDEX_VERSION: u32 = 3;
 const INDEX_FILE_NAME: &str = "code_index.toml";
+const INDEX_SHARD_DIR_NAME: &str = "code_index_shards";
+const INDEX_SHARD_MANIFEST_FILE_NAME: &str = "manifest.toml";
 const INDEX_TMP_EXTENSION: &str = "tmp";
 const INDEX_DAEMON_HEARTBEAT_FILE_NAME: &str = "index-daemon.toml";
 const MAX_DAEMON_REPORT_CYCLES: usize = 128;
@@ -158,6 +160,47 @@ pub struct IndexShardReport {
     pub recommended_shards: usize,
     pub buckets: Vec<IndexShardBucket>,
     pub recommendation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardInfo {
+    pub name: String,
+    pub file_name: String,
+    pub files: usize,
+    pub symbols: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardManifest {
+    pub version: u32,
+    pub root: String,
+    pub source_index: String,
+    pub source_built_at_unix: u64,
+    pub file_count: usize,
+    pub symbol_count: usize,
+    pub shards: Vec<IndexShardInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardBuildReport {
+    pub manifest_path: PathBuf,
+    pub shard_dir: PathBuf,
+    pub shard_count: usize,
+    pub file_count: usize,
+    pub symbol_count: usize,
+    pub wrote: bool,
+    pub shards: Vec<IndexShardInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexShardStatus {
+    pub manifest_path: PathBuf,
+    pub exists: bool,
+    pub stale: bool,
+    pub reason: String,
+    pub shard_count: usize,
+    pub file_count: usize,
+    pub symbol_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +604,144 @@ pub fn shard_report(root: &Path, target_symbols_per_shard: usize) -> Result<Inde
     })
 }
 
+pub fn build_shards(root: &Path, target_symbols_per_shard: usize) -> Result<IndexShardBuildReport> {
+    if target_symbols_per_shard == 0 {
+        return Err(AppError::General(
+            "target_symbols_per_shard must be greater than zero".to_string(),
+        ));
+    }
+
+    let root = normalize_root(root);
+    let index_path = index_path(&root)?;
+    let Some(index) = load(&root)? else {
+        return Err(AppError::General(
+            "Cannot build index shards before the main index exists".to_string(),
+        ));
+    };
+
+    let shard_dir = shard_dir(&root)?;
+    fs::create_dir_all(&shard_dir)?;
+    let mut buckets = BTreeMap::<String, (Vec<IndexedFile>, Vec<IndexedSymbol>)>::new();
+    for file in &index.files {
+        buckets.entry(shard_key(&file.path)).or_default().0.push(file.clone());
+    }
+    for symbol in &index.symbols {
+        buckets
+            .entry(shard_key(&symbol.path))
+            .or_default()
+            .1
+            .push(symbol.clone());
+    }
+
+    let mut shards = Vec::new();
+    for (name, (files, symbols)) in buckets {
+        let file_name = format!("{}.toml", sanitize_shard_name(&name));
+        let shard_path = shard_dir.join(&file_name);
+        let shard = CodeIndex {
+            version: index.version,
+            root: index.root.clone(),
+            built_at_unix: index.built_at_unix,
+            options: index.options.clone(),
+            files,
+            symbols,
+        };
+        write_index(&shard_path, &shard)?;
+        shards.push(IndexShardInfo {
+            name,
+            file_name,
+            files: shard.files.len(),
+            symbols: shard.symbols.len(),
+        });
+    }
+    shards.sort_by(|left, right| {
+        right
+            .symbols
+            .cmp(&left.symbols)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let manifest = IndexShardManifest {
+        version: INDEX_VERSION,
+        root: root.to_string_lossy().to_string(),
+        source_index: index_path.display().to_string(),
+        source_built_at_unix: index.built_at_unix,
+        file_count: index.files.len(),
+        symbol_count: index.symbols.len(),
+        shards: shards.clone(),
+    };
+    let manifest_path = shard_manifest_path(&root)?;
+    write_shard_manifest(&manifest_path, &manifest)?;
+
+    Ok(IndexShardBuildReport {
+        manifest_path,
+        shard_dir,
+        shard_count: shards.len(),
+        file_count: index.files.len(),
+        symbol_count: index.symbols.len(),
+        wrote: true,
+        shards,
+    })
+}
+
+pub fn shard_status(root: &Path) -> Result<IndexShardStatus> {
+    let root = normalize_root(root);
+    let manifest_path = shard_manifest_path(&root)?;
+    if !manifest_path.exists() {
+        return Ok(IndexShardStatus {
+            manifest_path,
+            exists: false,
+            stale: true,
+            reason: "shard manifest missing".to_string(),
+            shard_count: 0,
+            file_count: 0,
+            symbol_count: 0,
+        });
+    }
+
+    let manifest = read_shard_manifest(&manifest_path)?;
+    let Some(index) = load(&root)? else {
+        return Ok(IndexShardStatus {
+            manifest_path,
+            exists: true,
+            stale: true,
+            reason: "main index missing".to_string(),
+            shard_count: manifest.shards.len(),
+            file_count: manifest.file_count,
+            symbol_count: manifest.symbol_count,
+        });
+    };
+
+    let shard_dir = shard_dir(&root)?;
+    let missing_shard = manifest
+        .shards
+        .iter()
+        .any(|shard| !shard_dir.join(&shard.file_name).exists());
+    let stale = manifest.version != INDEX_VERSION
+        || normalize_root(Path::new(&manifest.root)) != root
+        || manifest.source_built_at_unix != index.built_at_unix
+        || manifest.file_count != index.files.len()
+        || manifest.symbol_count != index.symbols.len()
+        || missing_shard;
+    let reason = if missing_shard {
+        "one or more shard files are missing".to_string()
+    } else if stale {
+        "shards do not match the current main index".to_string()
+    } else {
+        "fresh".to_string()
+    };
+
+    Ok(IndexShardStatus {
+        manifest_path,
+        exists: true,
+        stale,
+        reason,
+        shard_count: manifest.shards.len(),
+        file_count: manifest.file_count,
+        symbol_count: manifest.symbol_count,
+    })
+}
+
 pub fn compact(root: &Path, dry_run: bool) -> Result<IndexCompactReport> {
     let root = normalize_root(root);
     let path = index_path(&root)?;
@@ -799,17 +980,58 @@ pub fn query(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Res
     let Some(index) = load(root)? else {
         return Ok(Vec::new());
     };
-    let query = query.trim();
-    if query.is_empty() {
-        return list(root, kind, limit);
+    Ok(format_scored_entries(
+        score_code_index_entries(&index, kind, query),
+        limit,
+    ))
+}
+
+pub fn query_shards(root: &Path, kind: IndexListKind, query_text: &str, limit: usize) -> Result<Vec<String>> {
+    let root = normalize_root(root);
+    let status = shard_status(&root)?;
+    if !status.exists || status.stale {
+        return query(&root, kind, query_text, limit);
     }
 
-    let mut scored = match kind {
+    let manifest = read_shard_manifest(&status.manifest_path)?;
+    let shard_dir = shard_dir(&root)?;
+    let mut scored = Vec::new();
+    for shard in &manifest.shards {
+        let shard_path = shard_dir.join(&shard.file_name);
+        let index = read_index(&shard_path)?;
+        scored.extend(score_code_index_entries(&index, kind, query_text));
+    }
+    Ok(format_scored_entries(scored, limit))
+}
+
+fn score_code_index_entries(index: &CodeIndex, kind: IndexListKind, query: &str) -> Vec<(usize, String)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return match kind {
+            IndexListKind::Files => index
+                .files
+                .iter()
+                .map(|file| {
+                    (
+                        0,
+                        format!("{} [{}] ({} bytes)", file.path, file.language, file.size_bytes),
+                    )
+                })
+                .collect(),
+            IndexListKind::Symbols => index
+                .symbols
+                .iter()
+                .map(|symbol| (0, format_symbol_entry(symbol)))
+                .collect(),
+        };
+    }
+
+    match kind {
         IndexListKind::Files => index
             .files
             .iter()
             .filter_map(|file| fuzzy_score(&file.path, query).map(|score| (score, file.path.clone())))
-            .collect::<Vec<(usize, String)>>(),
+            .collect(),
         IndexListKind::Symbols => index
             .symbols
             .iter()
@@ -818,11 +1040,18 @@ pub fn query(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Res
                 let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
                 fuzzy_score(&haystack, query).map(|score| (score, entry))
             })
-            .collect::<Vec<(usize, String)>>(),
-    };
-    scored.sort_by_key(|(score, entry)| (*score, entry.clone()));
+            .collect(),
+    }
+}
 
-    Ok(scored.into_iter().take(limit.max(1)).map(|(_, entry)| entry).collect())
+fn format_scored_entries(mut scored: Vec<(usize, String)>, limit: usize) -> Vec<String> {
+    let mut seen = HashSet::new();
+    scored.sort_by_key(|(score, entry)| (*score, entry.clone()));
+    scored
+        .into_iter()
+        .filter_map(|(_, entry)| if seen.insert(entry.clone()) { Some(entry) } else { None })
+        .take(limit.max(1))
+        .collect()
 }
 
 pub fn index_path(root: &Path) -> Result<PathBuf> {
@@ -831,6 +1060,28 @@ pub fn index_path(root: &Path) -> Result<PathBuf> {
 
 fn daemon_heartbeat_path(root: &Path) -> Result<PathBuf> {
     Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_DAEMON_HEARTBEAT_FILE_NAME))
+}
+
+fn shard_dir(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_SHARD_DIR_NAME))
+}
+
+fn shard_manifest_path(root: &Path) -> Result<PathBuf> {
+    Ok(shard_dir(root)?.join(INDEX_SHARD_MANIFEST_FILE_NAME))
+}
+
+fn write_shard_manifest(path: &Path, manifest: &IndexShardManifest) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = toml::to_string_pretty(manifest).map_err(|err| AppError::General(err.to_string()))?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn read_shard_manifest(path: &Path) -> Result<IndexShardManifest> {
+    let contents = fs::read_to_string(path)?;
+    toml::from_str(&contents).map_err(|err| AppError::General(format!("Corrupt index shard manifest: {err}")))
 }
 
 fn write_daemon_heartbeat(path: &Path, heartbeat: &IndexDaemonHeartbeat) -> Result<()> {
@@ -1082,6 +1333,24 @@ fn shard_key(path: &str) -> String {
         .find(|part| !part.trim().is_empty())
         .unwrap_or("<root>")
         .to_string()
+}
+
+fn sanitize_shard_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.trim_matches('_').is_empty() {
+        "root".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn count_values<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IndexCount> {
@@ -1364,6 +1633,8 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join("hot")).unwrap();
         fs::create_dir_all(temp_dir.join("cold")).unwrap();
+        let cache_dir = crate::workspace::cache_dir_for_root(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&cache_dir);
         fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
         fs::write(
             temp_dir.join("hot").join("lib.rs"),
@@ -1375,12 +1646,27 @@ mod tests {
 
         build(&temp_dir, &[], &[], &ignore_file).unwrap();
         let report = shard_report(&temp_dir, 2).unwrap();
+        let fallback_query = query_shards(&temp_dir, IndexListKind::Symbols, "alpha", 10).unwrap();
+        let build_report = build_shards(&temp_dir, 2).unwrap();
+        let status = shard_status(&temp_dir).unwrap();
+        let shard_query = query_shards(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
 
         assert_eq!(report.recommended_shards, 2);
         assert_eq!(report.buckets[0].name, "hot");
         assert!(report.buckets[0].symbols > report.buckets[1].symbols);
+        assert!(fallback_query.iter().any(|entry| entry.contains("alpha [function]")));
+        assert!(build_report.wrote);
+        assert!(build_report.shard_count >= 2);
+        assert!(build_report.shards.iter().any(|shard| shard.name == "hot"));
+        assert!(build_report.shards.iter().any(|shard| shard.name == "cold"));
+        assert!(build_report.manifest_path.exists());
+        assert!(status.exists);
+        assert!(!status.stale);
+        assert_eq!(status.shard_count, build_report.shard_count);
+        assert!(shard_query.iter().any(|entry| entry.contains("gamma [function]")));
         assert!(shard_report(&temp_dir, 0).is_err());
         let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]

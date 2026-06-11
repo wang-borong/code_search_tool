@@ -450,6 +450,24 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
                 "Verified breakpoint output should be checked before relying on a replay".to_string(),
             ],
         },
+        DiagnosticWorkflow {
+            name: "search-to-debug-loop".to_string(),
+            goal: "Keep a tight loop from query results to trace evidence, DAP breakpoints, and the debug TUI"
+                .to_string(),
+            commands: vec![
+                format!("fcs query '@functions name:<symbol>' {root_arg} --source auto --mode fuzzy --score-explain"),
+                "fcs trace add <path:line> --kind hypothesis --tag debug --session default".to_string(),
+                format!("fcs graph semantic <path:line> outgoing --directory {root_arg} --fallback index"),
+                "fcs dap templates --format text".to_string(),
+                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                format!("fcs tui --mode debug --directory {root_arg}"),
+            ],
+            notes: vec![
+                "Repeat query with `--mode exact` or `--mode regex` when fuzzy results are too broad".to_string(),
+                "Use `graph semantic --fallback index` to keep moving when LSP is unavailable".to_string(),
+                "The debug panel can refresh watches and variables without leaving the search loop".to_string(),
+            ],
+        },
     ])
 }
 
@@ -1466,8 +1484,11 @@ mod tests {
         assert!(workflows
             .iter()
             .any(|workflow| workflow.name == "trace-to-debug-profile"));
+        assert!(workflows.iter().any(|workflow| workflow.name == "search-to-debug-loop"));
         assert!(text.contains("fcs dap adapters"));
         assert!(text.contains("fcs trace replay-plan"));
+        assert!(text.contains("fcs graph semantic"));
+        assert!(text.contains("--fallback index"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
