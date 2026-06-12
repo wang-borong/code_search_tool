@@ -67,6 +67,8 @@ Pins, trace, debug
   : eval <expr>       evaluate once in the selected frame
   F5/F10/F11          continue / next / step-in (shift-F11 step-out, ctrl-F5 stop)
   x                   delete selected debug item
+  : trace semantic    record outgoing semantic edges into a trace session
+  : trace semantic refs/def/incoming/outgoing also supported
 
 Command palette
   :                   open palette with fuzzy suggestions
@@ -81,6 +83,14 @@ enum StatusLevel {
     Error,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSemanticTrace {
+    request_id: u64,
+    relation: String,
+    source: Location,
+    session: String,
+}
+
 struct AppState {
     config: Config,
     root: PathBuf,
@@ -89,6 +99,7 @@ struct AppState {
     pending_source: Option<(u64, SourceMode, String)>,
     lsp_worker: LspWorker,
     pending_lsp: Option<(u64, &'static str)>,
+    pending_semantic_trace: Option<PendingSemanticTrace>,
     dap_worker: DapWorker,
     pending_dap: Option<(u64, &'static str)>,
     mode: SourceMode,
@@ -247,6 +258,7 @@ impl AppState {
             pending_source: None,
             lsp_worker,
             pending_lsp: None,
+            pending_semantic_trace: None,
             dap_worker: DapWorker::start(),
             pending_dap: None,
             mode,
@@ -420,7 +432,26 @@ impl AppState {
     fn queue_lsp(&mut self, label: &'static str, command: LspCommand) -> Result<()> {
         let id = self.lsp_worker.request(command)?;
         self.pending_lsp = Some((id, label));
+        self.pending_semantic_trace = None;
         self.status = format!("{label}: pending...");
+        Ok(())
+    }
+
+    fn queue_trace_semantic(&mut self, relation: &str) -> Result<()> {
+        let Some(location) = self.current_location() else {
+            self.set_warning("No selected item for semantic trace");
+            return Ok(());
+        };
+        let (relation, command) = lsp_command_for_relation(location.clone(), relation)?;
+        let id = self.lsp_worker.request(command)?;
+        self.pending_lsp = Some((id, "Trace Semantic"));
+        self.pending_semantic_trace = Some(PendingSemanticTrace {
+            request_id: id,
+            relation: relation.clone(),
+            source: location,
+            session: format!("tui:semantic:{relation}"),
+        });
+        self.set_status(format!("Trace semantic {relation}: pending..."));
         Ok(())
     }
 
@@ -430,11 +461,41 @@ impl AppState {
         };
 
         self.pending_lsp = None;
+        let pending_trace = self
+            .pending_semantic_trace
+            .take()
+            .filter(|trace| trace.request_id == response.id);
         match response.result {
             Ok(LspPayload::Items(items)) => {
+                let traced_entries = pending_trace
+                    .as_ref()
+                    .map(|trace| self.record_semantic_trace(trace, &items))
+                    .transpose();
                 self.selected = 0;
                 self.results = items;
-                self.status = format!("{}: {} result(s)", response.label, self.results.len());
+                match traced_entries {
+                    Ok(Some(count)) => {
+                        self.status = format!(
+                            "{}: {} result(s), traced {} semantic entry(s)",
+                            response.label,
+                            self.results.len(),
+                            count
+                        );
+                        self.status_level = StatusLevel::Info;
+                    }
+                    Ok(None) => {
+                        self.status = format!("{}: {} result(s)", response.label, self.results.len());
+                        self.status_level = StatusLevel::Info;
+                    }
+                    Err(err) => {
+                        self.status = format!(
+                            "{}: {} result(s), trace failed: {err}",
+                            response.label,
+                            self.results.len()
+                        );
+                        self.status_level = StatusLevel::Warning;
+                    }
+                }
                 if response.label == "Diagnostics" {
                     self.mode = SourceMode::Diagnostics;
                 } else if response.label == "Workspace Symbols" || response.label == "Document Symbols" {
@@ -450,6 +511,56 @@ impl AppState {
                 self.status = err.to_string();
             }
         }
+    }
+
+    fn record_semantic_trace(&self, trace: &PendingSemanticTrace, items: &[CodeItem]) -> Result<usize> {
+        let tags = vec![
+            "semantic".to_string(),
+            "graph".to_string(),
+            "tui".to_string(),
+            trace.relation.clone(),
+        ];
+        let root_metadata = crate::trace::TraceMetadata {
+            session: Some(trace.session.clone()),
+            parent: None,
+            branch: Some("tui".to_string()),
+            tags: tags.clone(),
+            note: Some(format!("relation={} results={}", trace.relation, items.len())),
+            status: Some("observed".to_string()),
+            priority: None,
+        };
+        let source_id = crate::trace::record_location_for_workspace_with_metadata_and_id(
+            &self.root,
+            &trace.source,
+            &format!("semantic {}: {}", trace.relation, location_display(&trace.source)),
+            "semantic-root",
+            root_metadata,
+        )?;
+        let mut count = 1;
+        for item in items {
+            let metadata = crate::trace::TraceMetadata {
+                session: Some(trace.session.clone()),
+                parent: Some(source_id.clone()),
+                branch: Some("tui".to_string()),
+                tags: tags.clone(),
+                note: Some(format!(
+                    "{} -> {}",
+                    location_display(&trace.source),
+                    location_display(&item.location)
+                )),
+                status: Some("observed".to_string()),
+                priority: None,
+            };
+            crate::trace::record_location_for_workspace_with_metadata(
+                &self.root,
+                &item.location,
+                item.display_text(),
+                &format!("semantic:{}", trace.relation),
+                metadata,
+            )?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     fn refresh_trace_items(&mut self) {
@@ -1717,6 +1828,10 @@ impl AppState {
                 self.add_trace_breakpoint();
             } else if let Some(name) = rest.trim().strip_prefix("dap-profile ") {
                 self.save_dap_profile_from_trace(name)?;
+            } else if let Some(relation) = rest.trim().strip_prefix("semantic") {
+                self.queue_trace_semantic(relation.trim())?;
+            } else if is_semantic_relation_alias(rest.trim()) {
+                self.queue_trace_semantic(rest.trim())?;
             } else {
                 self.set_warning(format!("Unknown trace command: {}", rest.trim()));
             }
@@ -2368,6 +2483,45 @@ fn breakpoint_location(breakpoint: &crate::dap::DapBreakpoint) -> Location {
     Location::new(breakpoint.path.clone(), Some(breakpoint.line), breakpoint.column)
 }
 
+fn lsp_command_for_relation(location: Location, relation: &str) -> Result<(String, LspCommand)> {
+    match relation.trim() {
+        "" | "outgoing" | "outgoing-calls" => Ok(("outgoing".to_string(), LspCommand::OutgoingCalls(location))),
+        "incoming" | "incoming-calls" => Ok(("incoming".to_string(), LspCommand::IncomingCalls(location))),
+        "refs" | "references" => Ok(("references".to_string(), LspCommand::References(location))),
+        "def" | "definition" => Ok(("definition".to_string(), LspCommand::Definition(location))),
+        "type" | "type-def" | "type-definition" => Ok(("type".to_string(), LspCommand::TypeDefinition(location))),
+        "impl" | "implementation" => Ok(("implementation".to_string(), LspCommand::Implementation(location))),
+        other => Err(crate::errors::AppError::General(format!(
+            "Unsupported semantic trace relation: {other}"
+        ))),
+    }
+}
+
+fn is_semantic_relation_alias(value: &str) -> bool {
+    matches!(
+        value,
+        "outgoing"
+            | "outgoing-calls"
+            | "incoming"
+            | "incoming-calls"
+            | "refs"
+            | "references"
+            | "def"
+            | "definition"
+            | "type"
+            | "type-def"
+            | "type-definition"
+            | "impl"
+            | "implementation"
+    )
+}
+
+fn location_display(location: &Location) -> String {
+    let line = location.line.unwrap_or(1);
+    let column = location.column.map(|value| format!(":{value}")).unwrap_or_default();
+    format!("{}:{line}{column}", location.path.display())
+}
+
 fn breakpoint_label(index: usize, breakpoint: &crate::dap::DapBreakpoint) -> String {
     let mut parts = vec![format!("breakpoint {}", index + 1)];
     if !breakpoint.enabled {
@@ -2582,6 +2736,13 @@ fn palette_command_names() -> &'static [&'static str] {
         "cycle",
         "cycle back",
         "trace",
+        "trace semantic",
+        "trace semantic refs",
+        "trace semantic def",
+        "trace semantic incoming",
+        "trace semantic outgoing",
+        "trace refs",
+        "trace def",
         "break",
         "debug",
         "dap smoke",
@@ -2669,7 +2830,7 @@ fn command_hint_text(command: &str) -> String {
 }
 
 fn command_help_text() -> String {
-    "Commands: source <mode> | query <text> | def refs type impl symbols diag incoming outgoing hover | trace breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down quit"
+    "Commands: source <mode> | query <text> | def refs type impl symbols diag incoming outgoing hover | trace semantic/breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down quit"
         .to_string()
 }
 
@@ -2759,7 +2920,9 @@ mod tests {
         assert!(palette_command_matches("dap real").contains(&"dap real "));
         assert!(palette_command_matches("break sy").contains(&"break sync"));
         assert!(palette_command_matches("trace dap").contains(&"trace dap-profile "));
+        assert!(palette_command_matches("trace sem").contains(&"trace semantic"));
         assert!(command_help_text().contains("watch add/del/clear/refresh"));
+        assert!(command_help_text().contains("trace semantic"));
     }
 
     #[test]

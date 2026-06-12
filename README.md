@@ -119,7 +119,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `x`：在 Debug source 中删除当前 profile 或断点。
 - `F5` / `F6` / `F10` / `F11` / `Shift-F11` / `Ctrl-F5`：对 TUI DAP worker 执行 continue、pause、next、step in、step out、stop。
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
-- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
+- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：在状态栏显示快捷键提示。
 
@@ -432,6 +432,9 @@ fcs graph semantic src/main.c:42:5 --relation outgoing --format dot --fanout 20
 fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
 fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache
 
+# Record the same semantic relation into a trace session
+fcs trace semantic src/main.c:42:5 --relation outgoing --session bug-42 --fallback index --cache
+
 # Lightweight import/use/mod graph
 fcs graph imports --limit 100 --format text
 fcs graph imports --format json
@@ -444,7 +447,7 @@ fcs graph calls --limit 100 --fanout 8 --format json
 ```
 
 支持的 semantic relation：`references` / `definition` / `type` / `implementation` / `incoming` / `outgoing`。
-支持的 graph format：`text` / `json` / `mermaid` / `dot`。`--fanout` 限制每个 source 的最大出边数，`--exclude` 可重复传入并按 source/target/kind/detail 的子串过滤；`imports/modules --depth` 会在解析到本地模块文件时做有限深度扩展。`graph semantic --cache` 会把同一 root/location/relation/depth/fanout/filter/fallback 的结果缓存到 workspace cache，`--refresh-cache` 强制刷新后再写入，适合把昂贵的语义追踪步骤纳入 smoke 或诊断脚本。`calls` 是离线近似调用图，适合快速追踪热点路径，精确语义仍建议使用 LSP-backed `graph semantic`。
+支持的 graph format：`text` / `json` / `mermaid` / `dot`。`--fanout` 限制每个 source 的最大出边数，`--exclude` 可重复传入并按 source/target/kind/detail 的子串过滤；`imports/modules --depth` 会在解析到本地模块文件时做有限深度扩展。`graph semantic --cache` 会把同一 root/location/relation/depth/fanout/filter/fallback 的结果缓存到 workspace cache，`--refresh-cache` 强制刷新后再写入，适合把昂贵的语义追踪步骤纳入 smoke 或诊断脚本。`trace semantic` 复用同一条语义查询链路，但会把源点记录为 `semantic-root`，把返回的目标记录为 `semantic:<relation>` 子节点，便于后续 `trace graph/report/insights` 或 `debug from-trace` 继续使用。`calls` 是离线近似调用图，适合快速追踪热点路径，精确语义仍建议使用 LSP-backed `graph semantic`。
 
 ---
 
@@ -689,6 +692,7 @@ fcs trace add src/main.rs:10 --session bug-42 --tag regression
 fcs trace note latest "checked failing path"
 fcs trace status latest open
 fcs trace priority latest high
+fcs trace semantic src/main.rs:10:1 --relation references --session bug-42 --fallback index
 fcs trace sessions
 fcs trace report bug-42
 fcs trace timeline bug-42 --format json

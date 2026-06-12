@@ -162,6 +162,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace note latest "smoke note"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace status latest open
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace priority latest high
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --session "$TRACE_SESSION_NAME" --tag smoke --fallback index --cache --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT/main.c:4:2" --session "${TRACE_SESSION_NAME}-next" --tag smoke
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace list --session "$TRACE_SESSION_NAME" --tag smoke
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace sessions

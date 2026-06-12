@@ -408,6 +408,64 @@ pub enum TraceAction {
         tags: Vec<String>,
     },
 
+    /// Record LSP/index semantic graph edges into a trace session
+    Semantic {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Relation: references, definition, type, implementation, incoming, outgoing
+        #[arg(short, long, default_value = "outgoing")]
+        relation: String,
+
+        /// Investigation session name
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Parent trace entry id for the semantic root
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Branch name within a trace session
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Tag to attach to every generated trace entry, repeatable
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+
+        /// Maximum relation depth to keep; semantic queries currently return one LSP hop
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+
+        /// Maximum outgoing edges per source; 0 means unlimited
+        #[arg(long, default_value_t = 0)]
+        fanout: usize,
+
+        /// Exclude edges whose source, target, kind, or detail contains this text
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+
+        /// Fallback provider when LSP fails or returns no edges: none or index
+        #[arg(long, default_value = "index")]
+        fallback: String,
+
+        /// Read/write a workspace semantic graph cache for repeated targets
+        #[arg(long)]
+        cache: bool,
+
+        /// Ignore any existing semantic graph cache entry and rewrite it
+        #[arg(long)]
+        refresh_cache: bool,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// List trace history
     List {
         /// Filter by session
@@ -2367,6 +2425,23 @@ mod tests {
             &["fcs", "bench", "preview", "src/main.rs:1", "--format", "json"],
             &["fcs", "trace", "export", "--format", "json"],
             &["fcs", "trace", "graph", "--directory", "."],
+            &[
+                "fcs",
+                "trace",
+                "semantic",
+                "src/main.rs:1:1",
+                "--relation",
+                "outgoing",
+                "--session",
+                "smoke-semantic",
+                "--tag",
+                "smoke",
+                "--fallback",
+                "index",
+                "--cache",
+                "--format",
+                "json",
+            ],
             &["fcs", "trace", "note", "latest", "checked"],
             &["fcs", "trace", "status", "latest", "open"],
             &["fcs", "trace", "priority", "latest", "high"],

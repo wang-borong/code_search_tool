@@ -5,6 +5,7 @@
 ### Added
 
 - Added lightweight syntax highlighting for the ratatui preview pane and richer color styling across results, trace, debug, and activity panels.
+- Added semantic trace recording with `trace semantic` and TUI `: trace semantic [relation]`, linking LSP/index graph edges into trace sessions.
 - Added `tui-script` for headless TUI command playback, including selection, movement, waits, DAP smoke commands, and text/JSON summaries.
 - Added query/index profiling and `index verify` for source/filter visibility, latency probes, and cache health checks.
 - Added opt-in `graph semantic --cache` with refresh support for repeatable semantic graph diagnostics.

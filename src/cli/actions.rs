@@ -1885,6 +1885,44 @@ struct GraphSemanticInput<'a> {
 }
 
 fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> {
+    let result = load_semantic_graph(SemanticGraphQuery {
+        target: input.target,
+        relation: input.relation,
+        depth: input.depth,
+        fanout: input.fanout,
+        exclude: input.exclude,
+        fallback: input.fallback,
+        cache: input.cache,
+        refresh_cache: input.refresh_cache,
+        directory: input.directory,
+        config: input.config,
+    })?;
+    let format = fcs::graph::GraphFormat::parse(input.format)?;
+    print!("{}", fcs::graph::format_edges(&result.edges, format)?);
+    Ok(())
+}
+
+struct SemanticGraphQuery<'a> {
+    target: &'a str,
+    relation: &'a str,
+    depth: usize,
+    fanout: usize,
+    exclude: &'a [String],
+    fallback: &'a str,
+    cache: bool,
+    refresh_cache: bool,
+    directory: Option<&'a String>,
+    config: &'a fcs::config::Config,
+}
+
+struct SemanticGraphResult {
+    root: PathBuf,
+    location: Location,
+    edges: Vec<fcs::graph::GraphEdge>,
+    cache_hit: bool,
+}
+
+fn load_semantic_graph(input: SemanticGraphQuery<'_>) -> Result<SemanticGraphResult, AppError> {
     let root = fcs::workspace::resolve_root(input.directory)?;
     let location = resolve_location_for_root(parse_location_arg(input.target)?, &root);
     if !matches!(input.fallback, "none" | "index") {
@@ -1902,9 +1940,12 @@ fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> 
     let cache_key = fcs::graph::semantic_cache_key(&root, &location, input.relation, &options, input.fallback);
     if input.cache && !input.refresh_cache {
         if let Some(edges) = fcs::graph::load_semantic_cache(&root, &cache_key)? {
-            let format = fcs::graph::GraphFormat::parse(input.format)?;
-            print!("{}", fcs::graph::format_edges(&edges, format)?);
-            return Ok(());
+            return Ok(SemanticGraphResult {
+                root,
+                location,
+                edges,
+                cache_hit: true,
+            });
         }
     }
     let items = run_semantic_relation(&location, &root, input.relation, input.config);
@@ -1924,9 +1965,12 @@ fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> 
     if input.cache {
         let _path = fcs::graph::store_semantic_cache(&root, &cache_key, &edges)?;
     }
-    let format = fcs::graph::GraphFormat::parse(input.format)?;
-    print!("{}", fcs::graph::format_edges(&edges, format)?);
-    Ok(())
+    Ok(SemanticGraphResult {
+        root,
+        location,
+        edges,
+        cache_hit: false,
+    })
 }
 
 fn run_semantic_relation(
@@ -2070,6 +2114,182 @@ fn handle_trace_add(
     fcs::trace::record_location_with_metadata(&location, &label, kind, metadata)?;
     println!("Added trace entry: {label}");
     Ok(())
+}
+
+struct TraceSemanticInput<'a> {
+    target: &'a str,
+    relation: &'a str,
+    session: Option<String>,
+    parent: Option<String>,
+    branch: Option<String>,
+    tags: Vec<String>,
+    depth: usize,
+    fanout: usize,
+    exclude: &'a [String],
+    fallback: &'a str,
+    cache: bool,
+    refresh_cache: bool,
+    directory: Option<&'a String>,
+    format: &'a str,
+    config: &'a fcs::config::Config,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceSemanticReport {
+    session: String,
+    relation: String,
+    source: String,
+    source_id: String,
+    edge_count: usize,
+    recorded_entries: usize,
+    skipped_edges: usize,
+    cache_hit: bool,
+}
+
+fn handle_trace_semantic(input: TraceSemanticInput<'_>) -> Result<(), AppError> {
+    let semantic = load_semantic_graph(SemanticGraphQuery {
+        target: input.target,
+        relation: input.relation,
+        depth: input.depth,
+        fanout: input.fanout,
+        exclude: input.exclude,
+        fallback: input.fallback,
+        cache: input.cache,
+        refresh_cache: input.refresh_cache,
+        directory: input.directory,
+        config: input.config,
+    })?;
+    let session = input.session.unwrap_or_else(|| format!("semantic:{}", input.relation));
+    let source_label = format!("semantic {}: {}", input.relation, location_display(&semantic.location));
+    let tags = semantic_trace_tags(input.relation, &input.tags);
+    let root_metadata = fcs::trace::TraceMetadata {
+        session: Some(session.clone()),
+        parent: input.parent,
+        branch: input.branch.clone(),
+        tags: tags.clone(),
+        note: Some(format!(
+            "relation={} edges={} fallback={} cache_hit={}",
+            input.relation,
+            semantic.edges.len(),
+            input.fallback,
+            semantic.cache_hit
+        )),
+        status: Some("observed".to_string()),
+        priority: None,
+    };
+    let source_id = fcs::trace::record_location_for_workspace_with_metadata_and_id(
+        &semantic.root,
+        &semantic.location,
+        &source_label,
+        "semantic-root",
+        root_metadata,
+    )?;
+
+    let mut recorded_entries = 1;
+    let mut skipped_edges = 0;
+    for edge in &semantic.edges {
+        let Some(target_location) = graph_edge_location(&semantic.root, &edge.to) else {
+            skipped_edges += 1;
+            continue;
+        };
+        let metadata = fcs::trace::TraceMetadata {
+            session: Some(session.clone()),
+            parent: Some(source_id.clone()),
+            branch: input.branch.clone(),
+            tags: tags.clone(),
+            note: Some(format!("{} -> {}", edge.from, edge.to)),
+            status: Some("observed".to_string()),
+            priority: None,
+        };
+        let label = if edge.detail.trim().is_empty() {
+            edge.to.clone()
+        } else {
+            edge.detail.clone()
+        };
+        fcs::trace::record_location_for_workspace_with_metadata(
+            &semantic.root,
+            &target_location,
+            &label,
+            &format!("semantic:{}", input.relation),
+            metadata,
+        )?;
+        recorded_entries += 1;
+    }
+
+    let report = TraceSemanticReport {
+        session,
+        relation: input.relation.to_string(),
+        source: location_display(&semantic.location),
+        source_id,
+        edge_count: semantic.edges.len(),
+        recorded_entries,
+        skipped_edges,
+        cache_hit: semantic.cache_hit,
+    };
+    match input.format {
+        "text" => {
+            println!(
+                "Recorded semantic trace: session={} relation={} source={} edges={} entries={} skipped={} cache_hit={}",
+                report.session,
+                report.relation,
+                report.source,
+                report.edge_count,
+                report.recorded_entries,
+                report.skipped_edges,
+                report.cache_hit
+            );
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported trace semantic format: {other}"))),
+    }
+    Ok(())
+}
+
+fn semantic_trace_tags(relation: &str, user_tags: &[String]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in ["semantic", "graph", relation] {
+        push_unique_tag(&mut tags, tag);
+    }
+    for tag in user_tags {
+        push_unique_tag(&mut tags, tag);
+    }
+    tags
+}
+
+fn push_unique_tag(tags: &mut Vec<String>, tag: &str) {
+    let tag = tag.trim();
+    if !tag.is_empty() && !tags.iter().any(|existing| existing == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
+fn graph_edge_location(root: &Path, value: &str) -> Option<Location> {
+    if let Ok(location) = parse_location_arg(value.trim()) {
+        return Some(resolve_location_for_root(location, root));
+    }
+
+    let mut whitespace_indices = value
+        .char_indices()
+        .filter(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+        .collect::<Vec<usize>>();
+    whitespace_indices.reverse();
+    for index in whitespace_indices {
+        let candidate = value[..index].trim_end();
+        if let Ok(location) = parse_location_arg(candidate) {
+            return Some(resolve_location_for_root(location, root));
+        }
+    }
+    None
+}
+
+fn location_display(location: &Location) -> String {
+    let line = location.line.unwrap_or(1);
+    let column = location.column.map(|value| format!(":{value}")).unwrap_or_default();
+    format!("{}:{line}{column}", location.path.display())
 }
 
 struct TraceListFilter<'a> {
@@ -4093,6 +4313,40 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 tags,
             } => {
                 handle_trace_add(&target, label.as_ref(), &kind, session, parent, branch, tags)?;
+            }
+            TraceAction::Semantic {
+                target,
+                relation,
+                session,
+                parent,
+                branch,
+                tags,
+                depth,
+                fanout,
+                exclude,
+                fallback,
+                cache,
+                refresh_cache,
+                directory,
+                format,
+            } => {
+                handle_trace_semantic(TraceSemanticInput {
+                    target: &target,
+                    relation: &relation,
+                    session,
+                    parent,
+                    branch,
+                    tags,
+                    depth,
+                    fanout,
+                    exclude: &exclude,
+                    fallback: &fallback,
+                    cache,
+                    refresh_cache,
+                    directory: directory.as_ref(),
+                    format: &format,
+                    config: &config,
+                })?;
             }
             TraceAction::List {
                 session,

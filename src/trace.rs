@@ -243,7 +243,7 @@ pub fn record_location_with_metadata(
     kind: &str,
     metadata: TraceMetadata,
 ) -> Result<()> {
-    record_location_with_workspace_and_metadata(None, location, label, kind, metadata)
+    record_location_with_workspace_and_metadata(None, location, label, kind, metadata).map(|_| ())
 }
 
 pub fn record_code_item_for_workspace(root: &Path, item: &CodeItem, kind: &str) -> Result<()> {
@@ -261,11 +261,21 @@ pub fn record_location_for_workspace_with_metadata(
     kind: &str,
     metadata: TraceMetadata,
 ) -> Result<()> {
+    record_location_with_workspace_and_metadata(Some(root), location, label, kind, metadata).map(|_| ())
+}
+
+pub fn record_location_for_workspace_with_metadata_and_id(
+    root: &Path,
+    location: &Location,
+    label: &str,
+    kind: &str,
+    metadata: TraceMetadata,
+) -> Result<String> {
     record_location_with_workspace_and_metadata(Some(root), location, label, kind, metadata)
 }
 
 fn record_location_with_workspace(root: Option<&Path>, location: &Location, label: &str, kind: &str) -> Result<()> {
-    record_location_with_workspace_and_metadata(root, location, label, kind, TraceMetadata::default())
+    record_location_with_workspace_and_metadata(root, location, label, kind, TraceMetadata::default()).map(|_| ())
 }
 
 fn record_location_with_workspace_and_metadata(
@@ -274,12 +284,12 @@ fn record_location_with_workspace_and_metadata(
     label: &str,
     kind: &str,
     metadata: TraceMetadata,
-) -> Result<()> {
+) -> Result<String> {
     let mut store = load_store()?;
     let timestamp = now_secs();
     let id = format!("{}-{}", timestamp, store.entries.len() + 1);
     store.entries.push(TraceEntry {
-        id,
+        id: id.clone(),
         timestamp,
         workspace: root.map(Path::to_path_buf),
         kind: kind.to_string(),
@@ -295,7 +305,8 @@ fn record_location_with_workspace_and_metadata(
         branch: metadata.branch,
         tags: metadata.tags,
     });
-    save_store(&store)
+    save_store(&store)?;
+    Ok(id)
 }
 
 pub fn list() -> Result<Vec<TraceEntry>> {
