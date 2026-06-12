@@ -1,10 +1,12 @@
 use clap::CommandFactory;
 use skim::prelude::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
 
 use super::args::{
     make_result, parse_file_arg, parse_location_arg, parse_preview_arg, resolve_ignore_file, resolve_location_for_root,
@@ -794,6 +796,321 @@ fn handle_index_bench(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IndexLatencyProbe {
+    name: String,
+    elapsed_ms: u128,
+    count: usize,
+    note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexProfileReport {
+    root: PathBuf,
+    kind: String,
+    query: String,
+    limit: usize,
+    probes: Vec<IndexLatencyProbe>,
+    total_elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexVerifyReport {
+    root: PathBuf,
+    healthy: bool,
+    main: IndexVerifyMainStatus,
+    shards: IndexVerifyShardStatus,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexVerifyMainStatus {
+    path: PathBuf,
+    exists: bool,
+    schema_status: String,
+    stale: bool,
+    corrupt: bool,
+    file_count: usize,
+    symbol_count: usize,
+    changed_tracked_files: usize,
+    missing_tracked_files: usize,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexVerifyShardStatus {
+    manifest_path: PathBuf,
+    exists: bool,
+    stale: bool,
+    reason: String,
+    shard_count: usize,
+    file_count: usize,
+    symbol_count: usize,
+}
+
+fn handle_index_profile(
+    directory: Option<&String>,
+    kind: &str,
+    query: &str,
+    limit: usize,
+    format: &str,
+    warn_ms: Option<u128>,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let kind = fcs::index::IndexListKind::parse(kind)?;
+    let total_start = Instant::now();
+    let mut probes = Vec::new();
+
+    let start = Instant::now();
+    let status = fcs::index::status(&root)?;
+    push_index_probe(
+        &mut probes,
+        "status",
+        start.elapsed().as_millis(),
+        status.file_count + status.symbol_count,
+        refresh_reason_label(&status),
+    );
+
+    let start = Instant::now();
+    let stats = fcs::index::stats(&root)?;
+    push_index_probe(
+        &mut probes,
+        "stats",
+        start.elapsed().as_millis(),
+        stats.file_count + stats.symbol_count,
+        format!("index_bytes={}", stats.index_size_bytes),
+    );
+
+    let start = Instant::now();
+    let list = fcs::index::list(&root, kind, limit)?;
+    push_index_probe(
+        &mut probes,
+        "list",
+        start.elapsed().as_millis(),
+        list.len(),
+        "main index".to_string(),
+    );
+
+    let start = Instant::now();
+    let query_entries = fcs::index::query(&root, kind, query, limit)?;
+    push_index_probe(
+        &mut probes,
+        "query",
+        start.elapsed().as_millis(),
+        query_entries.len(),
+        "main index".to_string(),
+    );
+
+    let start = Instant::now();
+    let shard_status = fcs::index::shard_status(&root)?;
+    push_index_probe(
+        &mut probes,
+        "shard_status",
+        start.elapsed().as_millis(),
+        shard_status.shard_count,
+        shard_status.reason.clone(),
+    );
+
+    let start = Instant::now();
+    let shard_entries = fcs::index::query_shards(&root, kind, query, limit)?;
+    let shard_note = if shard_status.exists && !shard_status.stale {
+        "shard cache".to_string()
+    } else {
+        "main index fallback".to_string()
+    };
+    push_index_probe(
+        &mut probes,
+        "shard_query",
+        start.elapsed().as_millis(),
+        shard_entries.len(),
+        shard_note,
+    );
+
+    if let Some(threshold) = warn_ms {
+        for probe in &probes {
+            if probe.elapsed_ms > threshold {
+                eprintln!("warning: {} took {}ms", probe.name, probe.elapsed_ms);
+            }
+        }
+    }
+
+    let report = IndexProfileReport {
+        root,
+        kind: index_kind_label(kind).to_string(),
+        query: query.to_string(),
+        limit,
+        total_elapsed_ms: total_start.elapsed().as_millis(),
+        probes,
+    };
+    print!("{}", format_index_profile(&report, format)?);
+    Ok(())
+}
+
+fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let status = fcs::index::status(&root)?;
+    let shard_status = fcs::index::shard_status(&root)?;
+    let mut recommendations = Vec::new();
+
+    if !status.exists {
+        recommendations.push("run `fcs index build` to create the main index".to_string());
+    } else if status.is_corrupt {
+        recommendations.push("run `fcs index repair` to rebuild corrupt index data".to_string());
+    } else if status.is_stale {
+        recommendations.push("run `fcs index refresh` or `fcs index repair` to refresh stale index data".to_string());
+    }
+    if shard_status.exists && shard_status.stale {
+        recommendations.push("run `fcs index shards --write` to refresh stale shard cache files".to_string());
+    } else if !shard_status.exists && status.symbol_count > 5000 {
+        recommendations
+            .push("run `fcs index shards --write` to add shard cache files for this large index".to_string());
+    }
+    if recommendations.is_empty() {
+        recommendations.push("index cache is healthy".to_string());
+    }
+
+    let healthy =
+        status.exists && !status.is_stale && !status.is_corrupt && (!shard_status.exists || !shard_status.stale);
+    let report = IndexVerifyReport {
+        root,
+        healthy,
+        main: IndexVerifyMainStatus {
+            path: status.path,
+            exists: status.exists,
+            schema_status: index_schema_status_label(status.schema_status).to_string(),
+            stale: status.is_stale,
+            corrupt: status.is_corrupt,
+            file_count: status.file_count,
+            symbol_count: status.symbol_count,
+            changed_tracked_files: status.changed_tracked_files,
+            missing_tracked_files: status.missing_tracked_files,
+            message: status.message,
+        },
+        shards: IndexVerifyShardStatus {
+            manifest_path: shard_status.manifest_path,
+            exists: shard_status.exists,
+            stale: shard_status.stale,
+            reason: shard_status.reason,
+            shard_count: shard_status.shard_count,
+            file_count: shard_status.file_count,
+            symbol_count: shard_status.symbol_count,
+        },
+        recommendations,
+    };
+    print!("{}", format_index_verify(&report, format)?);
+    Ok(())
+}
+
+fn push_index_probe(probes: &mut Vec<IndexLatencyProbe>, name: &str, elapsed_ms: u128, count: usize, note: String) {
+    probes.push(IndexLatencyProbe {
+        name: name.to_string(),
+        elapsed_ms,
+        count,
+        note,
+    });
+}
+
+fn format_index_profile(report: &IndexProfileReport, format: &str) -> Result<String, AppError> {
+    match format {
+        "text" => {
+            let mut output = String::new();
+            output.push_str("index_profile:\n");
+            output.push_str(&format!("  root: {}\n", report.root.display()));
+            output.push_str(&format!("  kind: {}\n", report.kind));
+            output.push_str(&format!("  query: {}\n", report.query));
+            output.push_str(&format!("  total_elapsed_ms: {}\n", report.total_elapsed_ms));
+            output.push_str("  probes:\n");
+            for probe in &report.probes {
+                output.push_str(&format!(
+                    "    {}: {}ms count={} note={}\n",
+                    probe.name, probe.elapsed_ms, probe.count, probe.note
+                ));
+            }
+            Ok(output)
+        }
+        "json" => serde_json::to_string_pretty(report)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported index profile format: {other}. Use text or json"
+        ))),
+    }
+}
+
+fn format_index_verify(report: &IndexVerifyReport, format: &str) -> Result<String, AppError> {
+    match format {
+        "text" => {
+            let mut output = String::new();
+            output.push_str("index_verify:\n");
+            output.push_str(&format!("  root: {}\n", report.root.display()));
+            output.push_str(&format!("  healthy: {}\n", report.healthy));
+            output.push_str(&format!(
+                "  main: exists={} stale={} corrupt={} schema={} files={} symbols={}\n",
+                report.main.exists,
+                report.main.stale,
+                report.main.corrupt,
+                report.main.schema_status,
+                report.main.file_count,
+                report.main.symbol_count
+            ));
+            if let Some(message) = &report.main.message {
+                output.push_str(&format!("  main_message: {message}\n"));
+            }
+            output.push_str(&format!(
+                "  shards: exists={} stale={} count={} reason={}\n",
+                report.shards.exists, report.shards.stale, report.shards.shard_count, report.shards.reason
+            ));
+            output.push_str("  recommendations:\n");
+            for recommendation in &report.recommendations {
+                output.push_str(&format!("    - {recommendation}\n"));
+            }
+            Ok(output)
+        }
+        "json" => serde_json::to_string_pretty(report)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported index verify format: {other}. Use text or json"
+        ))),
+    }
+}
+
+fn refresh_reason_label(status: &fcs::index::IndexStatus) -> String {
+    if !status.exists {
+        return "missing".to_string();
+    }
+    if status.is_corrupt {
+        return "corrupt".to_string();
+    }
+    if status.is_stale {
+        return "stale".to_string();
+    }
+    "fresh".to_string()
+}
+
+fn index_kind_label(kind: fcs::index::IndexListKind) -> &'static str {
+    match kind {
+        fcs::index::IndexListKind::Files => "files",
+        fcs::index::IndexListKind::Symbols => "symbols",
+    }
+}
+
+fn index_schema_status_label(status: fcs::index::IndexSchemaStatus) -> &'static str {
+    match status {
+        fcs::index::IndexSchemaStatus::Missing => "missing",
+        fcs::index::IndexSchemaStatus::Current => "current",
+        fcs::index::IndexSchemaStatus::Migrated => "migrated",
+        fcs::index::IndexSchemaStatus::Future => "future",
+        fcs::index::IndexSchemaStatus::Corrupt => "corrupt",
+    }
+}
+
 struct QueryRequest<'a> {
     expression: Option<&'a str>,
     directory: Option<&'a String>,
@@ -810,6 +1127,24 @@ struct QueryRequest<'a> {
     list_saved: bool,
     delete_saved: Option<&'a String>,
     score_explain: bool,
+    profile: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QueryProfileReport {
+    root: PathBuf,
+    expression: String,
+    source: String,
+    mode: String,
+    limit: usize,
+    elapsed_ms: u128,
+    match_count: usize,
+    selected_sources: Vec<String>,
+    source_counts: BTreeMap<String, usize>,
+    kind_counts: BTreeMap<String, usize>,
+    execution_plan: String,
+    filters: Vec<String>,
+    macros: Vec<String>,
 }
 
 fn handle_query(request: QueryRequest<'_>, config: &fcs::config::Config) -> Result<(), AppError> {
@@ -879,6 +1214,29 @@ fn handle_query(request: QueryRequest<'_>, config: &fcs::config::Config) -> Resu
     let start = Instant::now();
     let matches = fcs::query::run_with_options(&root, &expression, source, request.limit, Some(&config.lsp), &options)?;
     let elapsed_ms = start.elapsed().as_millis();
+    if request.profile {
+        let explanation = fcs::query::explain_with_options(&expression, source, &options);
+        let report = QueryProfileReport {
+            root: root.clone(),
+            expression,
+            source: source.as_str().to_string(),
+            mode: mode.as_str().to_string(),
+            limit: request.limit,
+            elapsed_ms,
+            match_count: matches.len(),
+            selected_sources: explanation.selected_sources,
+            source_counts: count_query_match_field(matches.iter().map(|item| item.source.as_str())),
+            kind_counts: count_query_match_field(matches.iter().map(|item| item.kind.as_str())),
+            execution_plan: explanation.execution_plan,
+            filters: explanation.filters,
+            macros: request.macros.to_vec(),
+        };
+        print!("{}", format_query_profile(&report, request.format)?);
+        if request.warn_ms.is_some_and(|threshold| elapsed_ms > threshold) {
+            eprintln!("warning: query took {elapsed_ms}ms");
+        }
+        return Ok(());
+    }
     print!("{}", fcs::query::format_matches(&matches, request.format)?);
     if request.timing {
         println!("timing_ms: {elapsed_ms}");
@@ -887,6 +1245,63 @@ fn handle_query(request: QueryRequest<'_>, config: &fcs::config::Config) -> Resu
         eprintln!("warning: query took {elapsed_ms}ms");
     }
     Ok(())
+}
+
+fn count_query_match_field<'a>(values: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(value.to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn format_query_profile(report: &QueryProfileReport, format: &str) -> Result<String, AppError> {
+    match format {
+        "text" => {
+            let mut output = String::new();
+            output.push_str("query_profile:\n");
+            output.push_str(&format!("  root: {}\n", report.root.display()));
+            output.push_str(&format!("  expression: {}\n", report.expression));
+            output.push_str(&format!("  source: {}\n", report.source));
+            output.push_str(&format!("  mode: {}\n", report.mode));
+            output.push_str(&format!("  elapsed_ms: {}\n", report.elapsed_ms));
+            output.push_str(&format!("  matches: {}\n", report.match_count));
+            output.push_str(&format!("  selected_sources: {}\n", report.selected_sources.join(", ")));
+            output.push_str(&format!("  execution_plan: {}\n", report.execution_plan));
+            output.push_str("  source_counts:\n");
+            push_count_map(&mut output, &report.source_counts);
+            output.push_str("  kind_counts:\n");
+            push_count_map(&mut output, &report.kind_counts);
+            output.push_str("  filters:\n");
+            if report.filters.is_empty() {
+                output.push_str("    none\n");
+            } else {
+                for filter in &report.filters {
+                    output.push_str(&format!("    - {filter}\n"));
+                }
+            }
+            Ok(output)
+        }
+        "json" => serde_json::to_string_pretty(report)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported query profile format: {other}. Use text or json"
+        ))),
+    }
+}
+
+fn push_count_map(output: &mut String, counts: &BTreeMap<String, usize>) {
+    if counts.is_empty() {
+        output.push_str("    none\n");
+        return;
+    }
+    for (name, count) in counts {
+        output.push_str(&format!("    {name}: {count}\n"));
+    }
 }
 
 fn handle_service_start(
@@ -1463,6 +1878,8 @@ struct GraphSemanticInput<'a> {
     fanout: usize,
     exclude: &'a [String],
     fallback: &'a str,
+    cache: bool,
+    refresh_cache: bool,
     directory: Option<&'a String>,
     config: &'a fcs::config::Config,
 }
@@ -1482,6 +1899,14 @@ fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> 
         fanout: input.fanout,
         exclude: input.exclude.to_vec(),
     };
+    let cache_key = fcs::graph::semantic_cache_key(&root, &location, input.relation, &options, input.fallback);
+    if input.cache && !input.refresh_cache {
+        if let Some(edges) = fcs::graph::load_semantic_cache(&root, &cache_key)? {
+            let format = fcs::graph::GraphFormat::parse(input.format)?;
+            print!("{}", fcs::graph::format_edges(&edges, format)?);
+            return Ok(());
+        }
+    }
     let items = run_semantic_relation(&location, &root, input.relation, input.config);
     let edges = match items {
         Ok(items) if !items.is_empty() => {
@@ -1496,6 +1921,9 @@ fn handle_graph_semantic(input: GraphSemanticInput<'_>) -> Result<(), AppError> 
         Ok(_) => Vec::new(),
         Err(err) => return Err(err),
     };
+    if input.cache {
+        let _path = fcs::graph::store_semantic_cache(&root, &cache_key, &edges)?;
+    }
     let format = fcs::graph::GraphFormat::parse(input.format)?;
     print!("{}", fcs::graph::format_edges(&edges, format)?);
     Ok(())
@@ -2245,6 +2673,205 @@ fn handle_dap_profiles(directory: Option<&String>) -> Result<(), AppError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DapDoctorReport {
+    root: PathBuf,
+    healthy: bool,
+    profile_count: usize,
+    available_adapters: Vec<String>,
+    profiles: Vec<DapProfileDiagnostic>,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DapProfileDiagnostic {
+    name: String,
+    adapter: String,
+    request: String,
+    program: PathBuf,
+    cwd: Option<PathBuf>,
+    breakpoint_count: usize,
+    enabled_breakpoints: usize,
+    best_adapter: Option<String>,
+    healthy: bool,
+    issues: Vec<String>,
+    recommendations: Vec<String>,
+}
+
+fn handle_dap_doctor(directory: Option<&String>, name: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let profiles = match name {
+        Some(name) => vec![fcs::dap::load_profile(&root, name)?],
+        None => fcs::dap::list_profiles(&root)?,
+    };
+    let available_adapters = fcs::dap::discover_adapters()
+        .into_iter()
+        .filter(|adapter| adapter.available)
+        .map(|adapter| format!("{}:{}", adapter.adapter, adapter.command_line()))
+        .collect::<Vec<String>>();
+    let diagnostics = profiles
+        .iter()
+        .map(|profile| diagnose_dap_profile(&root, profile))
+        .collect::<Vec<DapProfileDiagnostic>>();
+    let mut recommendations = Vec::new();
+    if diagnostics.is_empty() {
+        recommendations.push("create a profile with `fcs dap save-profile` or `fcs dap from-trace`".to_string());
+    }
+    if available_adapters.is_empty() {
+        recommendations
+            .push("install lldb-dap, codelldb, OpenDebugAD7, or a language-specific DAP adapter".to_string());
+    }
+    for diagnostic in &diagnostics {
+        recommendations.extend(
+            diagnostic
+                .recommendations
+                .iter()
+                .map(|recommendation| format!("{}: {recommendation}", diagnostic.name)),
+        );
+    }
+    if recommendations.is_empty() {
+        recommendations.push("DAP profiles are ready for mock sessions and adapter launch attempts".to_string());
+    }
+    let healthy = !diagnostics.is_empty()
+        && !available_adapters.is_empty()
+        && diagnostics.iter().all(|diagnostic| diagnostic.healthy);
+    let report = DapDoctorReport {
+        root,
+        healthy,
+        profile_count: diagnostics.len(),
+        available_adapters,
+        profiles: diagnostics,
+        recommendations,
+    };
+    print!("{}", format_dap_doctor(&report, format)?);
+    Ok(())
+}
+
+fn diagnose_dap_profile(root: &Path, profile: &fcs::dap::DapLaunchProfile) -> DapProfileDiagnostic {
+    let mut issues = Vec::new();
+    let mut recommendations = Vec::new();
+
+    if let Err(err) = validate_dap_request(&profile.request, profile.process_id) {
+        issues.push(err.to_string());
+        recommendations.push("fix request/processId fields or recreate the profile".to_string());
+    }
+    if profile.request == "launch" {
+        let program = resolve_dap_path(root, &profile.program);
+        if !program.exists() {
+            issues.push(format!("program does not exist: {}", program.display()));
+            recommendations.push("recreate the profile with the correct program path".to_string());
+        }
+    }
+    if let Some(cwd) = &profile.cwd {
+        let cwd = resolve_dap_path(root, cwd);
+        if !cwd.is_dir() {
+            issues.push(format!("cwd does not exist or is not a directory: {}", cwd.display()));
+            recommendations.push("update the profile cwd or remove it".to_string());
+        }
+    }
+    for (index, breakpoint) in profile.breakpoints.iter().enumerate() {
+        if breakpoint.line == 0 {
+            issues.push(format!("breakpoint {} has invalid line 0", index + 1));
+        }
+        let path = resolve_dap_path(root, &breakpoint.path);
+        if !path.exists() {
+            issues.push(format!(
+                "breakpoint {} path does not exist: {}",
+                index + 1,
+                path.display()
+            ));
+        }
+    }
+
+    let best_adapter = fcs::dap::best_adapter_for_profile(profile).map(|adapter| adapter.command_line());
+    if best_adapter.is_none() {
+        issues.push(format!("no available adapter found for {}", profile.adapter));
+        recommendations.push("install a matching DAP adapter or change the profile adapter".to_string());
+    }
+
+    DapProfileDiagnostic {
+        name: profile.name.clone(),
+        adapter: profile.adapter.clone(),
+        request: profile.request.clone(),
+        program: profile.program.clone(),
+        cwd: profile.cwd.clone(),
+        breakpoint_count: profile.breakpoints.len(),
+        enabled_breakpoints: profile
+            .breakpoints
+            .iter()
+            .filter(|breakpoint| breakpoint.enabled)
+            .count(),
+        best_adapter,
+        healthy: issues.is_empty(),
+        issues,
+        recommendations,
+    }
+}
+
+fn resolve_dap_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn format_dap_doctor(report: &DapDoctorReport, format: &str) -> Result<String, AppError> {
+    match format {
+        "text" => {
+            let mut output = String::new();
+            output.push_str("dap_doctor:\n");
+            output.push_str(&format!("  root: {}\n", report.root.display()));
+            output.push_str(&format!("  healthy: {}\n", report.healthy));
+            output.push_str(&format!("  profiles: {}\n", report.profile_count));
+            output.push_str(&format!(
+                "  available_adapters: {}\n",
+                if report.available_adapters.is_empty() {
+                    "none".to_string()
+                } else {
+                    report.available_adapters.join(", ")
+                }
+            ));
+            for profile in &report.profiles {
+                output.push_str(&format!(
+                    "  profile {}: healthy={} request={} adapter={} breakpoints={}/{}\n",
+                    profile.name,
+                    profile.healthy,
+                    profile.request,
+                    profile.adapter,
+                    profile.enabled_breakpoints,
+                    profile.breakpoint_count
+                ));
+                if let Some(adapter) = &profile.best_adapter {
+                    output.push_str(&format!("    best_adapter: {adapter}\n"));
+                }
+                if profile.issues.is_empty() {
+                    output.push_str("    issues: none\n");
+                } else {
+                    output.push_str("    issues:\n");
+                    for issue in &profile.issues {
+                        output.push_str(&format!("      - {issue}\n"));
+                    }
+                }
+            }
+            output.push_str("  recommendations:\n");
+            for recommendation in &report.recommendations {
+                output.push_str(&format!("    - {recommendation}\n"));
+            }
+            Ok(output)
+        }
+        "json" => serde_json::to_string_pretty(report)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported DAP doctor format: {other}. Use text or json"
+        ))),
+    }
+}
+
 fn handle_dap_adapters(format: &str) -> Result<(), AppError> {
     let adapters = fcs::dap::discover_adapters();
     match format {
@@ -2874,6 +3501,28 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
         } => {
             fcs::tui::run(config, directory, mode, query, debug_binary)?;
         }
+        Commands::TuiScript {
+            script,
+            directory,
+            mode,
+            query,
+            debug_binary,
+            format,
+            step_timeout_ms,
+            persist,
+        } => {
+            let summary = fcs::tui::run_script(fcs::tui::TuiScriptOptions {
+                config,
+                directory,
+                mode,
+                query,
+                debug_binary,
+                script: PathBuf::from(script),
+                step_timeout: Duration::from_millis(step_timeout_ms),
+                persist,
+            })?;
+            print!("{}", fcs::tui::format_script_summary(&summary, &format)?);
+        }
         Commands::Workspace { action } => match action {
             WorkspaceAction::Status { directory } => {
                 handle_workspace_status(directory.as_ref(), &config)?;
@@ -2966,6 +3615,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         list_saved: false,
                         delete_saved: None,
                         score_explain,
+                        profile: false,
                     },
                     &config,
                 )?;
@@ -3018,6 +3668,16 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             } => {
                 handle_index_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
             }
+            IndexAction::Profile {
+                query,
+                directory,
+                kind,
+                limit,
+                format,
+                warn_ms,
+            } => {
+                handle_index_profile(directory.as_ref(), &kind, &query, limit, &format, warn_ms)?;
+            }
             IndexAction::Compact { directory, dry_run } => {
                 handle_index_compact(directory.as_ref(), dry_run)?;
             }
@@ -3056,6 +3716,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             } => {
                 handle_index_repair(directory.as_ref(), &option, force, &config)?;
             }
+            IndexAction::Verify { directory, format } => {
+                handle_index_verify(directory.as_ref(), &format)?;
+            }
             IndexAction::Bench {
                 directory,
                 build,
@@ -3082,6 +3745,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             list_saved,
             delete_saved,
             score_explain,
+            profile,
         } => {
             handle_query(
                 QueryRequest {
@@ -3100,6 +3764,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     list_saved,
                     delete_saved: delete_saved.as_ref(),
                     score_explain,
+                    profile,
                 },
                 &config,
             )?;
@@ -3164,6 +3829,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 fanout,
                 exclude,
                 fallback,
+                cache,
+                refresh_cache,
                 directory,
             } => {
                 handle_graph_semantic(GraphSemanticInput {
@@ -3174,6 +3841,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     fanout,
                     exclude: &exclude,
                     fallback: &fallback,
+                    cache,
+                    refresh_cache,
                     directory: directory.as_ref(),
                     config: &config,
                 })?;
@@ -3699,6 +4368,13 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             }
             DapAction::Profiles { directory } => {
                 handle_dap_profiles(directory.as_ref())?;
+            }
+            DapAction::Doctor {
+                directory,
+                name,
+                format,
+            } => {
+                handle_dap_doctor(directory.as_ref(), name.as_ref(), &format)?;
             }
             DapAction::FromTrace {
                 session,

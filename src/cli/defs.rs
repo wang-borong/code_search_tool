@@ -43,6 +43,39 @@ pub enum Commands {
         debug_binary: Option<String>,
     },
 
+    /// Replay a TUI command script without opening an interactive terminal
+    TuiScript {
+        /// Script file; blank lines and lines starting with # are ignored
+        script: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Initial source mode: search, files, symbols, refs, diag, trace, pinned, debug
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Initial query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// Binary used by the TUI debug pane
+        #[arg(long)]
+        debug_binary: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Milliseconds to wait for source/LSP/DAP workers after each script command
+        #[arg(long, default_value_t = 2000)]
+        step_timeout_ms: u64,
+
+        /// Persist TUI state after the script completes
+        #[arg(long)]
+        persist: bool,
+    },
+
     /// Inspect or initialize workspace metadata
     Workspace {
         #[command(subcommand)]
@@ -120,6 +153,10 @@ pub enum Commands {
         /// Append score and mode details to each match
         #[arg(long)]
         score_explain: bool,
+
+        /// Print an aggregate profile report instead of raw matches
+        #[arg(long)]
+        profile: bool,
     },
 
     /// Measure search, index, trace, and preview latency
@@ -1033,6 +1070,20 @@ pub enum DapAction {
         directory: Option<String>,
     },
 
+    /// Diagnose saved DAP profiles, adapter availability, and launch/attach inputs
+    Doctor {
+        /// Target workspace directory
+        directory: Option<String>,
+
+        /// Restrict diagnostics to one profile name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Save a DAP launch profile from all line locations in a trace session
     FromTrace {
         /// Trace session name
@@ -1885,6 +1936,31 @@ pub enum IndexAction {
         warn_ms: Option<u64>,
     },
 
+    /// Profile cached index load/list/query/shard latency
+    Profile {
+        /// Query text for the query probe
+        query: String,
+
+        /// Target directory
+        directory: Option<String>,
+
+        /// Entry kind: files or symbols
+        #[arg(short, long, default_value = "symbols")]
+        kind: String,
+
+        /// Maximum entries for list/query probes
+        #[arg(short, long, default_value_t = 50)]
+        limit: usize,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn on stderr when any probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+    },
+
     /// Diagnose index freshness, schema, and corruption status
     Doctor {
         /// Target directory
@@ -1903,6 +1979,16 @@ pub enum IndexAction {
         /// Rebuild even when the index is already healthy
         #[arg(long)]
         force: bool,
+    },
+
+    /// Verify main index and shard cache health without rebuilding
+    Verify {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
     },
 
     /// Measure cached index operation latency
@@ -1958,6 +2044,14 @@ pub enum GraphAction {
         /// Fallback provider when LSP fails or returns no edges: none or index
         #[arg(long, default_value = "none")]
         fallback: String,
+
+        /// Read/write a workspace semantic graph cache for repeated targets
+        #[arg(long)]
+        cache: bool,
+
+        /// Ignore any existing semantic graph cache entry and rewrite it
+        #[arg(long)]
+        refresh_cache: bool,
 
         /// Workspace directory override
         #[arg(short, long)]
@@ -2078,6 +2172,20 @@ mod tests {
     fn release_smoke_commands_parse() {
         let cases: &[&[&str]] = &[
             &["fcs", "tui", "--mode", "files", "--query", "main"],
+            &[
+                "fcs",
+                "tui-script",
+                "script.fcs",
+                ".",
+                "--mode",
+                "symbols",
+                "--query",
+                "main",
+                "--format",
+                "json",
+                "--step-timeout-ms",
+                "100",
+            ],
             &["fcs", "workspace", "status", "."],
             &["fcs", "workspace", "detect", "."],
             &["fcs", "workspace", "doctor", "."],
@@ -2128,6 +2236,7 @@ mod tests {
             ],
             &["fcs", "service", "stop", "."],
             &["fcs", "index", "doctor", "."],
+            &["fcs", "index", "verify", ".", "--format", "json"],
             &["fcs", "index", "stats", "."],
             &[
                 "fcs",
@@ -2179,6 +2288,19 @@ mod tests {
             ],
             &["fcs", "index", "daemon-status", "."],
             &["fcs", "index", "query", "main", ".", "--timing", "--warn-ms", "1000"],
+            &[
+                "fcs",
+                "index",
+                "profile",
+                "main",
+                ".",
+                "--kind",
+                "symbols",
+                "--format",
+                "json",
+                "--warn-ms",
+                "1000",
+            ],
             &["fcs", "index", "bench", ".", "--query", "main"],
             &[
                 "fcs",
@@ -2202,6 +2324,17 @@ mod tests {
                 "--macro",
                 "functions",
                 "--score-explain",
+            ],
+            &[
+                "fcs",
+                "query",
+                "kind:function text:main",
+                ".",
+                "--source",
+                "index",
+                "--profile",
+                "--format",
+                "json",
             ],
             &[
                 "fcs",
@@ -2356,6 +2489,8 @@ mod tests {
                 "8",
                 "--fallback",
                 "index",
+                "--cache",
+                "--refresh-cache",
             ],
             &["fcs", "type-def", "src/main.rs:1:1"],
             &["fcs", "doc-symbols", "src/main.rs"],
@@ -2463,6 +2598,7 @@ mod tests {
             ],
             &["fcs", "debug", "delete-profile", "smoke", "--directory", "."],
             &["fcs", "dap", "templates", "--format", "json"],
+            &["fcs", "dap", "doctor", ".", "--name", "smoke", "--format", "json"],
             &[
                 "fcs",
                 "dap",
@@ -2559,14 +2695,18 @@ mod tests {
 
         for command in [
             "tui",
+            "tui-script",
             "workspace",
             "service",
+            "index",
             "query",
             "bench",
+            "graph",
             "trace",
             "actions",
             "plugin",
             "debug",
+            "dap",
             "type-def",
             "doc-symbols",
             "outgoing",

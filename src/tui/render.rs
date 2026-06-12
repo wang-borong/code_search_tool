@@ -3,6 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
+use crate::config::TuiThemeConfig;
 use crate::core::{CodeItem, CodeItemKind};
 
 use super::{highlight, query_with_cursor, AppState, SourceMode, StatusLevel, HELP_OVERLAY_TEXT, HELP_TEXT};
@@ -33,6 +34,18 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     }
 }
 
+fn theme(app: &AppState) -> &TuiThemeConfig {
+    &app.config.tui.theme
+}
+
+fn themed(app: &AppState, style: Style) -> Style {
+    highlight::theme_style(theme(app), style)
+}
+
+fn selected_style(app: &AppState, fg: Color, bg: Color) -> Style {
+    highlight::selection_style(theme(app), fg, bg)
+}
+
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let title = format!(
         " fcs TUI | workspace: {} | mode: {} ",
@@ -40,11 +53,14 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         app.mode.label()
     );
     let paragraph = Paragraph::new(Line::from(vec![
-        Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title,
+            themed(app, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ),
         Span::raw(" "),
-        Span::styled(&app.semantic_status, Style::default().fg(Color::Green)),
+        Span::styled(&app.semantic_status, themed(app, Style::default().fg(Color::Green))),
         Span::raw(" | "),
-        Span::styled(&app.status, status_style(app.status_level)),
+        Span::styled(&app.status, status_style(app.status_level, theme(app))),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
@@ -81,17 +97,14 @@ fn render_sources(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .iter()
         .map(|mode| {
             let style = if *mode == app.mode {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+                selected_style(app, Color::Black, Color::Cyan)
             } else {
                 Style::default()
             };
             ListItem::new(Line::from(vec![
                 Span::styled(mode.short_label(), style),
                 Span::raw(" "),
-                Span::styled(mode.label(), Style::default().fg(Color::DarkGray)),
+                Span::styled(mode.label(), themed(app, Style::default().fg(Color::DarkGray))),
             ]))
         })
         .collect::<Vec<ListItem>>();
@@ -105,7 +118,7 @@ fn render_pins(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .pinned_items
         .iter()
         .take(visible_height)
-        .map(|item| ListItem::new(code_item_line(item, false, Some("P "))))
+        .map(|item| ListItem::new(code_item_line(app, item, false, Some("P "))))
         .collect::<Vec<ListItem>>();
     let title = format!("Pins {}", app.pinned_items.len());
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
@@ -125,11 +138,11 @@ fn render_navigation(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState)
         .map(|(index, item)| {
             let absolute_index = start + index;
             let style = if Some(absolute_index) == app.navigation_index {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
+                selected_style(app, Color::Black, Color::Yellow)
             } else {
-                Style::default().fg(Color::DarkGray)
+                themed(app, Style::default().fg(Color::DarkGray))
             };
-            ListItem::new(apply_line_style(code_item_line(item, false, None), style))
+            ListItem::new(apply_line_style(code_item_line(app, item, false, None), style))
         })
         .collect::<Vec<ListItem>>();
     let title = match app.navigation_index {
@@ -156,19 +169,19 @@ fn render_results(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .map(|(index, item)| {
             let absolute_index = start + index;
             let pin = if app.is_pinned(item) { "P " } else { "  " };
-            ListItem::new(code_item_line(item, absolute_index == app.selected, Some(pin)))
+            ListItem::new(code_item_line(app, item, absolute_index == app.selected, Some(pin)))
         })
         .collect::<Vec<ListItem>>();
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(list, area);
 }
 
-fn code_item_line(item: &CodeItem, selected: bool, prefix: Option<&str>) -> Line<'static> {
+fn code_item_line(app: &AppState, item: &CodeItem, selected: bool, prefix: Option<&str>) -> Line<'static> {
     let mut spans = Vec::new();
     if let Some(prefix) = prefix {
         spans.push(Span::styled(
             prefix.to_string(),
-            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
         ));
     }
 
@@ -176,18 +189,30 @@ fn code_item_line(item: &CodeItem, selected: bool, prefix: Option<&str>) -> Line
         CodeItemKind::File => {
             spans.push(Span::styled(
                 item.display_text().to_string(),
-                highlight::code_item_kind_style(&item.kind),
+                highlight::code_item_kind_style(&item.kind, theme(app)),
             ));
         }
         CodeItemKind::Symbol | CodeItemKind::TextMatch => {
-            spans.push(Span::styled(item.label.clone(), Style::default().fg(Color::LightBlue)));
+            spans.push(Span::styled(
+                item.label.clone(),
+                themed(app, Style::default().fg(Color::LightBlue)),
+            ));
             if let Some(line) = item.location.line {
-                spans.push(Span::styled(":".to_string(), Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(line.to_string(), Style::default().fg(Color::LightGreen)));
+                spans.push(Span::styled(
+                    ":".to_string(),
+                    themed(app, Style::default().fg(Color::DarkGray)),
+                ));
+                spans.push(Span::styled(
+                    line.to_string(),
+                    themed(app, Style::default().fg(Color::LightGreen)),
+                ));
             }
-            spans.push(Span::styled(":".to_string(), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                ":".to_string(),
+                themed(app, Style::default().fg(Color::DarkGray)),
+            ));
             let detail_style = match item.kind {
-                CodeItemKind::Symbol => Style::default().fg(Color::LightYellow),
+                CodeItemKind::Symbol => themed(app, Style::default().fg(Color::LightYellow)),
                 CodeItemKind::TextMatch => Style::default(),
                 CodeItemKind::File => Style::default(),
             };
@@ -195,19 +220,14 @@ fn code_item_line(item: &CodeItem, selected: bool, prefix: Option<&str>) -> Line
                 &item.location.path,
                 &item.detail,
                 detail_style,
+                theme(app),
             ));
         }
     }
 
     let line = Line::from(spans);
     if selected {
-        apply_line_style(
-            line,
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
+        apply_line_style(line, selected_style(app, Color::Black, Color::Green))
     } else {
         line
     }
@@ -224,17 +244,19 @@ fn apply_line_style(line: Line<'static>, style: Style) -> Line<'static> {
 
 fn render_preview(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let window = app.preview_window_for_current(area.height);
-    let paragraph = Paragraph::new(highlight::preview_lines(&window))
+    let paragraph = Paragraph::new(highlight::preview_lines(&window, theme(app)))
         .block(Block::default().title(app.preview_title()).borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
-fn status_style(level: StatusLevel) -> Style {
+fn status_style(level: StatusLevel, theme: &TuiThemeConfig) -> Style {
     match level {
-        StatusLevel::Info => Style::default().fg(Color::Yellow),
-        StatusLevel::Warning => Style::default().fg(Color::LightMagenta),
-        StatusLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        StatusLevel::Info => highlight::theme_style(theme, Style::default().fg(Color::Yellow)),
+        StatusLevel::Warning => highlight::theme_style(theme, Style::default().fg(Color::LightMagenta)),
+        StatusLevel::Error => {
+            highlight::theme_style(theme, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        }
     }
 }
 
@@ -252,7 +274,7 @@ fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .trace_items
         .iter()
         .take(area.height.saturating_sub(2).max(1) as usize)
-        .map(|item| ListItem::new(code_item_line(item, false, None)))
+        .map(|item| ListItem::new(code_item_line(app, item, false, None)))
         .collect::<Vec<ListItem>>();
     let trace = List::new(trace_lines).block(Block::default().title("Trace").borders(Borders::ALL));
     frame.render_widget(trace, chunks[0]);
@@ -267,7 +289,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         let lines = app
             .debug_panel_text()
             .lines()
-            .map(highlight::debug_line)
+            .map(|line| highlight::debug_line(line, theme(app)))
             .collect::<Vec<Line<'static>>>();
         let paragraph = Paragraph::new(lines)
             .block(Block::default().title("Debug").borders(Borders::ALL))
@@ -291,45 +313,54 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
 
     let snapshot = &app.dap_snapshot;
     let mut session = vec![
-        highlight::debug_line(&snapshot.status),
+        highlight::debug_line(&snapshot.status, theme(app)),
         Line::from(vec![
             Span::styled(
                 "adapter: ",
-                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
             ),
-            Span::styled(snapshot.adapter.clone(), Style::default().fg(Color::Gray)),
+            Span::styled(snapshot.adapter.clone(), themed(app, Style::default().fg(Color::Gray))),
             Span::styled(
                 " profile: ",
-                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
             ),
-            Span::styled(snapshot.profile.clone(), Style::default().fg(Color::Gray)),
+            Span::styled(snapshot.profile.clone(), themed(app, Style::default().fg(Color::Gray))),
         ]),
-        highlight::debug_line(&format!(
-            "req/res {}:{}  thread {:?} frame {:?}",
-            snapshot.request_count, snapshot.response_count, snapshot.selected_thread_id, snapshot.selected_frame_id
-        )),
+        highlight::debug_line(
+            &format!(
+                "req/res {}:{}  thread {:?} frame {:?}",
+                snapshot.request_count,
+                snapshot.response_count,
+                snapshot.selected_thread_id,
+                snapshot.selected_frame_id
+            ),
+            theme(app),
+        ),
     ];
     if let Some(reason) = &snapshot.stop_reason {
-        session.push(highlight::debug_line(&format!("stop: {reason}")));
+        session.push(highlight::debug_line(&format!("stop: {reason}"), theme(app)));
     }
     if !snapshot.capabilities.is_empty() {
-        session.push(highlight::debug_line(&format!(
-            "caps: {}",
-            snapshot
-                .capabilities
-                .iter()
-                .take(4)
-                .cloned()
-                .collect::<Vec<String>>()
-                .join(", ")
-        )));
+        session.push(highlight::debug_line(
+            &format!(
+                "caps: {}",
+                snapshot
+                    .capabilities
+                    .iter()
+                    .take(4)
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            ),
+            theme(app),
+        ));
     }
     let session = Paragraph::new(session)
         .block(Block::default().title("Session").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(session, left[0]);
 
-    let stack = list_from_strings(&snapshot.stack, left[1].height, "Stack");
+    let stack = list_from_strings(&snapshot.stack, left[1].height, "Stack", theme(app));
     frame.render_widget(stack, left[1]);
 
     let mut variable_lines = snapshot.variables.clone();
@@ -343,7 +374,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
     if let Some(error) = &snapshot.error {
         variable_lines.push(format!("error: {error}"));
     }
-    let variables = list_from_strings(&variable_lines, right[0].height, "Variables");
+    let variables = list_from_strings(&variable_lines, right[0].height, "Variables", theme(app));
     frame.render_widget(variables, right[0]);
 
     let mut event_lines = snapshot.events.clone();
@@ -360,16 +391,16 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
             column
         ));
     }
-    let events = list_from_strings(&event_lines, right[1].height, "Events");
+    let events = list_from_strings(&event_lines, right[1].height, "Events", theme(app));
     frame.render_widget(events, right[1]);
 }
 
-fn list_from_strings<'a>(values: &[String], area_height: u16, title: &'a str) -> List<'a> {
+fn list_from_strings<'a>(values: &[String], area_height: u16, title: &'a str, theme: &TuiThemeConfig) -> List<'a> {
     let visible_height = area_height.saturating_sub(2).max(1) as usize;
     let items = values
         .iter()
         .take(visible_height)
-        .map(|value| ListItem::new(highlight::debug_line(value)))
+        .map(|value| ListItem::new(highlight::debug_line(value, theme)))
         .collect::<Vec<ListItem>>();
     List::new(items).block(Block::default().title(title).borders(Borders::ALL))
 }
@@ -398,22 +429,22 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         app.breakpoints.len()
     );
     let mut text = vec![
-        highlight::activity_line("source", &source, Color::LightGreen),
-        highlight::activity_line("lsp", &lsp, Color::LightBlue),
-        highlight::activity_line("dap", &dap, Color::LightMagenta),
-        highlight::activity_line("preview", &preview, Color::LightCyan),
+        highlight::activity_line("source", &source, Color::LightGreen, theme(app)),
+        highlight::activity_line("lsp", &lsp, Color::LightBlue, theme(app)),
+        highlight::activity_line("dap", &dap, Color::LightMagenta, theme(app)),
+        highlight::activity_line("preview", &preview, Color::LightCyan, theme(app)),
         Line::from(vec![
             Span::styled(
                 "counts: ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                themed(app, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ),
-            Span::styled(counts, Style::default().fg(Color::Gray)),
+            Span::styled(counts, themed(app, Style::default().fg(Color::Gray))),
         ]),
     ];
     if let Some(plan) = &app.startup_plan {
         let available = area.height.saturating_sub(2).saturating_sub(text.len() as u16) as usize;
         for line in crate::workspace::startup_plan_lines(plan).into_iter().take(available) {
-            text.push(highlight::debug_line(&line));
+            text.push(highlight::debug_line(&line, theme(app)));
         }
     }
     let paragraph = Paragraph::new(text)
@@ -437,10 +468,10 @@ fn render_query(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     };
     let query = query_with_cursor(input, cursor, active);
     let text = Line::from(vec![
-        Span::styled(format!("{prompt}: "), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{prompt}: "), themed(app, Style::default().fg(Color::Yellow))),
         Span::raw(query),
         Span::raw("    "),
-        Span::styled(HELP_TEXT, Style::default().fg(Color::DarkGray)),
+        Span::styled(HELP_TEXT, themed(app, Style::default().fg(Color::DarkGray))),
     ]);
     let paragraph = Paragraph::new(text).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
@@ -456,12 +487,15 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppS
         .enumerate()
         .map(|(index, command)| {
             let style = if index == 0 {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                selected_style(app, Color::Black, Color::Cyan)
             } else {
                 Style::default()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:>2}. ", index + 1), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:>2}. ", index + 1),
+                    themed(app, Style::default().fg(Color::DarkGray)),
+                ),
                 Span::styled(*command, style),
             ]))
         })

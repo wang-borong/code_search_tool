@@ -3,6 +3,8 @@ use std::path::Path;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::config::TuiThemeConfig;
+
 use super::preview_cache::PreviewWindow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,11 +19,31 @@ enum Syntax {
     Generic,
 }
 
-pub(super) fn preview_lines(window: &PreviewWindow) -> Vec<Line<'static>> {
+pub(super) fn theme_style(theme: &TuiThemeConfig, mut style: Style) -> Style {
+    if !theme.color {
+        style.fg = None;
+        style.bg = None;
+        return style;
+    }
+    if theme.low_color {
+        style.fg = style.fg.map(low_color);
+        style.bg = style.bg.map(low_color);
+    }
+    style
+}
+
+pub(super) fn selection_style(theme: &TuiThemeConfig, fg: Color, bg: Color) -> Style {
+    if !theme.color {
+        return Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    }
+    theme_style(theme, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
+}
+
+pub(super) fn preview_lines(window: &PreviewWindow, theme: &TuiThemeConfig) -> Vec<Line<'static>> {
     if let Some(message) = &window.message {
         return vec![Line::from(Span::styled(
             message.clone(),
-            Style::default().fg(Color::LightRed),
+            theme_style(theme, Style::default().fg(Color::LightRed)),
         ))];
     }
 
@@ -30,35 +52,40 @@ pub(super) fn preview_lines(window: &PreviewWindow) -> Vec<Line<'static>> {
         .iter()
         .map(|line| {
             let line_style = if line.is_target {
-                Style::default().bg(Color::Rgb(36, 42, 54))
+                theme_style(theme, Style::default().bg(Color::Rgb(36, 42, 54)))
             } else {
                 Style::default()
             };
             let marker_style = if line.is_target {
-                line_style.fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                theme_style(theme, line_style.fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
-                line_style.fg(Color::DarkGray)
+                theme_style(theme, line_style.fg(Color::DarkGray))
             };
             let number_style = if line.is_target {
-                line_style.fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+                theme_style(theme, line_style.fg(Color::LightYellow).add_modifier(Modifier::BOLD))
             } else {
-                line_style.fg(Color::DarkGray)
+                theme_style(theme, line_style.fg(Color::DarkGray))
             };
             let mut spans = vec![
                 Span::styled(if line.is_target { ">" } else { " " }.to_string(), marker_style),
                 Span::styled(format!(" {:>5} ", line.number), number_style),
-                Span::styled("| ".to_string(), line_style.fg(Color::DarkGray)),
+                Span::styled("| ".to_string(), theme_style(theme, line_style.fg(Color::DarkGray))),
             ];
-            spans.extend(highlight_code(&window.path, &line.text, line_style));
+            spans.extend(highlight_code(&window.path, &line.text, line_style, theme));
             Line::from(spans)
         })
         .collect()
 }
 
-pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<Span<'static>> {
+pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style, theme: &TuiThemeConfig) -> Vec<Span<'static>> {
+    let base_style = theme_style(theme, base_style);
+    if !theme.syntax_highlight {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+
     let syntax = detect_syntax(path);
     if syntax == Syntax::Markdown {
-        return highlight_markdown(text, base_style);
+        return highlight_markdown(text, base_style, theme);
     }
 
     let mut spans = Vec::new();
@@ -66,13 +93,17 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
     while index < text.len() {
         let rest = &text[index..];
         if let Some(comment_len) = line_comment_len(syntax, rest, index, text) {
-            push_span(&mut spans, rest, token_style(base_style, TokenKind::Comment));
+            push_span(&mut spans, rest, token_style(base_style, TokenKind::Comment, theme));
             index += comment_len;
             continue;
         }
         if rest.starts_with("/*") {
             let len = rest.find("*/").map_or(rest.len(), |offset| offset + 2);
-            push_span(&mut spans, &rest[..len], token_style(base_style, TokenKind::Comment));
+            push_span(
+                &mut spans,
+                &rest[..len],
+                token_style(base_style, TokenKind::Comment, theme),
+            );
             index += len;
             continue;
         }
@@ -88,7 +119,11 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
         }
         if ch == '"' || ch == '\'' || ch == '`' {
             let len = consume_string(rest, ch);
-            push_span(&mut spans, &rest[..len], token_style(base_style, TokenKind::String));
+            push_span(
+                &mut spans,
+                &rest[..len],
+                token_style(base_style, TokenKind::String, theme),
+            );
             index += len;
             continue;
         }
@@ -96,7 +131,11 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
             let len = consume_while(rest, |value| {
                 value.is_ascii_alphanumeric() || matches!(value, '.' | '_')
             });
-            push_span(&mut spans, &rest[..len], token_style(base_style, TokenKind::Number));
+            push_span(
+                &mut spans,
+                &rest[..len],
+                token_style(base_style, TokenKind::Number, theme),
+            );
             index += len;
             continue;
         }
@@ -104,11 +143,11 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
             let len = consume_while(rest, is_identifier_continue);
             let word = &rest[..len];
             let style = if is_keyword(syntax, word) {
-                token_style(base_style, TokenKind::Keyword)
+                token_style(base_style, TokenKind::Keyword, theme)
             } else if is_builtin_constant(word) {
-                token_style(base_style, TokenKind::Constant)
+                token_style(base_style, TokenKind::Constant, theme)
             } else if next_non_space(&rest[len..]) == Some('(') {
-                token_style(base_style, TokenKind::Function)
+                token_style(base_style, TokenKind::Function, theme)
             } else {
                 base_style
             };
@@ -119,7 +158,7 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
 
         let len = ch.len_utf8();
         let style = if is_operator_or_punctuation(ch) {
-            token_style(base_style, TokenKind::Punctuation)
+            token_style(base_style, TokenKind::Punctuation, theme)
         } else {
             base_style
         };
@@ -133,61 +172,67 @@ pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style) -> Vec<
     spans
 }
 
-pub(super) fn code_item_kind_style(kind: &crate::core::CodeItemKind) -> Style {
+pub(super) fn code_item_kind_style(kind: &crate::core::CodeItemKind, theme: &TuiThemeConfig) -> Style {
     match kind {
-        crate::core::CodeItemKind::File => Style::default().fg(Color::LightBlue),
-        crate::core::CodeItemKind::Symbol => Style::default().fg(Color::LightYellow),
-        crate::core::CodeItemKind::TextMatch => Style::default().fg(Color::LightGreen),
+        crate::core::CodeItemKind::File => theme_style(theme, Style::default().fg(Color::LightBlue)),
+        crate::core::CodeItemKind::Symbol => theme_style(theme, Style::default().fg(Color::LightYellow)),
+        crate::core::CodeItemKind::TextMatch => theme_style(theme, Style::default().fg(Color::LightGreen)),
     }
 }
 
-pub(super) fn debug_line(value: &str) -> Line<'static> {
+pub(super) fn debug_line(value: &str, theme: &TuiThemeConfig) -> Line<'static> {
     let lower = value.to_ascii_lowercase();
     if value.starts_with("-- ") {
         return Line::from(Span::styled(
             value.to_string(),
-            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+            theme_style(
+                theme,
+                Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+            ),
         ));
     }
     if lower.contains("error") || lower.contains("failed") {
-        return prefixed_line(value, Color::LightRed);
+        return prefixed_line(value, Color::LightRed, theme);
     }
     if lower.contains("stopped") || lower.starts_with("stop:") {
-        return prefixed_line(value, Color::Yellow);
+        return prefixed_line(value, Color::Yellow, theme);
     }
     if lower.contains("running") || lower.contains("continued") {
-        return prefixed_line(value, Color::LightGreen);
+        return prefixed_line(value, Color::LightGreen, theme);
     }
     if lower.starts_with("eval:") || lower.starts_with("watch") {
-        return prefixed_line(value, Color::LightCyan);
+        return prefixed_line(value, Color::LightCyan, theme);
     }
     if lower.starts_with("caps:") || lower.starts_with("req/res") {
-        return prefixed_line(value, Color::DarkGray);
+        return prefixed_line(value, Color::DarkGray, theme);
     }
     Line::from(Span::raw(value.to_string()))
 }
 
-pub(super) fn activity_line(label: &str, value: &str, color: Color) -> Line<'static> {
+pub(super) fn activity_line(label: &str, value: &str, color: Color, theme: &TuiThemeConfig) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{label}: "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            theme_style(theme, Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ),
-        Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(value.to_string(), theme_style(theme, Style::default().fg(Color::Gray))),
     ])
 }
 
-fn prefixed_line(value: &str, color: Color) -> Line<'static> {
+fn prefixed_line(value: &str, color: Color, theme: &TuiThemeConfig) -> Line<'static> {
     let Some(index) = value.find(':') else {
-        return Line::from(Span::styled(value.to_string(), Style::default().fg(color)));
+        return Line::from(Span::styled(
+            value.to_string(),
+            theme_style(theme, Style::default().fg(color)),
+        ));
     };
     let (prefix, rest) = value.split_at(index + 1);
     Line::from(vec![
         Span::styled(
             prefix.to_string(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            theme_style(theme, Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ),
-        Span::styled(rest.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(rest.to_string(), theme_style(theme, Style::default().fg(Color::Gray))),
     ])
 }
 
@@ -202,7 +247,7 @@ enum TokenKind {
     Punctuation,
 }
 
-fn token_style(base_style: Style, kind: TokenKind) -> Style {
+fn token_style(base_style: Style, kind: TokenKind, theme: &TuiThemeConfig) -> Style {
     let style = match kind {
         TokenKind::Keyword => Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
         TokenKind::Function => Style::default().fg(Color::LightCyan),
@@ -212,7 +257,21 @@ fn token_style(base_style: Style, kind: TokenKind) -> Style {
         TokenKind::Constant => Style::default().fg(Color::Yellow),
         TokenKind::Punctuation => Style::default().fg(Color::Blue),
     };
-    base_style.patch(style)
+    base_style.patch(theme_style(theme, style))
+}
+
+fn low_color(color: Color) -> Color {
+    match color {
+        Color::LightRed => Color::Red,
+        Color::LightGreen => Color::Green,
+        Color::LightYellow => Color::Yellow,
+        Color::LightBlue => Color::Blue,
+        Color::LightMagenta => Color::Magenta,
+        Color::LightCyan => Color::Cyan,
+        Color::Gray | Color::DarkGray => Color::White,
+        Color::Rgb(_, _, _) | Color::Indexed(_) => Color::Blue,
+        other => other,
+    }
 }
 
 fn detect_syntax(path: &Path) -> Syntax {
@@ -246,34 +305,41 @@ fn line_comment_len(syntax: Syntax, rest: &str, index: usize, line: &str) -> Opt
     None
 }
 
-fn highlight_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
+fn highlight_markdown(text: &str, base_style: Style, theme: &TuiThemeConfig) -> Vec<Span<'static>> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
         return vec![Span::styled(
             text.to_string(),
-            base_style.fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            theme_style(theme, base_style.fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
         )];
     }
     if trimmed.starts_with("```") {
         return vec![Span::styled(
             text.to_string(),
-            token_style(base_style, TokenKind::String),
+            token_style(base_style, TokenKind::String, theme),
         )];
     }
     if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("> ") {
-        return vec![Span::styled(text.to_string(), base_style.fg(Color::LightYellow))];
+        return vec![Span::styled(
+            text.to_string(),
+            theme_style(theme, base_style.fg(Color::LightYellow)),
+        )];
     }
-    highlight_inline_markup(text, base_style)
+    highlight_inline_markup(text, base_style, theme)
 }
 
-fn highlight_inline_markup(text: &str, base_style: Style) -> Vec<Span<'static>> {
+fn highlight_inline_markup(text: &str, base_style: Style, theme: &TuiThemeConfig) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut index = 0;
     while index < text.len() {
         let rest = &text[index..];
         if let Some(stripped) = rest.strip_prefix('`') {
             let len = stripped.find('`').map_or(1, |offset| offset + 2);
-            push_span(&mut spans, &rest[..len], token_style(base_style, TokenKind::String));
+            push_span(
+                &mut spans,
+                &rest[..len],
+                token_style(base_style, TokenKind::String, theme),
+            );
             index += len;
             continue;
         }
@@ -467,7 +533,13 @@ mod tests {
 
     #[test]
     fn highlights_rust_keywords_and_comments() {
-        let spans = highlight_code(Path::new("src/main.rs"), "pub fn main() { // run", Style::default());
+        let theme = TuiThemeConfig::default();
+        let spans = highlight_code(
+            Path::new("src/main.rs"),
+            "pub fn main() { // run",
+            Style::default(),
+            &theme,
+        );
 
         assert!(spans.iter().any(|span| span.content == "pub"));
         assert!(spans.iter().any(|span| span.content == "fn"));
@@ -495,9 +567,23 @@ mod tests {
             message: None,
         };
 
-        let lines = preview_lines(&window);
+        let theme = TuiThemeConfig::default();
+        let lines = preview_lines(&window, &theme);
 
         assert_eq!(lines.len(), 2);
         assert!(lines[1].spans.iter().any(|span| span.content.contains("pub")));
+    }
+
+    #[test]
+    fn color_can_be_disabled_without_dropping_text() {
+        let theme = TuiThemeConfig {
+            color: false,
+            ..TuiThemeConfig::default()
+        };
+        let spans = highlight_code(Path::new("src/main.rs"), "pub fn main()", Style::default(), &theme);
+
+        assert!(spans.iter().any(|span| span.content.contains("pub")));
+        assert!(spans.iter().all(|span| span.style.fg.is_none()));
+        assert!(spans.iter().all(|span| span.style.bg.is_none()));
     }
 }

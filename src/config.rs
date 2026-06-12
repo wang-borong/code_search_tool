@@ -60,6 +60,8 @@ pub struct LspConfig {
 pub struct TuiConfig {
     #[serde(default)]
     pub keymap: TuiKeymapConfig,
+    #[serde(default)]
+    pub theme: TuiThemeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,14 @@ pub struct TuiKeymapConfig {
     pub trace: String,
     pub breakpoint: String,
     pub debug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiThemeConfig {
+    pub name: String,
+    pub color: bool,
+    pub syntax_highlight: bool,
+    pub low_color: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +137,17 @@ impl Default for TuiKeymapConfig {
             trace: "a".to_string(),
             breakpoint: "b".to_string(),
             debug: "D".to_string(),
+        }
+    }
+}
+
+impl Default for TuiThemeConfig {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            color: true,
+            syntax_highlight: true,
+            low_color: false,
         }
     }
 }

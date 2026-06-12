@@ -5,6 +5,11 @@
 ### Added
 
 - Added lightweight syntax highlighting for the ratatui preview pane and richer color styling across results, trace, debug, and activity panels.
+- Added `tui-script` for headless TUI command playback, including selection, movement, waits, DAP smoke commands, and text/JSON summaries.
+- Added query/index profiling and `index verify` for source/filter visibility, latency probes, and cache health checks.
+- Added opt-in `graph semantic --cache` with refresh support for repeatable semantic graph diagnostics.
+- Added `dap doctor` diagnostics for saved profiles, breakpoint paths, launch/attach validity, and adapter availability.
+- Added TUI theme configuration for color, syntax highlighting, and low-color terminal behavior.
 - Added release readiness documentation for the ratatui tracing workspace, CLI smoke checks, trace export, and debug profile workflows.
 - Added `scripts/smoke.sh` as a repeatable release smoke entrypoint. The script uses `rtk` for every shell command and keeps debug profile state under `/tmp` by default.
 - Added lightweight clap command-tree tests to catch invalid CLI definitions before release.

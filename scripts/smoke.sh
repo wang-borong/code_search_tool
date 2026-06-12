@@ -46,6 +46,16 @@ command = "echo"
 args = ["{symbol}", "{file}:{line}", "{workspace}"]
 cwd = "{workspace}"
 EOF
+rtk tee "$SMOKE_ROOT/tui-script.fcs" >/dev/null <<'EOF'
+source symbols
+query main
+select 1
+preview down
+break
+dap smoke
+wait 1000
+source debug
+EOF
 
 rtk cargo test
 rtk cargo clippy -- -D warnings
@@ -55,6 +65,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs complete bash >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs complete zsh >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs tui --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs tui-script "$SMOKE_ROOT/tui-script.fcs" "$SMOKE_ROOT" --mode symbols --query main --format json --step-timeout-ms 10000 >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace status
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace plan
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace advise
@@ -88,8 +99,10 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index refresh "$SMOKE_
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index daemon "$SMOKE_ROOT" --interval-ms 0 --max-cycles 1 --foreground
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index daemon-status "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index doctor "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index verify "$SMOKE_ROOT" --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index list "$SMOKE_ROOT" --kind symbols --limit 5
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index query main "$SMOKE_ROOT" --kind symbols --limit 5 --timing --warn-ms 10000
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index profile main "$SMOKE_ROOT" --kind symbols --limit 5 --format json --warn-ms 10000 >/dev/null
 rtk tee -a "$SMOKE_ROOT/main.c" >/dev/null <<'EOF'
 
 static int smoke_added_symbol(void)
@@ -106,6 +119,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function l
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function name:main" "$SMOKE_ROOT" --source all --limit 10 --explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function (name:main or name:smoke_added_symbol) not path:target" "$SMOKE_ROOT" --source all --limit 10 --explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function text:main" "$SMOKE_ROOT" --source all --limit 10 --timing --warn-ms 10000
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "source:index kind:function text:main" "$SMOKE_ROOT" --source all --limit 10 --profile --format json --warn-ms 10000 >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:smoke_added_symbol" "$SMOKE_ROOT" --source index --limit 10
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "name:smoke_.*" "$SMOKE_ROOT" --source index --mode regex --macro functions --limit 10 --score-explain
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function name:main" --source index --mode exact --save "$QUERY_NAME" --limit 1
@@ -135,6 +149,8 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph imports "$SMOKE_
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph modules "$SMOKE_ROOT" --limit 5 --format dot --depth 2
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph calls "$SMOKE_ROOT" --limit 5 --format json --fanout 4
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format text --fallback index
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format json --fallback index --cache --refresh-cache >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format json --fallback index --cache >/dev/null
 if rtk clangd --version >/dev/null 2>&1; then
 	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs graph semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --format text
 	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "name:main" "$SMOKE_ROOT" --source semantic --limit 10
@@ -204,6 +220,8 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke targ
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap from-trace "$TRACE_SESSION_NAME" target/debug/fcs --name "${DAP_PROFILE_NAME}-trace" --directory "$SMOKE_ROOT" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap save-profile "$DAP_PROFILE_NAME" target/debug/fcs -b src/main.rs:1 --directory "$SMOKE_ROOT" -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap profiles "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap doctor "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap doctor "$SMOKE_ROOT" --name "$DAP_PROFILE_NAME" --format text
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap request-profile "$DAP_PROFILE_NAME" --directory "$SMOKE_ROOT" --bundle
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor "$SMOKE_ROOT"

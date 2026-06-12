@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -8,12 +9,33 @@ use serde::{Deserialize, Serialize};
 use crate::core::{CodeItem, Location};
 use crate::errors::{AppError, Result};
 
+const SEMANTIC_GRAPH_CACHE_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
     pub kind: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct SemanticGraphCacheKey {
+    pub target: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub relation: String,
+    pub depth: usize,
+    pub fanout: usize,
+    pub exclude: Vec<String>,
+    pub fallback: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticGraphCacheEntry {
+    pub version: u32,
+    pub key: SemanticGraphCacheKey,
+    pub edges: Vec<GraphEdge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +181,68 @@ pub fn format_edges(edges: &[GraphEdge], format: GraphFormat) -> Result<String> 
         GraphFormat::Mermaid => Ok(format_edges_mermaid(edges)),
         GraphFormat::Dot => Ok(format_edges_dot(edges)),
     }
+}
+
+pub fn semantic_cache_key(
+    root: &Path,
+    location: &Location,
+    relation: &str,
+    options: &GraphOptions,
+    fallback: &str,
+) -> SemanticGraphCacheKey {
+    SemanticGraphCacheKey {
+        target: relative_path(&normalize_root(root), location.path()),
+        line: location.line,
+        column: location.column,
+        relation: relation.to_string(),
+        depth: options.depth,
+        fanout: options.fanout,
+        exclude: options.exclude.clone(),
+        fallback: fallback.to_string(),
+    }
+}
+
+pub fn load_semantic_cache(root: &Path, key: &SemanticGraphCacheKey) -> Result<Option<Vec<GraphEdge>>> {
+    let path = semantic_cache_path(root, key)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&path)?;
+    let entry = serde_json::from_str::<SemanticGraphCacheEntry>(&contents)
+        .map_err(|err| AppError::General(format!("Corrupt semantic graph cache {}: {err}", path.display())))?;
+    if entry.version != SEMANTIC_GRAPH_CACHE_VERSION || &entry.key != key {
+        return Ok(None);
+    }
+    Ok(Some(entry.edges))
+}
+
+pub fn store_semantic_cache(root: &Path, key: &SemanticGraphCacheKey, edges: &[GraphEdge]) -> Result<PathBuf> {
+    let path = semantic_cache_path(root, key)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let entry = SemanticGraphCacheEntry {
+        version: SEMANTIC_GRAPH_CACHE_VERSION,
+        key: key.clone(),
+        edges: edges.to_vec(),
+    };
+    let mut contents = serde_json::to_string_pretty(&entry).map_err(|err| AppError::General(err.to_string()))?;
+    contents.push('\n');
+    fs::write(&path, contents)?;
+    Ok(path)
+}
+
+fn semantic_cache_path(root: &Path, key: &SemanticGraphCacheKey) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?
+        .join("semantic_graph")
+        .join(format!("{:016x}.json", semantic_cache_hash(key))))
+}
+
+fn semantic_cache_hash(key: &SemanticGraphCacheKey) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn apply_fanout(edges: impl Iterator<Item = GraphEdge>, fanout: usize) -> Vec<GraphEdge> {

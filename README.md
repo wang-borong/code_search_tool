@@ -90,7 +90,12 @@ fcs tui --mode symbols --query handle
 
 # 指定 debug 面板使用的二进制
 fcs tui --debug-binary target/debug/app
+
+# 非交互回放 TUI 命令脚本，适合回归测试和录制追踪流程
+fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 ```
+
+`tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>` 和 `wait <ms>`。空行和 `#` 注释会被忽略；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation 时加 `--persist`。
 
 #### TUI 快捷键
 
@@ -239,6 +244,12 @@ fcs index shard-query parse_config . --kind symbols --limit 20
 # 查询缓存索引，不重新扫描项目
 fcs index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
 
+# 只检查主索引和 shard cache 健康状态，不做重建
+fcs index verify . --format json
+
+# 记录 status/stats/list/query/shard-query 各阶段延迟
+fcs index profile parse_config . --kind symbols --limit 20 --format json --warn-ms 200
+
 # 修复 stale/corrupt/missing index；--force 可强制重建
 fcs index repair
 
@@ -284,6 +295,9 @@ fcs query "kind:function (name:parse or name:init) not path:target" . --source a
 # 输出慢查询观测信息
 fcs query "source:index kind:function text:main" . --source all --timing --warn-ms 200
 
+# 输出聚合 profile 报告，便于定位 source 选择、过滤器和结果分布
+fcs query "source:index kind:function text:main" . --source all --profile --format json --warn-ms 200
+
 # 切换匹配模式、使用内置 macro，并在结果 detail 中输出 score
 fcs query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
 fcs query "kind:function name:parse_config" . --source index --mode exact
@@ -301,7 +315,7 @@ fcs query "name:parse_config" . --source semantic
 fcs query "kind:function text:main" . --source auto
 ```
 
-`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--mode fuzzy|exact|regex` 可在快速模糊匹配、严格 token 匹配和正则匹配之间切换；`--macro functions|tests|todo|rust|c|debug` 用于把常见过滤器拼进表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
+`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--profile` 会执行查询并输出 source/kind 分布、实际 execution plan、filters、macro 和耗时，适合给慢查询或复杂过滤做回归基线。`--mode fuzzy|exact|regex` 可在快速模糊匹配、严格 token 匹配和正则匹配之间切换；`--macro functions|tests|todo|rust|c|debug` 用于把常见过滤器拼进表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
 
 `fcs service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
 
@@ -415,6 +429,8 @@ fcs lsp health --file src/main.c
 fcs graph semantic src/main.c:42:5 --relation outgoing --format text
 fcs graph semantic src/main.c:42:5 --relation references --format json
 fcs graph semantic src/main.c:42:5 --relation outgoing --format dot --fanout 20
+fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
+fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache
 
 # Lightweight import/use/mod graph
 fcs graph imports --limit 100 --format text
@@ -428,7 +444,7 @@ fcs graph calls --limit 100 --fanout 8 --format json
 ```
 
 支持的 semantic relation：`references` / `definition` / `type` / `implementation` / `incoming` / `outgoing`。
-支持的 graph format：`text` / `json` / `mermaid` / `dot`。`--fanout` 限制每个 source 的最大出边数，`--exclude` 可重复传入并按 source/target/kind/detail 的子串过滤；`imports/modules --depth` 会在解析到本地模块文件时做有限深度扩展。`calls` 是离线近似调用图，适合快速追踪热点路径，精确语义仍建议使用 LSP-backed `graph semantic`。
+支持的 graph format：`text` / `json` / `mermaid` / `dot`。`--fanout` 限制每个 source 的最大出边数，`--exclude` 可重复传入并按 source/target/kind/detail 的子串过滤；`imports/modules --depth` 会在解析到本地模块文件时做有限深度扩展。`graph semantic --cache` 会把同一 root/location/relation/depth/fanout/filter/fallback 的结果缓存到 workspace cache，`--refresh-cache` 强制刷新后再写入，适合把昂贵的语义追踪步骤纳入 smoke 或诊断脚本。`calls` 是离线近似调用图，适合快速追踪热点路径，精确语义仍建议使用 LSP-backed `graph semantic`。
 
 ---
 
@@ -513,6 +529,10 @@ fcs dap session-smoke target/debug/app -b src/main.c:42 -- --config dev.toml
 # 查看本机可用的 DAP adapter 候选；不会自动安装
 fcs dap adapters
 
+# 检查已保存 DAP profile、断点路径、cwd/program 和本机 adapter 可用性
+fcs dap doctor . --format json
+fcs dap doctor . --name smoke --format text
+
 # 查看内置 adapter 模板和声明的能力标签
 fcs dap templates
 
@@ -521,7 +541,7 @@ fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd
 fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 ```
 
-`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
+`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
@@ -770,6 +790,13 @@ refresh = "r"
 trace = "a"
 breakpoint = "b"
 debug = "D"
+
+[tui.theme]
+# TUI 颜色和语法高亮开关；低色终端可开启 low_color。
+name = "default"
+color = true
+syntax_highlight = true
+low_color = false
 
 [[actions]]
 # 可选。自定义命令动作，项目 `.fcs.toml` 中同名 action 会覆盖全局 action。

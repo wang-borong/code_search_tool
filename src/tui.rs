@@ -8,19 +8,21 @@ mod sources;
 mod state;
 
 use std::cell::RefCell;
+use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::core::{CodeItem, CodeItemKind, Location};
-use crate::errors::Result;
+use crate::errors::{AppError, Result};
 use actions::{action_for_key, goto_action_for_key, AppAction};
 use dap_worker::{DapCommand, DapWorker};
 use lsp_worker::{LspCommand, LspPayload, LspWorker};
@@ -121,6 +123,68 @@ struct AppState {
     should_quit: bool,
     pending_g: bool,
     pending_debug_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuiScriptSummary {
+    pub root: PathBuf,
+    pub mode: String,
+    pub query: String,
+    pub result_count: usize,
+    pub selected_index: Option<usize>,
+    pub selected: Option<TuiScriptItem>,
+    pub status: String,
+    pub status_level: String,
+    pub pending: Vec<String>,
+    pub preview: TuiScriptPreview,
+    pub pinned_count: usize,
+    pub trace_count: usize,
+    pub breakpoint_count: usize,
+    pub navigation_count: usize,
+    pub dap_state: String,
+    pub dap_status: String,
+    pub steps: Vec<TuiScriptStep>,
+}
+
+pub struct TuiScriptOptions {
+    pub config: Config,
+    pub directory: Option<String>,
+    pub mode: Option<String>,
+    pub query: Option<String>,
+    pub debug_binary: Option<String>,
+    pub script: PathBuf,
+    pub step_timeout: Duration,
+    pub persist: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuiScriptItem {
+    pub kind: String,
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub label: String,
+    pub detail: String,
+    pub display: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuiScriptPreview {
+    pub title: String,
+    pub path: Option<PathBuf>,
+    pub target_line: Option<usize>,
+    pub line_count: usize,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuiScriptStep {
+    pub line: usize,
+    pub command: String,
+    pub status: String,
+    pub result_count: usize,
+    pub selected_index: Option<usize>,
+    pub idle: bool,
 }
 
 impl AppState {
@@ -1872,6 +1936,264 @@ pub fn run(
     terminal.show_cursor()?;
 
     result
+}
+
+pub fn run_script(options: TuiScriptOptions) -> Result<TuiScriptSummary> {
+    let script_contents = fs::read_to_string(&options.script)?;
+    let mode = options
+        .mode
+        .as_deref()
+        .map(|value| parse_mode(Some(value)))
+        .transpose()?;
+    let mut app = AppState::new(
+        options.config,
+        options.directory,
+        mode,
+        options.query,
+        options.debug_binary,
+    )?;
+    let mut steps = Vec::new();
+
+    wait_for_script_idle(&mut app, options.step_timeout);
+    for (line_index, raw_line) in script_contents.lines().enumerate() {
+        let line_number = line_index + 1;
+        let command = raw_line.trim();
+        if command.is_empty() || command.starts_with('#') {
+            continue;
+        }
+
+        execute_script_command(&mut app, command)?;
+        let idle = wait_for_script_idle(&mut app, options.step_timeout);
+        steps.push(TuiScriptStep {
+            line: line_number,
+            command: command.to_string(),
+            status: app.status.clone(),
+            result_count: app.results.len(),
+            selected_index: selected_script_index(&app),
+            idle,
+        });
+    }
+
+    if options.persist {
+        app.save_persistent_state()?;
+    }
+
+    Ok(script_summary(&app, steps))
+}
+
+pub fn format_script_summary(summary: &TuiScriptSummary, format: &str) -> Result<String> {
+    match format {
+        "text" => Ok(format_script_summary_text(summary)),
+        "json" => serde_json::to_string_pretty(summary)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|err| AppError::General(err.to_string())),
+        other => Err(AppError::General(format!(
+            "Unsupported TUI script output format: {other}. Use text or json"
+        ))),
+    }
+}
+
+fn execute_script_command(app: &mut AppState, command: &str) -> Result<()> {
+    let command = command.strip_prefix(':').unwrap_or(command).trim();
+    if let Some(rest) = command.strip_prefix("command ") {
+        return app.execute_palette_command(rest.trim());
+    }
+
+    if let Some(rest) = command.strip_prefix("select ") {
+        let index = parse_index(rest)?.saturating_sub(1);
+        if app.results.is_empty() {
+            app.set_warning("No result to select");
+        } else {
+            app.selected = index.min(app.results.len() - 1);
+            app.set_status(format!("Selected result {}", app.selected + 1));
+        }
+        return Ok(());
+    }
+
+    if let Some(rest) = command.strip_prefix("move ") {
+        let delta = rest
+            .trim()
+            .parse::<isize>()
+            .map_err(|err| AppError::General(format!("Invalid script move delta: {err}")))?;
+        app.move_selection(delta);
+        app.set_status(format!("Selected result {}", app.selected + 1));
+        return Ok(());
+    }
+
+    if let Some(rest) = command.strip_prefix("wait") {
+        let timeout_ms = rest.trim();
+        if timeout_ms.is_empty() {
+            return Ok(());
+        }
+        let timeout_ms = timeout_ms
+            .parse::<u64>()
+            .map_err(|err| AppError::General(format!("Invalid script wait milliseconds: {err}")))?;
+        wait_for_script_idle(app, Duration::from_millis(timeout_ms));
+        return Ok(());
+    }
+
+    app.execute_palette_command(command)
+}
+
+fn wait_for_script_idle(app: &mut AppState, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        app.poll_source_worker();
+        app.poll_lsp_worker();
+        app.poll_dap_worker();
+        if app.take_debug_run_request() {
+            app.set_warning("Debugger terminal launch is not available in tui-script");
+        }
+
+        if script_pending(app).is_empty() {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            app.set_warning(format!(
+                "Timed out waiting for TUI workers after {}ms",
+                timeout.as_millis()
+            ));
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn script_summary(app: &AppState, steps: Vec<TuiScriptStep>) -> TuiScriptSummary {
+    let preview_window = app.preview_window_for_current(16);
+    let preview = TuiScriptPreview {
+        title: app.preview_title(),
+        path: (!preview_window.path.as_os_str().is_empty()).then_some(preview_window.path.clone()),
+        target_line: (!preview_window.path.as_os_str().is_empty()).then_some(preview_window.target_line),
+        line_count: preview_window.lines.len(),
+        message: preview_window.message.clone(),
+    };
+
+    TuiScriptSummary {
+        root: app.root.clone(),
+        mode: app.mode.short_label().to_string(),
+        query: app.query.clone(),
+        result_count: app.results.len(),
+        selected_index: selected_script_index(app),
+        selected: app.current_item().map(script_item),
+        status: app.status.clone(),
+        status_level: status_level_label(app.status_level).to_string(),
+        pending: script_pending(app),
+        preview,
+        pinned_count: app.pinned_items.len(),
+        trace_count: app.trace_items.len(),
+        breakpoint_count: app.breakpoints.len(),
+        navigation_count: app.navigation.len(),
+        dap_state: app.dap_snapshot.state.as_str().to_string(),
+        dap_status: app.dap_snapshot.status.clone(),
+        steps,
+    }
+}
+
+fn script_item(item: &CodeItem) -> TuiScriptItem {
+    TuiScriptItem {
+        kind: code_item_kind_label(&item.kind).to_string(),
+        path: item.location.path.clone(),
+        line: item.location.line,
+        column: item.location.column,
+        label: item.label.clone(),
+        detail: item.detail.clone(),
+        display: item.display_text().to_string(),
+    }
+}
+
+fn script_pending(app: &AppState) -> Vec<String> {
+    let mut pending = Vec::new();
+    if app.pending_source.is_some() {
+        pending.push("source".to_string());
+    }
+    if app.pending_lsp.is_some() {
+        pending.push("lsp".to_string());
+    }
+    if app.pending_dap.is_some() {
+        pending.push("dap".to_string());
+    }
+    pending
+}
+
+fn selected_script_index(app: &AppState) -> Option<usize> {
+    (!app.results.is_empty()).then_some(app.selected + 1)
+}
+
+fn code_item_kind_label(kind: &CodeItemKind) -> &'static str {
+    match kind {
+        CodeItemKind::File => "file",
+        CodeItemKind::Symbol => "symbol",
+        CodeItemKind::TextMatch => "text-match",
+    }
+}
+
+fn status_level_label(level: StatusLevel) -> &'static str {
+    match level {
+        StatusLevel::Info => "info",
+        StatusLevel::Warning => "warning",
+        StatusLevel::Error => "error",
+    }
+}
+
+fn format_script_summary_text(summary: &TuiScriptSummary) -> String {
+    let mut output = String::new();
+    output.push_str("TUI script summary\n");
+    output.push_str(&format!("root: {}\n", summary.root.display()));
+    output.push_str(&format!("mode: {}\n", summary.mode));
+    output.push_str(&format!("query: {}\n", summary.query));
+    output.push_str(&format!("results: {}\n", summary.result_count));
+    if let Some(selected) = &summary.selected {
+        output.push_str(&format!(
+            "selected: {} {}\n",
+            summary.selected_index.unwrap_or_default(),
+            selected.display
+        ));
+    } else {
+        output.push_str("selected: none\n");
+    }
+    output.push_str(&format!("status: {} ({})\n", summary.status, summary.status_level));
+    output.push_str(&format!("pending: {}\n", display_script_values(&summary.pending)));
+    output.push_str(&format!(
+        "preview: {} lines={} path={}\n",
+        summary.preview.title,
+        summary.preview.line_count,
+        summary
+            .preview
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    output.push_str(&format!(
+        "counts: pins={} trace={} breakpoints={} navigation={}\n",
+        summary.pinned_count, summary.trace_count, summary.breakpoint_count, summary.navigation_count
+    ));
+    output.push_str(&format!("dap: {} {}\n", summary.dap_state, summary.dap_status));
+    output.push_str("steps:\n");
+    if summary.steps.is_empty() {
+        output.push_str("  none\n");
+    } else {
+        for step in &summary.steps {
+            let idle = if step.idle { "idle" } else { "timeout" };
+            output.push_str(&format!(
+                "  {}: {} [{} results, {}]\n",
+                step.line, step.command, step.result_count, idle
+            ));
+        }
+    }
+    output
+}
+
+fn display_script_values(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
