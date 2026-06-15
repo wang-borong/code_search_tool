@@ -6,16 +6,19 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use crate::config::TuiThemeConfig;
 use crate::core::{CodeItem, CodeItemKind};
 
-use super::{highlight, query_with_cursor, AppState, SourceMode, StatusLevel, HELP_OVERLAY_TEXT, HELP_TEXT};
+use super::{
+    highlight, query_with_cursor, AppState, SourceMode, StatusLevel, TuiLayoutPreset, HELP_OVERLAY_TEXT, HELP_TEXT,
+};
 
 pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     let area = frame.area();
+    let bottom_height = bottom_panel_height(app.layout_preset);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(8),
+            Constraint::Length(bottom_height),
             Constraint::Length(3),
         ])
         .split(area);
@@ -48,9 +51,12 @@ fn selected_style(app: &AppState, fg: Color, bg: Color) -> Style {
 
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let title = format!(
-        " fcs TUI | workspace: {} | mode: {} ",
+        " fcs TUI | workspace: {} | mode: {} | layout: {} | trace: {}:{} ",
         app.root.display(),
-        app.mode.label()
+        app.mode.label(),
+        app.layout_preset.label(),
+        app.active_trace_session,
+        app.trace_view.label()
     );
     let paragraph = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -67,13 +73,10 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_main(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let constraints = main_constraints(app.layout_preset);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(28),
-            Constraint::Percentage(42),
-            Constraint::Percentage(58),
-        ])
+        .constraints(constraints)
         .split(area);
 
     render_sidebar(frame, chunks[0], app);
@@ -162,7 +165,18 @@ fn render_results(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     } else {
         app.selected.saturating_add(1)
     };
-    let title = format!("Results {selected}/{}", app.results.len());
+    let suffix = result_projection_suffix(app);
+    let title = if app.mode == SourceMode::Trace {
+        format!(
+            "Results {selected}/{} trace:{}:{}{}",
+            app.results.len(),
+            app.active_trace_session,
+            app.trace_view.label(),
+            suffix
+        )
+    } else {
+        format!("Results {selected}/{}{}", app.results.len(), suffix)
+    };
     let items = app.results[start..end]
         .iter()
         .enumerate()
@@ -261,13 +275,10 @@ fn status_style(level: StatusLevel, theme: &TuiThemeConfig) -> Style {
 }
 
 fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let constraints = bottom_constraints(app.layout_preset);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
+        .constraints(constraints)
         .split(area);
 
     let trace_lines = app
@@ -276,7 +287,16 @@ fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .take(area.height.saturating_sub(2).max(1) as usize)
         .map(|item| ListItem::new(code_item_line(app, item, false, None)))
         .collect::<Vec<ListItem>>();
-    let trace = List::new(trace_lines).block(Block::default().title("Trace").borders(Borders::ALL));
+    let trace = List::new(trace_lines).block(
+        Block::default()
+            .title(format!(
+                "Trace {}:{} {}",
+                app.active_trace_session,
+                app.trace_view.label(),
+                app.trace_items.len()
+            ))
+            .borders(Borders::ALL),
+    );
     frame.render_widget(trace, chunks[0]);
 
     render_debug_panel(frame, chunks[1], app);
@@ -423,9 +443,11 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .unwrap_or_else(|| "idle".to_string());
     let preview = app.preview_title();
     let counts = format!(
-        "pins: {}  jumps: {}  breakpoints: {}",
+        "pins: {}  jumps: {}  trace: {}:{}  breakpoints: {}",
         app.pinned_items.len(),
         app.navigation.len(),
+        app.active_trace_session,
+        app.trace_view.label(),
         app.breakpoints.len()
     );
     let mut text = vec![
@@ -433,6 +455,7 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         highlight::activity_line("lsp", &lsp, Color::LightBlue, theme(app)),
         highlight::activity_line("dap", &dap, Color::LightMagenta, theme(app)),
         highlight::activity_line("preview", &preview, Color::LightCyan, theme(app)),
+        highlight::activity_line("health", &app.health_summary(), Color::LightYellow, theme(app)),
         Line::from(vec![
             Span::styled(
                 "counts: ",
@@ -451,6 +474,73 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .block(Block::default().title("Activity").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn bottom_panel_height(preset: TuiLayoutPreset) -> u16 {
+    match preset {
+        TuiLayoutPreset::Balanced | TuiLayoutPreset::Search | TuiLayoutPreset::Semantic => 8,
+        TuiLayoutPreset::Debug => 12,
+        TuiLayoutPreset::Trace => 10,
+    }
+}
+
+fn main_constraints(preset: TuiLayoutPreset) -> [Constraint; 3] {
+    match preset {
+        TuiLayoutPreset::Balanced => [
+            Constraint::Length(28),
+            Constraint::Percentage(42),
+            Constraint::Percentage(58),
+        ],
+        TuiLayoutPreset::Search => [
+            Constraint::Length(24),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ],
+        TuiLayoutPreset::Debug => [
+            Constraint::Length(22),
+            Constraint::Percentage(34),
+            Constraint::Percentage(66),
+        ],
+        TuiLayoutPreset::Trace => [
+            Constraint::Length(26),
+            Constraint::Percentage(38),
+            Constraint::Percentage(62),
+        ],
+        TuiLayoutPreset::Semantic => [
+            Constraint::Length(24),
+            Constraint::Percentage(46),
+            Constraint::Percentage(54),
+        ],
+    }
+}
+
+fn bottom_constraints(preset: TuiLayoutPreset) -> [Constraint; 3] {
+    match preset {
+        TuiLayoutPreset::Balanced | TuiLayoutPreset::Search | TuiLayoutPreset::Semantic => [
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ],
+        TuiLayoutPreset::Debug => [
+            Constraint::Percentage(24),
+            Constraint::Percentage(52),
+            Constraint::Percentage(24),
+        ],
+        TuiLayoutPreset::Trace => [
+            Constraint::Percentage(48),
+            Constraint::Percentage(28),
+            Constraint::Percentage(24),
+        ],
+    }
+}
+
+fn result_projection_suffix(app: &AppState) -> String {
+    let filter = app.result_filter_label();
+    let group = app.result_group.label();
+    if filter == "none" && group == "none" {
+        return String::new();
+    }
+    format!(" filter={filter} group={group}")
 }
 
 fn render_query(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {

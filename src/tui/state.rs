@@ -35,6 +35,16 @@ pub(super) struct TuiPersistentState {
     pub(super) preview_scroll: isize,
     #[serde(default)]
     pub(super) command_history: Vec<String>,
+    #[serde(default)]
+    pub(super) active_trace_session: Option<String>,
+    #[serde(default)]
+    pub(super) layout_preset: Option<String>,
+    #[serde(default)]
+    pub(super) trace_view: Option<String>,
+    #[serde(default)]
+    pub(super) result_filter: Option<String>,
+    #[serde(default)]
+    pub(super) result_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +102,11 @@ impl Default for TuiPersistentState {
             locked_preview: None,
             preview_scroll: 0,
             command_history: Vec::new(),
+            active_trace_session: None,
+            layout_preset: None,
+            trace_view: None,
+            result_filter: None,
+            result_group: None,
         }
     }
 }

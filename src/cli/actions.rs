@@ -281,9 +281,14 @@ fn handle_workspace_profile(action: WorkspaceProfileAction) -> Result<(), AppErr
     Ok(())
 }
 
-fn handle_workspace_config_doctor(directory: Option<&String>, strict: bool) -> Result<(), AppError> {
+fn handle_workspace_config_doctor(
+    directory: Option<&String>,
+    strict: bool,
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
-    let diagnostics = fcs::workspace::config_diagnostics(&root)?;
+    let mut diagnostics = fcs::workspace::config_diagnostics(&root)?;
+    diagnostics.extend(runtime_config_diagnostics(&root, config));
     let mut failed = 0usize;
     for diagnostic in &diagnostics {
         if !diagnostic.ok {
@@ -298,6 +303,104 @@ fn handle_workspace_config_doctor(directory: Option<&String>, strict: bool) -> R
         )));
     }
     Ok(())
+}
+
+fn runtime_config_diagnostics(root: &Path, config: &fcs::config::Config) -> Vec<fcs::workspace::ConfigDiagnostic> {
+    let mut diagnostics = Vec::new();
+    diagnostics.extend(tui_keymap_diagnostics(config));
+    diagnostics.extend(tui_theme_diagnostics(config));
+    diagnostics.extend(dap_profile_diagnostics(root));
+    diagnostics
+}
+
+fn tui_keymap_diagnostics(config: &fcs::config::Config) -> Vec<fcs::workspace::ConfigDiagnostic> {
+    let keymap = &config.tui.keymap;
+    let bindings = [
+        ("command_palette", keymap.command_palette.as_str()),
+        ("query", keymap.query.as_str()),
+        ("open", keymap.open.as_str()),
+        ("refresh", keymap.refresh.as_str()),
+        ("trace", keymap.trace.as_str()),
+        ("breakpoint", keymap.breakpoint.as_str()),
+        ("debug", keymap.debug.as_str()),
+    ];
+    let mut diagnostics = Vec::new();
+    for (name, value) in bindings {
+        diagnostics.push(fcs::workspace::ConfigDiagnostic {
+            name: format!("tui-key:{name}"),
+            ok: !value.trim().is_empty(),
+            detail: value.to_string(),
+        });
+    }
+
+    let mut by_key = BTreeMap::<String, Vec<&str>>::new();
+    for (name, value) in bindings {
+        if !value.trim().is_empty() {
+            by_key.entry(value.to_string()).or_default().push(name);
+        }
+    }
+    for (key, names) in by_key {
+        if names.len() > 1 {
+            diagnostics.push(fcs::workspace::ConfigDiagnostic {
+                name: format!("tui-key-conflict:{key}"),
+                ok: false,
+                detail: names.join(", "),
+            });
+        }
+    }
+    diagnostics
+}
+
+fn tui_theme_diagnostics(config: &fcs::config::Config) -> Vec<fcs::workspace::ConfigDiagnostic> {
+    let theme = &config.tui.theme;
+    vec![
+        fcs::workspace::ConfigDiagnostic {
+            name: "tui-theme-name".to_string(),
+            ok: !theme.name.trim().is_empty(),
+            detail: format!("{} (name is currently informational)", theme.name),
+        },
+        fcs::workspace::ConfigDiagnostic {
+            name: "tui-theme-color".to_string(),
+            ok: theme.color || (!theme.syntax_highlight && !theme.low_color),
+            detail: format!(
+                "color={} syntax_highlight={} low_color={}",
+                theme.color, theme.syntax_highlight, theme.low_color
+            ),
+        },
+    ]
+}
+
+fn dap_profile_diagnostics(root: &Path) -> Vec<fcs::workspace::ConfigDiagnostic> {
+    let profiles = fcs::dap::list_profiles(root).unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    let mut names = BTreeMap::<String, usize>::new();
+    for profile in &profiles {
+        *names.entry(profile.name.clone()).or_default() += 1;
+        diagnostics.push(fcs::workspace::ConfigDiagnostic {
+            name: format!("dap-profile:{}", profile.name),
+            ok: !profile.name.trim().is_empty()
+                && !profile.adapter.trim().is_empty()
+                && (!profile.program.as_os_str().is_empty() || profile.process_id.is_some()),
+            detail: format!(
+                "adapter={} request={} program={} process_id={:?} breakpoints={}",
+                profile.adapter,
+                profile.request,
+                profile.program.display(),
+                profile.process_id,
+                profile.breakpoints.len()
+            ),
+        });
+    }
+    for (name, count) in names {
+        if count > 1 {
+            diagnostics.push(fcs::workspace::ConfigDiagnostic {
+                name: format!("dap-profile-conflict:{name}"),
+                ok: false,
+                detail: format!("{count} profile entries share this name"),
+            });
+        }
+    }
+    diagnostics
 }
 
 fn handle_workspace_config_schema(format: &str) -> Result<(), AppError> {
@@ -1465,10 +1568,49 @@ fn handle_bench_trace(format: &str, warn_ms: Option<u128>) -> Result<(), AppErro
     handle_bench_report(report, format, warn_ms)
 }
 
+fn handle_bench_tui(
+    directory: Option<&String>,
+    format: &str,
+    warn_ms: Option<u128>,
+    query: &str,
+    options: &[String],
+    config: &fcs::config::Config,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let root_arg = root.to_string_lossy().to_string();
+    let ignore_path = resolve_ignore_file(Some(&root_arg));
+    let report = fcs::bench::run_tui_sources(&root, query, options, &config.search.ignore, &ignore_path)?;
+    handle_bench_report(report, format, warn_ms)
+}
+
 fn handle_bench_preview(target: &str, format: &str, warn_ms: Option<u128>) -> Result<(), AppError> {
     let (path, _line, _height) = parse_preview_arg(target)?;
     let report = fcs::bench::run_preview_read(Path::new(&path))?;
     handle_bench_report(report, format, warn_ms)
+}
+
+fn handle_bench_baseline(directory: Option<&String>) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let path = fcs::bench::save_baseline(&root)?;
+    println!("Saved benchmark baseline: {}", path.display());
+    Ok(())
+}
+
+fn handle_bench_compare(
+    directory: Option<&String>,
+    format: &str,
+    threshold_ms: u128,
+    threshold_percent: u128,
+    strict: bool,
+) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let comparison = fcs::bench::compare_to_baseline(&root, threshold_ms, threshold_percent)?;
+    let failed = !comparison.regressions.is_empty();
+    print!("{}", fcs::bench::format_comparison(&comparison, format)?);
+    if strict && failed {
+        return Err(AppError::General("Benchmark regression threshold exceeded".to_string()));
+    }
+    Ok(())
 }
 
 fn handle_definition(target: &str, directory: Option<&String>, config: &fcs::config::Config) -> Result<(), AppError> {
@@ -1920,6 +2062,9 @@ struct SemanticGraphResult {
     location: Location,
     edges: Vec<fcs::graph::GraphEdge>,
     cache_hit: bool,
+    provider: String,
+    fallback_reason: Option<String>,
+    confidence: String,
 }
 
 fn load_semantic_graph(input: SemanticGraphQuery<'_>) -> Result<SemanticGraphResult, AppError> {
@@ -1945,19 +2090,38 @@ fn load_semantic_graph(input: SemanticGraphQuery<'_>) -> Result<SemanticGraphRes
                 location,
                 edges,
                 cache_hit: true,
+                provider: "cache".to_string(),
+                fallback_reason: None,
+                confidence: "cached".to_string(),
             });
         }
     }
     let items = run_semantic_relation(&location, &root, input.relation, input.config);
+    let mut provider = "lsp".to_string();
+    let mut fallback_reason = None;
+    let mut confidence = "high".to_string();
     let edges = match items {
-        Ok(items) if !items.is_empty() => {
-            fcs::graph::apply_options(&fcs::graph::lsp_edges(&location, input.relation, &items), &options)
-        }
+        Ok(items) if !items.is_empty() => semantic_lsp_edges_recursive(
+            &root,
+            &location,
+            input.relation,
+            items,
+            input.depth,
+            input.config,
+            &options,
+        )?,
         Ok(_) if input.fallback == "index" => {
+            provider = "index".to_string();
+            fallback_reason = Some("lsp returned no edges".to_string());
+            confidence = "medium".to_string();
             fcs::graph::index_fallback_edges(&root, &location, input.relation, "lsp returned no edges", &options)?
         }
         Err(err) if input.fallback == "index" => {
-            fcs::graph::index_fallback_edges(&root, &location, input.relation, &err.to_string(), &options)?
+            let reason = err.to_string();
+            provider = "index".to_string();
+            fallback_reason = Some(reason.clone());
+            confidence = "medium".to_string();
+            fcs::graph::index_fallback_edges(&root, &location, input.relation, &reason, &options)?
         }
         Ok(_) => Vec::new(),
         Err(err) => return Err(err),
@@ -1970,6 +2134,9 @@ fn load_semantic_graph(input: SemanticGraphQuery<'_>) -> Result<SemanticGraphRes
         location,
         edges,
         cache_hit: false,
+        provider,
+        fallback_reason,
+        confidence,
     })
 }
 
@@ -1991,6 +2158,63 @@ fn run_semantic_relation(
             "Unsupported semantic graph relation: {other}"
         ))),
     }
+}
+
+fn semantic_lsp_edges_recursive(
+    root: &Path,
+    origin: &Location,
+    relation: &str,
+    first_items: Vec<CodeItem>,
+    depth: usize,
+    config: &fcs::config::Config,
+    options: &fcs::graph::GraphOptions,
+) -> Result<Vec<fcs::graph::GraphEdge>, AppError> {
+    if depth <= 1 {
+        return Ok(fcs::graph::apply_options(
+            &fcs::graph::lsp_edges(origin, relation, &first_items),
+            options,
+        ));
+    }
+
+    let mut edges = Vec::new();
+    let mut queue = Vec::<(Location, usize, Option<Vec<CodeItem>>)>::new();
+    let mut visited = BTreeSet::<String>::new();
+    queue.push((origin.clone(), 1, Some(first_items)));
+    visited.insert(location_display(origin));
+
+    while let Some((location, level, seeded_items)) = queue.pop() {
+        if level > depth {
+            continue;
+        }
+        let items = match seeded_items {
+            Some(items) => items,
+            None => match run_semantic_relation(&location, root, relation, config) {
+                Ok(items) => items,
+                Err(_) => continue,
+            },
+        };
+        let hop_options = fcs::graph::GraphOptions {
+            limit: usize::MAX,
+            depth: 1,
+            fanout: options.fanout,
+            exclude: options.exclude.clone(),
+        };
+        let hop_edges = fcs::graph::apply_options(&fcs::graph::lsp_edges(&location, relation, &items), &hop_options);
+        for edge in hop_edges {
+            if edges.len() >= options.limit {
+                break;
+            }
+            if let Some(next_location) = graph_edge_location(root, &edge.to) {
+                let key = location_display(&next_location);
+                if level < depth && visited.insert(key) {
+                    queue.push((next_location, level + 1, None));
+                }
+            }
+            edges.push(edge);
+        }
+    }
+
+    Ok(fcs::graph::apply_options(&edges, options))
 }
 
 fn handle_graph_imports(
@@ -2102,6 +2326,7 @@ fn handle_trace_add(
     let label = label
         .cloned()
         .unwrap_or_else(|| format!("{}:{}", location.path.display(), location.line.unwrap_or(1)));
+    let session = fcs::trace::resolve_session(session)?;
     let metadata = fcs::trace::TraceMetadata {
         session,
         parent,
@@ -2117,7 +2342,11 @@ fn handle_trace_add(
 }
 
 struct TraceSemanticInput<'a> {
-    target: &'a str,
+    target: Option<&'a String>,
+    targets_file: Option<&'a String>,
+    from_query: Option<&'a String>,
+    query_source: &'a str,
+    query_limit: usize,
     relation: &'a str,
     session: Option<String>,
     parent: Option<String>,
@@ -2138,54 +2367,133 @@ struct TraceSemanticInput<'a> {
 struct TraceSemanticReport {
     session: String,
     relation: String,
+    target_count: usize,
+    edge_count: usize,
+    recorded_entries: usize,
+    reused_entries: usize,
+    skipped_edges: usize,
+    sources: Vec<TraceSemanticSourceReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceSemanticSourceReport {
     source: String,
     source_id: String,
     edge_count: usize,
     recorded_entries: usize,
+    reused_entries: usize,
     skipped_edges: usize,
     cache_hit: bool,
+    provider: String,
+    confidence: String,
+    fallback_reason: Option<String>,
 }
 
 fn handle_trace_semantic(input: TraceSemanticInput<'_>) -> Result<(), AppError> {
-    let semantic = load_semantic_graph(SemanticGraphQuery {
-        target: input.target,
-        relation: input.relation,
-        depth: input.depth,
-        fanout: input.fanout,
-        exclude: input.exclude,
-        fallback: input.fallback,
-        cache: input.cache,
-        refresh_cache: input.refresh_cache,
-        directory: input.directory,
-        config: input.config,
-    })?;
-    let session = input.session.unwrap_or_else(|| format!("semantic:{}", input.relation));
+    let targets = semantic_trace_targets(&input)?;
+    let session =
+        fcs::trace::resolve_session(input.session.clone())?.unwrap_or_else(|| format!("semantic:{}", input.relation));
+    let mut sources = Vec::new();
+    for target in &targets {
+        let semantic = load_semantic_graph(SemanticGraphQuery {
+            target,
+            relation: input.relation,
+            depth: input.depth,
+            fanout: input.fanout,
+            exclude: input.exclude,
+            fallback: input.fallback,
+            cache: input.cache,
+            refresh_cache: input.refresh_cache,
+            directory: input.directory,
+            config: input.config,
+        })?;
+        sources.push(record_semantic_trace_source(&input, &session, semantic)?);
+    }
+
+    let edge_count = sources.iter().map(|source| source.edge_count).sum();
+    let recorded_entries = sources.iter().map(|source| source.recorded_entries).sum();
+    let reused_entries = sources.iter().map(|source| source.reused_entries).sum();
+    let skipped_edges = sources.iter().map(|source| source.skipped_edges).sum();
+    let report = TraceSemanticReport {
+        session,
+        relation: input.relation.to_string(),
+        target_count: targets.len(),
+        edge_count,
+        recorded_entries,
+        reused_entries,
+        skipped_edges,
+        sources,
+    };
+    match input.format {
+        "text" => {
+            println!(
+                "Recorded semantic trace: session={} relation={} targets={} edges={} inserted={} reused={} skipped={}",
+                report.session,
+                report.relation,
+                report.target_count,
+                report.edge_count,
+                report.recorded_entries,
+                report.reused_entries,
+                report.skipped_edges
+            );
+            for source in &report.sources {
+                println!(
+                    "  {} provider={} confidence={} edges={} inserted={} reused={} cache_hit={}",
+                    source.source,
+                    source.provider,
+                    source.confidence,
+                    source.edge_count,
+                    source.recorded_entries,
+                    source.reused_entries,
+                    source.cache_hit
+                );
+            }
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported trace semantic format: {other}"))),
+    }
+    Ok(())
+}
+
+fn record_semantic_trace_source(
+    input: &TraceSemanticInput<'_>,
+    session: &str,
+    semantic: SemanticGraphResult,
+) -> Result<TraceSemanticSourceReport, AppError> {
     let source_label = format!("semantic {}: {}", input.relation, location_display(&semantic.location));
     let tags = semantic_trace_tags(input.relation, &input.tags);
     let root_metadata = fcs::trace::TraceMetadata {
-        session: Some(session.clone()),
-        parent: input.parent,
+        session: Some(session.to_string()),
+        parent: input.parent.clone(),
         branch: input.branch.clone(),
         tags: tags.clone(),
         note: Some(format!(
-            "relation={} edges={} fallback={} cache_hit={}",
+            "relation={} edges={} provider={} confidence={} fallback={} cache_hit={} reason={}",
             input.relation,
             semantic.edges.len(),
+            semantic.provider,
+            semantic.confidence,
             input.fallback,
-            semantic.cache_hit
+            semantic.cache_hit,
+            semantic.fallback_reason.as_deref().unwrap_or("-")
         )),
         status: Some("observed".to_string()),
         priority: None,
     };
-    let source_id = fcs::trace::record_location_for_workspace_with_metadata_and_id(
+    let source_record = fcs::trace::record_location_for_workspace_with_metadata_dedup(
         &semantic.root,
         &semantic.location,
         &source_label,
         "semantic-root",
         root_metadata,
     )?;
+    let source_id = source_record.id;
 
-    let mut recorded_entries = 1;
+    let mut recorded_entries = usize::from(source_record.inserted);
+    let mut reused_entries = usize::from(!source_record.inserted);
     let mut skipped_edges = 0;
     for edge in &semantic.edges {
         let Some(target_location) = graph_edge_location(&semantic.root, &edge.to) else {
@@ -2193,7 +2501,7 @@ fn handle_trace_semantic(input: TraceSemanticInput<'_>) -> Result<(), AppError> 
             continue;
         };
         let metadata = fcs::trace::TraceMetadata {
-            session: Some(session.clone()),
+            session: Some(session.to_string()),
             parent: Some(source_id.clone()),
             branch: input.branch.clone(),
             tags: tags.clone(),
@@ -2206,46 +2514,91 @@ fn handle_trace_semantic(input: TraceSemanticInput<'_>) -> Result<(), AppError> 
         } else {
             edge.detail.clone()
         };
-        fcs::trace::record_location_for_workspace_with_metadata(
+        let record = fcs::trace::record_location_for_workspace_with_metadata_dedup(
             &semantic.root,
             &target_location,
             &label,
             &format!("semantic:{}", input.relation),
             metadata,
         )?;
-        recorded_entries += 1;
+        if record.inserted {
+            recorded_entries += 1;
+        } else {
+            reused_entries += 1;
+        }
     }
 
-    let report = TraceSemanticReport {
-        session,
-        relation: input.relation.to_string(),
+    Ok(TraceSemanticSourceReport {
         source: location_display(&semantic.location),
         source_id,
         edge_count: semantic.edges.len(),
         recorded_entries,
+        reused_entries,
         skipped_edges,
         cache_hit: semantic.cache_hit,
-    };
-    match input.format {
-        "text" => {
-            println!(
-                "Recorded semantic trace: session={} relation={} source={} edges={} entries={} skipped={} cache_hit={}",
-                report.session,
-                report.relation,
-                report.source,
-                report.edge_count,
-                report.recorded_entries,
-                report.skipped_edges,
-                report.cache_hit
-            );
-        }
-        "json" => println!(
-            "{}",
-            serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
-        ),
-        other => return Err(AppError::General(format!("Unsupported trace semantic format: {other}"))),
+        provider: semantic.provider,
+        confidence: semantic.confidence,
+        fallback_reason: semantic.fallback_reason,
+    })
+}
+
+fn semantic_trace_targets(input: &TraceSemanticInput<'_>) -> Result<Vec<String>, AppError> {
+    let mut targets = Vec::new();
+    if let Some(target) = input.target {
+        push_unique_target(&mut targets, target);
     }
-    Ok(())
+    if let Some(path) = input.targets_file {
+        let contents = fs::read_to_string(path)?;
+        for line in contents.lines() {
+            let target = line.trim();
+            if !target.is_empty() && !target.starts_with('#') {
+                push_unique_target(&mut targets, target);
+            }
+        }
+    }
+    if let Some(expression) = input.from_query {
+        let root = fcs::workspace::resolve_root(input.directory)?;
+        let source = fcs::query::QuerySource::parse(input.query_source)?;
+        let options = fcs::query::QueryRunOptions {
+            mode: fcs::query::QueryMode::Fuzzy,
+            macros: Vec::new(),
+            score_explain: false,
+        };
+        let matches = fcs::query::run_with_options(
+            &root,
+            expression,
+            source,
+            input.query_limit,
+            Some(&input.config.lsp),
+            &options,
+        )?;
+        for item in matches {
+            let path = if item.path.is_absolute() {
+                item.path
+            } else {
+                root.join(item.path)
+            };
+            let line = item.line.unwrap_or(1);
+            let target = item
+                .column
+                .map(|column| format!("{}:{line}:{column}", path.display()))
+                .unwrap_or_else(|| format!("{}:{line}", path.display()));
+            push_unique_target(&mut targets, &target);
+        }
+    }
+    if targets.is_empty() {
+        return Err(AppError::General(
+            "trace semantic needs a target, --targets-file, or --from-query".to_string(),
+        ));
+    }
+    Ok(targets)
+}
+
+fn push_unique_target(targets: &mut Vec<String>, target: &str) {
+    let target = target.trim();
+    if !target.is_empty() && !targets.iter().any(|existing| existing == target) {
+        targets.push(target.to_string());
+    }
 }
 
 fn semantic_trace_tags(relation: &str, user_tags: &[String]) -> Vec<String> {
@@ -2365,14 +2718,38 @@ fn handle_trace_open(config: &fcs::config::Config) -> Result<(), AppError> {
 }
 
 fn handle_trace_sessions(include_archived: bool) -> Result<(), AppError> {
+    let active = fcs::trace::active_session()?;
     let sessions = fcs::trace::list_sessions(include_archived)?;
     if sessions.is_empty() {
-        println!("No trace sessions");
+        if let Some(active) = active {
+            println!("Active trace session: {active}");
+        } else {
+            println!("No trace sessions");
+        }
         return Ok(());
     }
 
     for session in sessions {
-        println!("{}", fcs::trace::format_session(&session));
+        let marker = if active.as_deref() == Some(session.name.as_str()) {
+            " [current]"
+        } else {
+            ""
+        };
+        println!("{}{}", fcs::trace::format_session(&session), marker);
+    }
+    Ok(())
+}
+
+fn handle_trace_use(session: &str) -> Result<(), AppError> {
+    fcs::trace::set_active_session(session)?;
+    println!("Active trace session: {}", session.trim());
+    Ok(())
+}
+
+fn handle_trace_current() -> Result<(), AppError> {
+    match fcs::trace::active_session()? {
+        Some(session) => println!("Active trace session: {session}"),
+        None => println!("No active trace session"),
     }
     Ok(())
 }
@@ -2539,22 +2916,88 @@ fn handle_trace_diff(
     right_session: &str,
     directory: Option<&String>,
     format: &str,
+    filter: &str,
 ) -> Result<(), AppError> {
     let root = match directory {
         Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
         None => None,
     };
+    let filter = fcs::trace::TraceDiffFilter::parse(filter)?;
     match format {
         "markdown" | "md" => print!(
             "{}",
-            fcs::trace::export_session_diff_markdown(left_session, right_session, root.as_deref())?
+            fcs::trace::export_session_diff_markdown_filtered(left_session, right_session, root.as_deref(), filter)?
         ),
         "json" => print!(
             "{}",
-            fcs::trace::export_session_diff_json(left_session, right_session, root.as_deref())?
+            fcs::trace::export_session_diff_json_filtered(left_session, right_session, root.as_deref(), filter)?
         ),
         other => {
             return Err(AppError::General(format!("Unsupported trace diff format: {other}")));
+        }
+    }
+    Ok(())
+}
+
+fn handle_trace_verify(directory: Option<&String>, format: &str, strict: bool) -> Result<(), AppError> {
+    let root = match directory {
+        Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
+        None => None,
+    };
+    let check = fcs::trace::verify_store(root.as_deref())?;
+    match format {
+        "text" => {
+            println!("trace_store_ok: {}", check.ok);
+            println!("entries: {}", check.entries);
+            println!("missing_ids: {}", check.missing_ids);
+            println!("duplicate_ids: {}", display_list(&check.duplicate_ids));
+            println!("dangling_parents: {}", display_list(&check.dangling_parents));
+            println!("missing_paths: {}", display_paths(&check.missing_paths));
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&check).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported trace verify format: {other}"))),
+    }
+    if strict && !check.ok {
+        return Err(AppError::General("Trace store verification failed".to_string()));
+    }
+    Ok(())
+}
+
+fn handle_trace_repair(directory: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = match directory {
+        Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
+        None => None,
+    };
+    let report = fcs::trace::repair_store(root.as_deref())?;
+    print_trace_store_repair_report(&report, format)
+}
+
+fn handle_trace_compact(format: &str) -> Result<(), AppError> {
+    let report = fcs::trace::compact_store()?;
+    print_trace_store_repair_report(&report, format)
+}
+
+fn print_trace_store_repair_report(report: &fcs::trace::TraceStoreRepairReport, format: &str) -> Result<(), AppError> {
+    match format {
+        "text" => {
+            println!("before_entries: {}", report.before_entries);
+            println!("after_entries: {}", report.after_entries);
+            println!("assigned_ids: {}", report.assigned_ids);
+            println!("removed_duplicate_ids: {}", report.removed_duplicate_ids);
+            println!("removed_dangling_parents: {}", report.removed_dangling_parents);
+            println!("removed_archived_sessions: {}", report.removed_archived_sessions);
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(report).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => {
+            return Err(AppError::General(format!(
+                "Unsupported trace store report format: {other}"
+            )))
         }
     }
     Ok(())
@@ -2803,6 +3246,9 @@ struct DapProfileInput<'a> {
     request: &'a str,
     process_id: Option<u64>,
     breakpoints: &'a [String],
+    break_conditions: &'a [String],
+    break_hits: &'a [String],
+    break_logs: &'a [String],
     cwd: Option<&'a String>,
     env: &'a [String],
     stop_on_entry: bool,
@@ -3172,6 +3618,33 @@ fn handle_dap_request_profile(name: &str, directory: Option<&String>, bundle: bo
     print_dap_request(&profile, bundle)
 }
 
+fn handle_dap_transcript(name: &str, directory: Option<&String>, format: &str) -> Result<(), AppError> {
+    let root = fcs::workspace::resolve_root(directory)?;
+    let profile = fcs::dap::load_profile(&root, name)?;
+    let report = fcs::dap::run_mock_session_smoke(&profile)?;
+    match format {
+        "text" => {
+            println!("profile: {name}");
+            println!("requests: {}", report.request_count);
+            println!("responses: {}", report.response_count);
+            println!("commands:");
+            for command in &report.commands {
+                println!("  - {command}");
+            }
+            println!("events:");
+            for event in &report.events {
+                println!("  - {event}");
+            }
+        }
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|err| AppError::General(err.to_string()))?
+        ),
+        other => return Err(AppError::General(format!("Unsupported DAP transcript format: {other}"))),
+    }
+    Ok(())
+}
+
 fn handle_dap_session_smoke(input: DapProfileInput<'_>) -> Result<(), AppError> {
     let profile = build_dap_profile(input)?;
     let report = fcs::dap::run_mock_session_smoke(&profile)?;
@@ -3255,13 +3728,19 @@ fn build_dap_profile(input: DapProfileInput<'_>) -> Result<fcs::dap::DapLaunchPr
             .unwrap_or("launch")
             .to_string()
     });
-    let breakpoints = input
+    let mut breakpoints = input
         .breakpoints
         .iter()
         .map(|breakpoint| {
             parse_location_arg(breakpoint).map(|location| fcs::dap::DapBreakpoint::from_location(&location))
         })
         .collect::<Result<Vec<fcs::dap::DapBreakpoint>, AppError>>()?;
+    apply_dap_breakpoint_metadata(
+        &mut breakpoints,
+        input.break_conditions,
+        input.break_hits,
+        input.break_logs,
+    )?;
     let env = input
         .env
         .iter()
@@ -3280,6 +3759,67 @@ fn build_dap_profile(input: DapProfileInput<'_>) -> Result<fcs::dap::DapLaunchPr
         breakpoints,
         stop_on_entry: input.stop_on_entry,
     })
+}
+
+fn apply_dap_breakpoint_metadata(
+    breakpoints: &mut [fcs::dap::DapBreakpoint],
+    conditions: &[String],
+    hit_conditions: &[String],
+    log_messages: &[String],
+) -> Result<(), AppError> {
+    apply_dap_breakpoint_field(breakpoints.len(), conditions, "break-condition", |index, value| {
+        breakpoints[index].condition = normalized_breakpoint_field(value);
+    })?;
+    apply_dap_breakpoint_field(breakpoints.len(), hit_conditions, "break-hit", |index, value| {
+        breakpoints[index].hit_condition = normalized_breakpoint_field(value);
+    })?;
+    apply_dap_breakpoint_field(breakpoints.len(), log_messages, "break-log", |index, value| {
+        breakpoints[index].log_message = normalized_breakpoint_field(value);
+    })?;
+    Ok(())
+}
+
+fn apply_dap_breakpoint_field<F>(
+    breakpoint_count: usize,
+    values: &[String],
+    name: &str,
+    mut apply: F,
+) -> Result<(), AppError>
+where
+    F: FnMut(usize, &str),
+{
+    if values.is_empty() {
+        return Ok(());
+    }
+    if breakpoint_count == 0 {
+        return Err(AppError::General(format!(
+            "--{name} requires at least one --break location"
+        )));
+    }
+    if values.len() == 1 {
+        for index in 0..breakpoint_count {
+            apply(index, &values[0]);
+        }
+        return Ok(());
+    }
+    if values.len() != breakpoint_count {
+        return Err(AppError::General(format!(
+            "--{name} count must be 1 or match --break count ({breakpoint_count})"
+        )));
+    }
+    for (index, value) in values.iter().enumerate() {
+        apply(index, value);
+    }
+    Ok(())
+}
+
+fn normalized_breakpoint_field(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value == "-" {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn validate_dap_request(request: &str, process_id: Option<u64>) -> Result<(), AppError> {
@@ -3758,7 +4298,7 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 handle_workspace_profile(action)?;
             }
             WorkspaceAction::ConfigDoctor { directory, strict } => {
-                handle_workspace_config_doctor(directory.as_ref(), strict)?;
+                handle_workspace_config_doctor(directory.as_ref(), strict, &config)?;
             }
             WorkspaceAction::ConfigSchema { format } => {
                 handle_workspace_config_schema(&format)?;
@@ -4032,12 +4572,33 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             BenchAction::Trace { format, warn_ms } => {
                 handle_bench_trace(&format, warn_ms)?;
             }
+            BenchAction::Tui {
+                directory,
+                format,
+                warn_ms,
+                query,
+                option,
+            } => {
+                handle_bench_tui(directory.as_ref(), &format, warn_ms, &query, &option, &config)?;
+            }
             BenchAction::Preview {
                 target,
                 format,
                 warn_ms,
             } => {
                 handle_bench_preview(&target, &format, warn_ms)?;
+            }
+            BenchAction::Baseline { directory } => {
+                handle_bench_baseline(directory.as_ref())?;
+            }
+            BenchAction::Compare {
+                directory,
+                format,
+                threshold_ms,
+                threshold_percent,
+                strict,
+            } => {
+                handle_bench_compare(directory.as_ref(), &format, threshold_ms, threshold_percent, strict)?;
             }
         },
         Commands::Graph { action } => match action {
@@ -4316,6 +4877,10 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             }
             TraceAction::Semantic {
                 target,
+                targets_file,
+                from_query,
+                query_source,
+                query_limit,
                 relation,
                 session,
                 parent,
@@ -4331,7 +4896,11 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 format,
             } => {
                 handle_trace_semantic(TraceSemanticInput {
-                    target: &target,
+                    target: target.as_ref(),
+                    targets_file: targets_file.as_ref(),
+                    from_query: from_query.as_ref(),
+                    query_source: &query_source,
+                    query_limit,
                     relation: &relation,
                     session,
                     parent,
@@ -4377,6 +4946,12 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             }
             TraceAction::Sessions { archived } => {
                 handle_trace_sessions(archived)?;
+            }
+            TraceAction::Use { session } => {
+                handle_trace_use(&session)?;
+            }
+            TraceAction::Current => {
+                handle_trace_current()?;
             }
             TraceAction::Archive { session } => {
                 handle_trace_archive(&session)?;
@@ -4433,8 +5008,43 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 right,
                 directory,
                 format,
+                filter,
             } => {
-                handle_trace_diff(&left, &right, directory.as_ref(), &format)?;
+                handle_trace_diff(&left, &right, directory.as_ref(), &format, &filter)?;
+            }
+            TraceAction::Rename { from, to } => {
+                let report = fcs::trace::rename_session(&from, &to)?;
+                println!(
+                    "Renamed trace session: {from} -> {to} ({} entry(s))",
+                    report.changed_entries
+                );
+            }
+            TraceAction::Merge { from, to } => {
+                let report = fcs::trace::merge_sessions(&from, &to)?;
+                println!(
+                    "Merged trace session: {from} -> {to} ({} entry(s))",
+                    report.changed_entries
+                );
+            }
+            TraceAction::Split { from, to, tag } => {
+                let report = fcs::trace::split_session_by_tag(&from, &tag, &to)?;
+                println!(
+                    "Split trace session: {from} --tag {tag} -> {to} ({} entry(s))",
+                    report.changed_entries
+                );
+            }
+            TraceAction::Verify {
+                directory,
+                format,
+                strict,
+            } => {
+                handle_trace_verify(directory.as_ref(), &format, strict)?;
+            }
+            TraceAction::Repair { directory, format } => {
+                handle_trace_repair(directory.as_ref(), &format)?;
+            }
+            TraceAction::Compact { format } => {
+                handle_trace_compact(&format)?;
             }
             TraceAction::Open => {
                 handle_trace_open(&config)?;
@@ -4456,12 +5066,37 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     }
                 }
             }
-            TraceAction::Graph { directory } => {
+            TraceAction::Graph {
+                directory,
+                format,
+                session,
+                tag,
+                kind,
+                status,
+                priority,
+                relation,
+                collapse_threshold,
+            } => {
                 let root = match directory.as_ref() {
                     Some(directory) => Some(fcs::workspace::resolve_root(Some(directory))?),
                     None => None,
                 };
-                print!("{}", fcs::trace::export_graph(root.as_deref())?);
+                let format = fcs::trace::TraceGraphFormat::parse(&format)?;
+                let options = fcs::trace::TraceGraphOptions {
+                    filter: fcs::trace::TraceEntryFilter {
+                        session,
+                        tag,
+                        kind,
+                        status,
+                        priority,
+                        relation,
+                    },
+                    collapse_threshold,
+                };
+                print!(
+                    "{}",
+                    fcs::trace::export_graph_with_options(root.as_deref(), format, &options)?
+                );
             }
         },
         Commands::History { action } => match action {
@@ -4569,6 +5204,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 process_id,
                 name,
                 breakpoints,
+                break_conditions,
+                break_hits,
+                break_logs,
                 cwd,
                 env,
                 stop_on_entry,
@@ -4583,6 +5221,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         request: &request,
                         process_id,
                         breakpoints: &breakpoints,
+                        break_conditions: &break_conditions,
+                        break_hits: &break_hits,
+                        break_logs: &break_logs,
                         cwd: cwd.as_ref(),
                         env: &env,
                         stop_on_entry,
@@ -4598,6 +5239,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 request,
                 process_id,
                 breakpoints,
+                break_conditions,
+                break_hits,
+                break_logs,
                 directory,
                 cwd,
                 env,
@@ -4612,6 +5256,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         request: &request,
                         process_id,
                         breakpoints: &breakpoints,
+                        break_conditions: &break_conditions,
+                        break_hits: &break_hits,
+                        break_logs: &break_logs,
                         cwd: cwd.as_ref(),
                         env: &env,
                         stop_on_entry,
@@ -4664,6 +5311,13 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             } => {
                 handle_dap_request_profile(&name, directory.as_ref(), bundle)?;
             }
+            DapAction::Transcript {
+                name,
+                directory,
+                format,
+            } => {
+                handle_dap_transcript(&name, directory.as_ref(), &format)?;
+            }
             DapAction::SessionSmoke {
                 program,
                 adapter,
@@ -4671,6 +5325,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 process_id,
                 name,
                 breakpoints,
+                break_conditions,
+                break_hits,
+                break_logs,
                 cwd,
                 env,
                 stop_on_entry,
@@ -4683,6 +5340,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     request: &request,
                     process_id,
                     breakpoints: &breakpoints,
+                    break_conditions: &break_conditions,
+                    break_hits: &break_hits,
+                    break_logs: &break_logs,
                     cwd: cwd.as_ref(),
                     env: &env,
                     stop_on_entry,
@@ -4697,6 +5357,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 process_id,
                 name,
                 breakpoints,
+                break_conditions,
+                break_hits,
+                break_logs,
                 cwd,
                 adapter_env,
                 env,
@@ -4713,6 +5376,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         request: &request,
                         process_id,
                         breakpoints: &breakpoints,
+                        break_conditions: &break_conditions,
+                        break_hits: &break_hits,
+                        break_logs: &break_logs,
                         cwd: cwd.as_ref(),
                         env: &env,
                         stop_on_entry,

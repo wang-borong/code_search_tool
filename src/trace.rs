@@ -221,12 +221,149 @@ pub enum TraceEntryChange {
     NotFound,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceGraphFormat {
+    Text,
+    Json,
+    Mermaid,
+    Dot,
+}
+
+impl TraceGraphFormat {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "text" | "graph" | "markdown" | "md" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            "mermaid" | "mmd" => Ok(Self::Mermaid),
+            "dot" | "graphviz" => Ok(Self::Dot),
+            other => Err(AppError::General(format!(
+                "Unsupported trace graph format: {other}. Use text, json, mermaid, or dot"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceRecordResult {
+    pub id: String,
+    pub inserted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceGraphReport {
+    pub entries: usize,
+    pub nodes: Vec<TraceGraphNode>,
+    pub edges: Vec<TraceGraphEdge>,
+    #[serde(default)]
+    pub collapsed: Vec<TraceGraphCollapse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceGraphNode {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub session: String,
+    pub note: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub branch: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceGraphEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceGraphCollapse {
+    pub id: String,
+    pub entries: usize,
+    pub session: String,
+    pub kind: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TraceEntryFilter {
+    pub session: Option<String>,
+    pub tag: Option<String>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub relation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TraceGraphOptions {
+    pub filter: TraceEntryFilter,
+    pub collapse_threshold: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceDiffFilter {
+    All,
+    Semantic,
+    Bookmark,
+    Debug,
+}
+
+impl TraceDiffFilter {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "all" | "" => Ok(Self::All),
+            "semantic" | "sem" => Ok(Self::Semantic),
+            "bookmark" | "bookmarks" => Ok(Self::Bookmark),
+            "debug" | "dap" => Ok(Self::Debug),
+            other => Err(AppError::General(format!(
+                "Unsupported trace diff filter: {other}. Use all, semantic, bookmark, or debug"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStoreCheck {
+    pub ok: bool,
+    pub entries: usize,
+    pub duplicate_ids: Vec<String>,
+    pub missing_ids: usize,
+    pub dangling_parents: Vec<String>,
+    pub missing_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStoreRepairReport {
+    pub before_entries: usize,
+    pub after_entries: usize,
+    pub assigned_ids: usize,
+    pub removed_duplicate_ids: usize,
+    pub removed_dangling_parents: usize,
+    pub removed_archived_sessions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceSessionEditReport {
+    pub changed_entries: usize,
+    pub removed_entries: usize,
+    pub created_session: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct TraceStore {
     #[serde(default)]
     entries: Vec<TraceEntry>,
     #[serde(default)]
     archived_sessions: Vec<ArchivedTraceSession>,
+    #[serde(default)]
+    active_session: Option<String>,
 }
 
 pub fn record_code_item(item: &CodeItem, kind: &str) -> Result<()> {
@@ -274,6 +411,16 @@ pub fn record_location_for_workspace_with_metadata_and_id(
     record_location_with_workspace_and_metadata(Some(root), location, label, kind, metadata)
 }
 
+pub fn record_location_for_workspace_with_metadata_dedup(
+    root: &Path,
+    location: &Location,
+    label: &str,
+    kind: &str,
+    metadata: TraceMetadata,
+) -> Result<TraceRecordResult> {
+    record_location_with_workspace_and_metadata_dedup(Some(root), location, label, kind, metadata)
+}
+
 fn record_location_with_workspace(root: Option<&Path>, location: &Location, label: &str, kind: &str) -> Result<()> {
     record_location_with_workspace_and_metadata(root, location, label, kind, TraceMetadata::default()).map(|_| ())
 }
@@ -309,6 +456,44 @@ fn record_location_with_workspace_and_metadata(
     Ok(id)
 }
 
+fn record_location_with_workspace_and_metadata_dedup(
+    root: Option<&Path>,
+    location: &Location,
+    label: &str,
+    kind: &str,
+    metadata: TraceMetadata,
+) -> Result<TraceRecordResult> {
+    let mut store = load_store()?;
+    if let Some(existing) = duplicate_entry_id(&store.entries, root, location, label, kind, &metadata) {
+        return Ok(TraceRecordResult {
+            id: existing,
+            inserted: false,
+        });
+    }
+
+    let timestamp = now_secs();
+    let id = format!("{}-{}", timestamp, store.entries.len() + 1);
+    store.entries.push(TraceEntry {
+        id: id.clone(),
+        timestamp,
+        workspace: root.map(Path::to_path_buf),
+        kind: kind.to_string(),
+        label: label.to_string(),
+        path: location.path.clone(),
+        line: location.line,
+        column: location.column,
+        note: metadata.note,
+        status: metadata.status,
+        priority: metadata.priority,
+        session: metadata.session,
+        parent: metadata.parent,
+        branch: metadata.branch,
+        tags: metadata.tags,
+    });
+    save_store(&store)?;
+    Ok(TraceRecordResult { id, inserted: true })
+}
+
 pub fn list() -> Result<Vec<TraceEntry>> {
     sorted_entries(load_store()?.entries)
 }
@@ -317,12 +502,42 @@ pub fn list_for_workspace(root: &Path) -> Result<Vec<TraceEntry>> {
     entries_for_workspace(load_store()?.entries, root)
 }
 
+pub fn list_filtered(root: Option<&Path>, filter: &TraceEntryFilter) -> Result<Vec<TraceEntry>> {
+    let entries = match root {
+        Some(root) => list_for_workspace(root)?,
+        None => list()?,
+    };
+    Ok(entries
+        .into_iter()
+        .filter(|entry| trace_entry_matches_filter(entry, filter))
+        .collect())
+}
+
 pub fn list_sessions(include_archived: bool) -> Result<Vec<TraceSessionSummary>> {
     let store = load_store()?;
     Ok(summarize_sessions(&store.entries, &store.archived_sessions)
         .into_iter()
         .filter(|summary| include_archived || !summary.is_archived())
         .collect())
+}
+
+pub fn active_session() -> Result<Option<String>> {
+    Ok(load_store()?.active_session)
+}
+
+pub fn set_active_session(name: &str) -> Result<()> {
+    let name = normalize_session_value(name)
+        .ok_or_else(|| AppError::General("Trace session name cannot be empty".to_string()))?;
+    let mut store = load_store()?;
+    store.active_session = Some(name);
+    save_store(&store)
+}
+
+pub fn resolve_session(session: Option<String>) -> Result<Option<String>> {
+    match session.and_then(|value| normalize_session_value(&value)) {
+        Some(session) => Ok(Some(session)),
+        None => active_session(),
+    }
 }
 
 pub fn archive_session(name: &str) -> Result<TraceSessionChange> {
@@ -341,6 +556,168 @@ pub fn unarchive_session(name: &str) -> Result<TraceSessionChange> {
         save_store(&store)?;
     }
     Ok(change)
+}
+
+pub fn rename_session(from: &str, to: &str) -> Result<TraceSessionEditReport> {
+    let to = normalize_session_value(to)
+        .ok_or_else(|| AppError::General("Trace session name cannot be empty".to_string()))?;
+    let mut store = load_store()?;
+    let mut changed_entries = 0;
+    for entry in &mut store.entries {
+        if session_name(entry) == from {
+            entry.session = Some(to.clone());
+            changed_entries += 1;
+        }
+    }
+    if changed_entries == 0 {
+        return Err(AppError::General(format!("Trace session not found: {from}")));
+    }
+    for archived in &mut store.archived_sessions {
+        if archived.name == from {
+            archived.name = to.clone();
+        }
+    }
+    dedupe_archived_sessions(&mut store.archived_sessions);
+    if store.active_session.as_deref() == Some(from) {
+        store.active_session = Some(to.clone());
+    }
+    save_store(&store)?;
+    Ok(TraceSessionEditReport {
+        changed_entries,
+        removed_entries: 0,
+        created_session: Some(to),
+    })
+}
+
+pub fn merge_sessions(from: &str, to: &str) -> Result<TraceSessionEditReport> {
+    rename_session(from, to)
+}
+
+pub fn split_session_by_tag(from: &str, tag: &str, to: &str) -> Result<TraceSessionEditReport> {
+    let to = normalize_session_value(to)
+        .ok_or_else(|| AppError::General("Trace session name cannot be empty".to_string()))?;
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err(AppError::General("Trace split tag cannot be empty".to_string()));
+    }
+
+    let mut store = load_store()?;
+    let mut changed_entries = 0;
+    for entry in &mut store.entries {
+        if session_name(entry) == from && entry.tags.iter().any(|entry_tag| entry_tag == tag) {
+            entry.session = Some(to.clone());
+            changed_entries += 1;
+        }
+    }
+    if changed_entries == 0 {
+        return Err(AppError::General(format!(
+            "No entries in session {from} matched tag {tag}"
+        )));
+    }
+    save_store(&store)?;
+    Ok(TraceSessionEditReport {
+        changed_entries,
+        removed_entries: 0,
+        created_session: Some(to),
+    })
+}
+
+pub fn verify_store(root: Option<&Path>) -> Result<TraceStoreCheck> {
+    let store = load_store()?;
+    Ok(check_store(&store, root))
+}
+
+pub fn repair_store(root: Option<&Path>) -> Result<TraceStoreRepairReport> {
+    let mut store = load_store()?;
+    let before_entries = store.entries.len();
+    let mut assigned_ids = 0;
+    let mut removed_duplicate_ids = 0;
+    let mut removed_dangling_parents = 0;
+
+    let mut seen_ids = BTreeSet::new();
+    for index in 0..store.entries.len() {
+        if store.entries[index].id.trim().is_empty() || seen_ids.contains(&store.entries[index].id) {
+            if !store.entries[index].id.trim().is_empty() {
+                removed_duplicate_ids += 1;
+            }
+            store.entries[index].id = format!("{}-repair-{}", now_secs(), index + 1);
+            assigned_ids += 1;
+        }
+        seen_ids.insert(store.entries[index].id.clone());
+    }
+
+    let ids = store
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<BTreeSet<_>>();
+    for entry in &mut store.entries {
+        if entry
+            .parent
+            .as_deref()
+            .map(|parent| !ids.contains(parent))
+            .unwrap_or(false)
+        {
+            entry.parent = None;
+            removed_dangling_parents += 1;
+        }
+    }
+
+    let before_archived = store.archived_sessions.len();
+    let session_names = store
+        .entries
+        .iter()
+        .map(|entry| session_name(entry).to_string())
+        .collect::<BTreeSet<_>>();
+    store
+        .archived_sessions
+        .retain(|session| session_names.contains(&session.name));
+    dedupe_archived_sessions(&mut store.archived_sessions);
+    let removed_archived_sessions = before_archived.saturating_sub(store.archived_sessions.len());
+
+    if let Some(root) = root {
+        for entry in &mut store.entries {
+            if entry.workspace.as_deref() == Some(root) && entry.path.is_relative() {
+                entry.path = root.join(&entry.path);
+            }
+        }
+    }
+
+    let after_entries = store.entries.len();
+    save_store(&store)?;
+    Ok(TraceStoreRepairReport {
+        before_entries,
+        after_entries,
+        assigned_ids,
+        removed_duplicate_ids,
+        removed_dangling_parents,
+        removed_archived_sessions,
+    })
+}
+
+pub fn compact_store() -> Result<TraceStoreRepairReport> {
+    let mut store = load_store()?;
+    let before_entries = store.entries.len();
+    let mut seen = BTreeSet::new();
+    store.entries.retain(|entry| {
+        let key = compact_key(entry);
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.insert(key);
+            true
+        }
+    });
+    let after_entries = store.entries.len();
+    save_store(&store)?;
+    Ok(TraceStoreRepairReport {
+        before_entries,
+        after_entries,
+        assigned_ids: 0,
+        removed_duplicate_ids: before_entries.saturating_sub(after_entries),
+        removed_dangling_parents: 0,
+        removed_archived_sessions: 0,
+    })
 }
 
 pub fn update_entry_note(selector: &str, note: &str) -> Result<TraceEntryChange> {
@@ -389,12 +766,53 @@ pub fn export_json(root: Option<&Path>) -> Result<String> {
 }
 
 pub fn export_graph(root: Option<&Path>) -> Result<String> {
+    export_graph_format(root, TraceGraphFormat::Text)
+}
+
+pub fn export_graph_format(root: Option<&Path>, format: TraceGraphFormat) -> Result<String> {
+    export_graph_with_options(root, format, &TraceGraphOptions::default())
+}
+
+pub fn graph_report_with_options(root: Option<&Path>, options: &TraceGraphOptions) -> Result<TraceGraphReport> {
     let entries = if let Some(root) = root {
         list_for_workspace(root)?
     } else {
         list()?
-    };
-    Ok(entries_to_graph(entries))
+    }
+    .into_iter()
+    .filter(|entry| trace_entry_matches_filter(entry, &options.filter))
+    .collect::<Vec<_>>();
+    Ok(entries_to_graph_report_with_options(entries, options))
+}
+
+pub fn export_graph_with_options(
+    root: Option<&Path>,
+    format: TraceGraphFormat,
+    options: &TraceGraphOptions,
+) -> Result<String> {
+    match format {
+        TraceGraphFormat::Text => {
+            let report = graph_report_with_options(root, options)?;
+            Ok(graph_report_to_text(&report))
+        }
+        TraceGraphFormat::Json => {
+            let report = graph_report_with_options(root, options)?;
+            serde_json::to_string_pretty(&report)
+                .map(|mut json| {
+                    json.push('\n');
+                    json
+                })
+                .map_err(|err| AppError::General(err.to_string()))
+        }
+        TraceGraphFormat::Mermaid => {
+            let report = graph_report_with_options(root, options)?;
+            Ok(graph_report_to_mermaid(&report))
+        }
+        TraceGraphFormat::Dot => {
+            let report = graph_report_with_options(root, options)?;
+            Ok(graph_report_to_dot(&report))
+        }
+    }
 }
 
 pub fn export_session_markdown(name: &str, root: Option<&Path>) -> Result<String> {
@@ -428,6 +846,22 @@ pub fn session_diff(left_session: &str, right_session: &str, root: Option<&Path>
     let left_report = session_report(left_session, root)?;
     let right_report = session_report(right_session, root)?;
     Ok(diff_reports(&left_report, &right_report))
+}
+
+pub fn session_diff_filtered(
+    left_session: &str,
+    right_session: &str,
+    root: Option<&Path>,
+    filter: TraceDiffFilter,
+) -> Result<TraceSessionDiff> {
+    let mut diff = session_diff(left_session, right_session, root)?;
+    if filter == TraceDiffFilter::All {
+        return Ok(diff);
+    }
+    diff.only_left.retain(|entry| diff_entry_matches(entry, filter));
+    diff.only_right.retain(|entry| diff_entry_matches(entry, filter));
+    diff.changed.retain(|entry| diff_entry_matches(entry, filter));
+    Ok(diff)
 }
 
 pub fn export_session_timeline_markdown(name: &str, root: Option<&Path>) -> Result<String> {
@@ -521,6 +955,31 @@ pub fn export_session_diff_markdown(left_session: &str, right_session: &str, roo
 
 pub fn export_session_diff_json(left_session: &str, right_session: &str, root: Option<&Path>) -> Result<String> {
     let diff = session_diff(left_session, right_session, root)?;
+    serde_json::to_string_pretty(&diff)
+        .map(|mut json| {
+            json.push('\n');
+            json
+        })
+        .map_err(|err| AppError::General(err.to_string()))
+}
+
+pub fn export_session_diff_markdown_filtered(
+    left_session: &str,
+    right_session: &str,
+    root: Option<&Path>,
+    filter: TraceDiffFilter,
+) -> Result<String> {
+    let diff = session_diff_filtered(left_session, right_session, root, filter)?;
+    Ok(session_diff_to_markdown(&diff))
+}
+
+pub fn export_session_diff_json_filtered(
+    left_session: &str,
+    right_session: &str,
+    root: Option<&Path>,
+    filter: TraceDiffFilter,
+) -> Result<String> {
+    let diff = session_diff_filtered(left_session, right_session, root, filter)?;
     serde_json::to_string_pretty(&diff)
         .map(|mut json| {
             json.push('\n');
@@ -846,32 +1305,201 @@ fn entries_to_markdown(entries: Vec<TraceEntry>) -> String {
     output
 }
 
-fn entries_to_graph(mut entries: Vec<TraceEntry>) -> String {
-    entries.sort_by_key(|entry| entry.timestamp);
+fn graph_report_to_text(report: &TraceGraphReport) -> String {
     let mut output = String::from("# fcs Trace Graph\n\n");
-    for entry in entries {
-        let node = if entry.id.is_empty() {
-            entry.timestamp.to_string()
-        } else {
-            entry.id.clone()
-        };
-        let parent = entry.parent.as_deref().unwrap_or("<root>");
-        let line = entry.line.unwrap_or(1);
-        let column = entry.column.map(|value| format!(":{value}")).unwrap_or_default();
-        let metadata = metadata_summary(&entry)
-            .map(|summary| format!(" {{{summary}}}"))
-            .unwrap_or_default();
+    for collapsed in &report.collapsed {
         output.push_str(&format!(
-            "- {parent} -> {node} [{}] {}:{}{} - {}{}\n",
-            entry.kind,
-            entry.path.display(),
+            "- <root> -> {} [summary] {} entries session={} kind={} path={}\n",
+            collapsed.id,
+            collapsed.entries,
+            collapsed.session,
+            collapsed.kind,
+            collapsed.path.display()
+        ));
+    }
+    for edge in &report.edges {
+        let Some(node) = report.nodes.iter().find(|node| node.id == edge.to) else {
+            continue;
+        };
+        let parent = if edge.from.is_empty() { "<root>" } else { &edge.from };
+        let line = node.line.unwrap_or(1);
+        let column = node.column.map(|value| format!(":{value}")).unwrap_or_default();
+        output.push_str(&format!(
+            "- {parent} -> {} [{}] {}:{}{} - {}{}\n",
+            node.id,
+            node.kind,
+            node.path.display(),
             line,
             column,
-            entry.label,
-            metadata
+            node.label,
+            graph_node_metadata_suffix(node)
         ));
     }
     output
+}
+
+#[cfg(test)]
+fn entries_to_graph(entries: Vec<TraceEntry>) -> String {
+    let report = entries_to_graph_report_with_options(entries, &TraceGraphOptions::default());
+    graph_report_to_text(&report)
+}
+
+fn entries_to_graph_report_with_options(mut entries: Vec<TraceEntry>, options: &TraceGraphOptions) -> TraceGraphReport {
+    entries.sort_by_key(|entry| entry.timestamp);
+    let (entries, collapsed) = collapse_graph_entries(entries, options.collapse_threshold);
+    let nodes = entries
+        .iter()
+        .map(|entry| {
+            let id = trace_node_id(entry);
+            TraceGraphNode {
+                id,
+                label: entry.label.clone(),
+                kind: entry.kind.clone(),
+                path: entry.path.clone(),
+                line: entry.line,
+                column: entry.column,
+                session: session_name(entry).to_string(),
+                note: entry.note.clone(),
+                status: entry.status.clone(),
+                priority: entry.priority.clone(),
+                branch: entry.branch.clone(),
+                tags: entry.tags.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let edges = entries
+        .iter()
+        .map(|entry| TraceGraphEdge {
+            from: entry.parent.clone().unwrap_or_else(|| "<root>".to_string()),
+            to: trace_node_id(entry),
+            kind: entry.kind.clone(),
+            label: entry.label.clone(),
+        })
+        .collect::<Vec<_>>();
+    TraceGraphReport {
+        entries: entries.len(),
+        nodes,
+        edges,
+        collapsed,
+    }
+}
+
+fn graph_report_to_mermaid(report: &TraceGraphReport) -> String {
+    let mut output = String::from("flowchart TD\n");
+    output.push_str("  root[\"<root>\"]\n");
+    for collapsed in &report.collapsed {
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            graph_node_ref(&collapsed.id),
+            escape_mermaid_label(&format!(
+                "summary\\n{} {} ({})",
+                collapsed.session, collapsed.kind, collapsed.entries
+            ))
+        ));
+        output.push_str(&format!("  root --> {}\n", graph_node_ref(&collapsed.id)));
+    }
+    for node in &report.nodes {
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            graph_node_ref(&node.id),
+            escape_mermaid_label(&format!("{}\\n{}", node.kind, node.label))
+        ));
+    }
+    for edge in &report.edges {
+        output.push_str(&format!(
+            "  {} -->|{}| {}\n",
+            graph_node_ref(&edge.from),
+            escape_mermaid_label(&edge.kind),
+            graph_node_ref(&edge.to)
+        ));
+    }
+    output
+}
+
+fn graph_report_to_dot(report: &TraceGraphReport) -> String {
+    let mut output = String::from("digraph fcs_trace {\n");
+    output.push_str("  rankdir=LR;\n");
+    output.push_str("  \"<root>\" [shape=box,label=\"<root>\"];\n");
+    for collapsed in &report.collapsed {
+        output.push_str(&format!(
+            "  \"{}\" [shape=folder,label=\"summary\\n{} {} ({})\"];\n",
+            escape_dot_label(&collapsed.id),
+            escape_dot_label(&collapsed.session),
+            escape_dot_label(&collapsed.kind),
+            collapsed.entries
+        ));
+        output.push_str(&format!(
+            "  \"<root>\" -> \"{}\" [label=\"summary\"];\n",
+            escape_dot_label(&collapsed.id)
+        ));
+    }
+    for node in &report.nodes {
+        output.push_str(&format!(
+            "  \"{}\" [label=\"{}\\n{}\"];\n",
+            escape_dot_label(&node.id),
+            escape_dot_label(&node.kind),
+            escape_dot_label(&node.label)
+        ));
+    }
+    for edge in &report.edges {
+        output.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            escape_dot_label(&edge.from),
+            escape_dot_label(&edge.to),
+            escape_dot_label(&edge.kind)
+        ));
+    }
+    output.push_str("}\n");
+    output
+}
+
+fn collapse_graph_entries(entries: Vec<TraceEntry>, threshold: usize) -> (Vec<TraceEntry>, Vec<TraceGraphCollapse>) {
+    if threshold == 0 {
+        return (entries, Vec::new());
+    }
+
+    let mut counts = BTreeMap::<String, usize>::new();
+    for entry in &entries {
+        *counts.entry(collapse_key(entry)).or_insert(0) += 1;
+    }
+
+    let collapsed_keys = counts
+        .iter()
+        .filter(|(_, count)| **count > threshold)
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    if collapsed_keys.is_empty() {
+        return (entries, Vec::new());
+    }
+
+    let mut collapsed = Vec::new();
+    let mut collapsed_seen = BTreeSet::new();
+    let kept = entries
+        .into_iter()
+        .filter(|entry| {
+            let key = collapse_key(entry);
+            if !collapsed_keys.contains(&key) {
+                return true;
+            }
+            if collapsed_seen.insert(key.clone()) {
+                let parts = key.split('|').collect::<Vec<_>>();
+                collapsed.push(TraceGraphCollapse {
+                    id: format!("summary:{}", collapsed_seen.len()),
+                    entries: counts.get(&key).copied().unwrap_or(0),
+                    session: parts.first().copied().unwrap_or("default").to_string(),
+                    kind: parts.get(1).copied().unwrap_or("unknown").to_string(),
+                    path: PathBuf::from(parts.get(2).copied().unwrap_or("-")),
+                });
+            }
+            false
+        })
+        .collect::<Vec<_>>();
+
+    (kept, collapsed)
+}
+
+fn collapse_key(entry: &TraceEntry) -> String {
+    format!("{}|{}|{}", session_name(entry), entry.kind, entry.path.display())
 }
 
 pub fn summarize_sessions(
@@ -999,6 +1627,117 @@ fn save_store_to_path(path: &Path, store: &TraceStore) -> Result<()> {
     Ok(())
 }
 
+fn duplicate_entry_id(
+    entries: &[TraceEntry],
+    root: Option<&Path>,
+    location: &Location,
+    label: &str,
+    kind: &str,
+    metadata: &TraceMetadata,
+) -> Option<String> {
+    let workspace = root.map(Path::to_path_buf);
+    entries
+        .iter()
+        .find(|entry| {
+            entry.workspace == workspace
+                && entry.kind == kind
+                && entry.label == label
+                && entry.path == location.path
+                && entry.line == location.line
+                && entry.column == location.column
+                && entry.session == metadata.session
+                && entry.parent == metadata.parent
+                && entry.branch == metadata.branch
+                && entry.tags == metadata.tags
+        })
+        .map(|entry| entry.id.clone())
+}
+
+fn compact_key(entry: &TraceEntry) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        entry
+            .workspace
+            .as_deref()
+            .map(Path::display)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        session_name(entry),
+        entry.kind,
+        entry.label,
+        entry.path.display(),
+        entry.line.unwrap_or(0),
+        entry.column.unwrap_or(0),
+        entry.parent.as_deref().unwrap_or_default(),
+        entry.tags.join(",")
+    )
+}
+
+fn check_store(store: &TraceStore, root: Option<&Path>) -> TraceStoreCheck {
+    let mut ids = BTreeSet::new();
+    let mut duplicate_ids = BTreeSet::new();
+    let mut missing_ids = 0;
+    for entry in &store.entries {
+        if entry.id.trim().is_empty() {
+            missing_ids += 1;
+            continue;
+        }
+        if !ids.insert(entry.id.clone()) {
+            duplicate_ids.insert(entry.id.clone());
+        }
+    }
+
+    let dangling_parents = store
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let parent = entry.parent.as_deref()?;
+            (!ids.contains(parent)).then(|| parent.to_string())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let missing_paths = store
+        .entries
+        .iter()
+        .filter(|entry| {
+            root.map(|root| entry.workspace.as_deref() == Some(root))
+                .unwrap_or(true)
+        })
+        .filter_map(|entry| {
+            let path = if entry.path.is_absolute() {
+                entry.path.clone()
+            } else {
+                root.map(|root| root.join(&entry.path))
+                    .unwrap_or_else(|| entry.path.clone())
+            };
+            (!path.exists()).then_some(path)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(50)
+        .collect::<Vec<_>>();
+
+    TraceStoreCheck {
+        ok: duplicate_ids.is_empty() && missing_ids == 0 && dangling_parents.is_empty() && missing_paths.is_empty(),
+        entries: store.entries.len(),
+        duplicate_ids: duplicate_ids.into_iter().collect(),
+        missing_ids,
+        dangling_parents,
+        missing_paths,
+    }
+}
+
+fn dedupe_archived_sessions(sessions: &mut Vec<ArchivedTraceSession>) {
+    sessions.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.archived_at.cmp(&right.archived_at))
+    });
+    sessions.dedup_by(|left, right| left.name == right.name);
+}
+
 fn update_entry_field<F>(selector: &str, update: F) -> Result<TraceEntryChange>
 where
     F: FnOnce(&mut TraceEntry),
@@ -1032,6 +1771,15 @@ fn find_entry_mut<'a>(store: &'a mut TraceStore, selector: &str) -> Option<&'a m
 }
 
 fn normalized_optional_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_session_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed == "-" {
         None
@@ -1395,11 +2143,85 @@ fn unarchive_session_in_store(store: &mut TraceStore, name: &str) -> TraceSessio
     }
 }
 
+fn trace_entry_matches_filter(entry: &TraceEntry, filter: &TraceEntryFilter) -> bool {
+    if let Some(session) = filter.session.as_deref() {
+        if session_name(entry) != session {
+            return false;
+        }
+    }
+    if let Some(tag) = filter.tag.as_deref() {
+        if !entry.tags.iter().any(|entry_tag| entry_tag == tag) {
+            return false;
+        }
+    }
+    if let Some(kind) = filter.kind.as_deref() {
+        if entry.kind != kind {
+            return false;
+        }
+    }
+    if let Some(status) = filter.status.as_deref() {
+        if entry.status.as_deref() != Some(status) {
+            return false;
+        }
+    }
+    if let Some(priority) = filter.priority.as_deref() {
+        if entry.priority.as_deref() != Some(priority) {
+            return false;
+        }
+    }
+    if let Some(relation) = filter.relation.as_deref() {
+        if semantic_relation_from_entry(entry) != Some(relation) && !entry.kind.ends_with(relation) {
+            return false;
+        }
+    }
+    true
+}
+
+fn diff_entry_matches(entry: &TraceDiffEntry, filter: TraceDiffFilter) -> bool {
+    let matches_entry = |entry: &TraceEntry| match filter {
+        TraceDiffFilter::All => true,
+        TraceDiffFilter::Semantic => entry.kind == "semantic-root" || entry.kind.starts_with("semantic:"),
+        TraceDiffFilter::Bookmark => entry.kind == "bookmark",
+        TraceDiffFilter::Debug => is_debug_trace_entry(entry),
+    };
+    entry.left.as_ref().map(&matches_entry).unwrap_or(false) || entry.right.as_ref().map(matches_entry).unwrap_or(false)
+}
+
 fn entry_label(entry: &TraceEntry) -> String {
     if entry.id.is_empty() {
         entry.timestamp.to_string()
     } else {
         format!("{} {}", entry.id, entry.timestamp)
+    }
+}
+
+fn trace_node_id(entry: &TraceEntry) -> String {
+    if entry.id.is_empty() {
+        entry.timestamp.to_string()
+    } else {
+        entry.id.clone()
+    }
+}
+
+fn graph_node_metadata_suffix(node: &TraceGraphNode) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("session={}", node.session));
+    if let Some(status) = node.status.as_deref() {
+        parts.push(format!("status={status}"));
+    }
+    if let Some(priority) = node.priority.as_deref() {
+        parts.push(format!("priority={priority}"));
+    }
+    if let Some(branch) = node.branch.as_deref() {
+        parts.push(format!("branch={branch}"));
+    }
+    if !node.tags.is_empty() {
+        parts.push(format!("tags={}", node.tags.join(",")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {{{}}}", parts.join(" "))
     }
 }
 
@@ -1460,6 +2282,51 @@ fn metadata_lines(entry: &TraceEntry) -> Vec<String> {
         lines.push(format!("tags: {}", entry.tags.join(", ")));
     }
     lines
+}
+
+fn graph_node_ref(id: &str) -> String {
+    if id == "<root>" {
+        return "root".to_string();
+    }
+    let mut value = String::from("n");
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            value.push(ch);
+        } else {
+            value.push('_');
+        }
+    }
+    value
+}
+
+fn escape_mermaid_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('\n', "\\n")
+}
+
+fn escape_dot_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+fn semantic_relation_from_entry(entry: &TraceEntry) -> Option<&str> {
+    if let Some(relation) = entry
+        .note
+        .as_deref()
+        .and_then(|note| note.split_whitespace().find_map(|part| part.strip_prefix("relation=")))
+    {
+        return Some(relation);
+    }
+
+    entry.tags.iter().map(String::as_str).find(|tag| {
+        matches!(
+            *tag,
+            "references" | "definition" | "type" | "implementation" | "incoming" | "outgoing"
+        )
+    })
 }
 
 fn session_report_to_markdown(report: &TraceSessionReport) -> String {
@@ -1558,7 +2425,7 @@ fn build_replay_plan(
                 entry_id: entry.id.clone(),
                 kind: entry.kind.clone(),
                 target: target.clone(),
-                command: format!("fcs preview {}", shell_quote(&format!("{target}:20"))),
+                command: replay_command_for_entry(report, entry, &target),
             }
         })
         .collect::<Vec<TraceReplayCommand>>();
@@ -1580,6 +2447,39 @@ fn build_replay_plan(
         commands,
         debug_command,
     }
+}
+
+fn replay_command_for_entry(report: &TraceSessionReport, entry: &TraceEntry, target: &str) -> String {
+    if entry.kind == "semantic-root" {
+        let relation = semantic_relation_from_entry(entry).unwrap_or("outgoing");
+        return format!(
+            "fcs trace semantic {} --relation {} --session {}",
+            shell_quote(target),
+            shell_quote(relation),
+            shell_quote(&report.summary.name)
+        );
+    }
+    if entry.kind.starts_with("semantic:") {
+        return format!(
+            "fcs trace add {} --kind {} --session {} --parent {}",
+            shell_quote(target),
+            shell_quote(&entry.kind),
+            shell_quote(&report.summary.name),
+            shell_quote(entry.parent.as_deref().unwrap_or("semantic-root"))
+        );
+    }
+    if entry.kind == "search" {
+        return format!("fcs search {}", shell_quote(&entry.label));
+    }
+    if is_debug_trace_entry(entry) {
+        return format!(
+            "fcs trace add {} --kind {} --session {}",
+            shell_quote(target),
+            shell_quote(&entry.kind),
+            shell_quote(&report.summary.name)
+        );
+    }
+    format!("fcs preview {}", shell_quote(&format!("{target}:20")))
 }
 
 fn replay_plan_to_markdown(plan: &TraceReplayPlan) -> String {
@@ -1840,6 +2740,7 @@ mod tests {
                 },
             ],
             archived_sessions: Vec::new(),
+            active_session: None,
         };
 
         save_store_to_path(&path, &store).unwrap();
@@ -1959,6 +2860,7 @@ line = 3
                 test_entry("new", "bug-1", "new", 2),
             ],
             archived_sessions: Vec::new(),
+            active_session: None,
         };
 
         assert_eq!(
@@ -2080,6 +2982,7 @@ line = 3
                 tags: Vec::new(),
             }],
             archived_sessions: Vec::new(),
+            active_session: None,
         };
 
         assert_eq!(

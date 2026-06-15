@@ -95,7 +95,7 @@ fcs tui --debug-binary target/debug/app
 fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 ```
 
-`tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>` 和 `wait <ms>`。空行和 `#` 注释会被忽略；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation 时加 `--persist`。
+`tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>`、`wait <ms>` 和 `assert ...` 断言。常用断言包括 `assert results >= 1`、`assert status contains traced`、`assert trace-session bug-42`、`assert trace-view graph`、`assert layout debug`、`assert filter none`、`assert group path`、`assert pending none`；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation/session/layout/filter/group 时加 `--persist`。
 
 #### TUI 快捷键
 
@@ -119,7 +119,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `x`：在 Debug source 中删除当前 profile 或断点。
 - `F5` / `F6` / `F10` / `F11` / `Shift-F11` / `Ctrl-F5`：对 TUI DAP worker 执行 continue、pause、next、step in、step out、stop。
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
-- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
+- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：在状态栏显示快捷键提示。
 
@@ -335,15 +335,20 @@ fcs service query "source:index kind:function text:main" . --source all --explai
 fcs service stop .
 ```
 
-`fcs bench` 用于给搜索、索引、trace store 和 preview 读取建立本地延迟基线；`bench all` 会把 `benchmark-report.json` 写入 workspace cache。
+`fcs bench` 用于给搜索、索引、TUI source、trace store 和 preview 读取建立本地延迟基线；`bench all` 会把 `benchmark-report.json` 写入 workspace cache。
 
 ```bash
 fcs bench search main . --format json --warn-ms 200
 fcs bench index . --limit 50 --query main --warn-ms 200
+fcs bench tui . --query main --format json
 fcs bench trace --format json
 fcs bench preview src/main.rs:20 --warn-ms 20
 fcs bench all . --query main --limit 50
+fcs bench baseline .
+fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
 ```
+
+`bench baseline` 会把最近一次 `bench all` 的报告保存为 `benchmark-baseline.json`；`bench compare` 对比当前报告与基线，适合 release smoke 或本地性能回归门禁。
 
 workspace profile 和配置诊断适合 monorepo 或多根项目：
 
@@ -471,6 +476,8 @@ fcs trace graph
 
 # 管理调查 session
 fcs trace sessions
+fcs trace use bug-42
+fcs trace current
 fcs trace archive bug-42
 fcs trace unarchive bug-42
 fcs trace report bug-42 --format markdown
@@ -481,6 +488,19 @@ fcs trace replay-plan bug-42 --program target/debug/app --name bug-42-dap --form
 fcs trace structured bug-42 --format json
 fcs trace insights bug-42 --directory . --format markdown
 fcs trace diff bug-42 bug-42-next --format json
+fcs trace diff bug-42 bug-42-next --format json --filter semantic
+fcs trace rename bug-42-old bug-42
+fcs trace merge bug-42-spike bug-42
+fcs trace split bug-42 bug-42-hot --tag hot
+fcs trace verify --directory . --format json --strict
+fcs trace repair --directory . --format text
+fcs trace compact --format json
+
+# 语义追踪支持单点、targets 文件和 query 批量输入；graph 可导出 text/json/mermaid/dot
+fcs trace semantic src/main.c:42 --relation outgoing --session bug-42 --fallback index
+fcs trace semantic --targets-file targets.txt --relation references --session bug-42
+fcs trace semantic --from-query "kind:function name:init" --query-source index --query-limit 10 --directory .
+fcs trace graph --format mermaid --session bug-42 --tag hot --collapse-threshold 8
 
 # 查看查询历史
 fcs history list
@@ -500,7 +520,7 @@ fcs debug command target/debug/app -b src/main.c:42 --run
 
 `debug` 默认只打印命令，不会擅自进入交互式调试器。加 `--run` 后才启动 `gdb` 或 `lldb`。
 
-`trace insights` 会在普通 session report 之上汇总 kind/status/priority、热点文件、debug/DAP 事件和未关闭条目；提供 `--directory` 且存在 index 时，还会把 trace 位置关联到最近的索引符号。
+`trace graph` 可按 `--session`、`--tag`、`--kind`、`--status`、`--priority` 和 `--relation` 过滤，并可用 `--collapse-threshold` 把大批同 session/kind/path 的节点折叠成 summary。`trace insights` 会在普通 session report 之上汇总 kind/status/priority、热点文件、debug/DAP 事件和未关闭条目；提供 `--directory` 且存在 index 时，还会把 trace 位置关联到最近的索引符号。`trace verify/repair/compact` 用于发布前或长时间使用后的 trace store 健康检查和去重维护。
 
 ---
 
@@ -517,11 +537,13 @@ fcs dap launch target/debug/app --request attach --process-id 12345
 
 # 打印 setBreakpoints + launch 的请求数组
 fcs dap launch target/debug/app -b src/main.c:42 --bundle -- --config dev.toml
+fcs dap launch target/debug/app -b src/main.c:42 --break-condition "argc > 1" --break-hit 3 --break-log "main hit" --bundle
 
 # 保存、列出、复用 profile
 fcs dap save-profile smoke target/debug/app -b src/main.c:42 --cwd . --env RUST_LOG=debug -- --config dev.toml
 fcs dap profiles
 fcs dap request-profile smoke --bundle
+fcs dap transcript smoke --format json
 
 # 使用 trace session 生成 DAP profile
 fcs dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_LOG=debug -- --config dev.toml
@@ -544,7 +566,7 @@ fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd
 fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
 ```
 
-`dap launch/save-profile/request-profile` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
+`dap launch/save-profile/session-smoke/adapter-session` 支持 `--break-condition`、`--break-hit` 和 `--break-log`，一个值会套用到全部断点，多个值会按断点序号对应。`dap launch/save-profile/request-profile/transcript` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并展示 capability 标签。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
@@ -840,9 +862,11 @@ rtk cargo test
 
 ```bash
 rtk scripts/smoke.sh
+rtk scripts/smoke.sh fast
+rtk scripts/smoke.sh release
 ```
 
-发布门禁分为快速和完整两级。日常改动推荐先跑 fast：
+`scripts/smoke.sh` 默认执行 `full`；`fast` 跳过最重的 test/clippy 但仍跑 CLI/TUI smoke；`release` 在 full 基础上额外执行 release build。发布门禁分为快速和完整两级。日常改动推荐先跑 fast：
 
 ```bash
 rtk scripts/release-check.sh fast

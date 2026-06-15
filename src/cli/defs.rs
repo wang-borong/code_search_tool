@@ -411,7 +411,23 @@ pub enum TraceAction {
     /// Record LSP/index semantic graph edges into a trace session
     Semantic {
         /// Format: "path:line" or "path:line:column"
-        target: String,
+        target: Option<String>,
+
+        /// Read additional semantic trace targets from a file, one path:line[:column] per line
+        #[arg(long)]
+        targets_file: Option<String>,
+
+        /// Build semantic trace targets from a query expression
+        #[arg(long)]
+        from_query: Option<String>,
+
+        /// Query source for --from-query: all, index, trace, semantic, or auto
+        #[arg(long, default_value = "index")]
+        query_source: String,
+
+        /// Maximum query matches to convert into semantic trace targets
+        #[arg(long, default_value_t = 20)]
+        query_limit: usize,
 
         /// Relation: references, definition, type, implementation, incoming, outgoing
         #[arg(short, long, default_value = "outgoing")]
@@ -522,6 +538,15 @@ pub enum TraceAction {
         #[arg(long)]
         archived: bool,
     },
+
+    /// Set the active trace investigation session for later trace commands
+    Use {
+        /// Trace session name
+        session: String,
+    },
+
+    /// Show the active trace investigation session
+    Current,
 
     /// Archive a trace investigation session
     Archive {
@@ -642,6 +667,74 @@ pub enum TraceAction {
         /// Export format: markdown or json
         #[arg(short, long, default_value = "markdown")]
         format: String,
+
+        /// Entry class to diff: all, semantic, bookmark, or debug
+        #[arg(long, default_value = "all")]
+        filter: String,
+    },
+
+    /// Rename a trace investigation session
+    Rename {
+        /// Existing session name
+        from: String,
+
+        /// New session name
+        to: String,
+    },
+
+    /// Merge all entries from one session into another session
+    Merge {
+        /// Source session name
+        from: String,
+
+        /// Destination session name
+        to: String,
+    },
+
+    /// Split tagged entries from one session into another session
+    Split {
+        /// Source session name
+        from: String,
+
+        /// Destination session name
+        to: String,
+
+        /// Tag used to select entries to move
+        #[arg(long)]
+        tag: String,
+    },
+
+    /// Verify trace store ids, parents, archives, and referenced paths
+    Verify {
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Exit with an error if problems are found
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Repair trace store ids, dangling parents, archives, and workspace paths
+    Repair {
+        /// Target workspace directory; omit for global trace
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Compact exact duplicate trace entries
+    Compact {
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
     },
 
     /// Open trace history in the picker
@@ -666,6 +759,38 @@ pub enum TraceAction {
         /// Target workspace directory; omit for global trace
         #[arg(short, long)]
         directory: Option<String>,
+
+        /// Export format: text, json, mermaid, or dot
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Filter by session
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Filter by kind
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by priority
+        #[arg(long)]
+        priority: Option<String>,
+
+        /// Filter by semantic relation
+        #[arg(long)]
+        relation: Option<String>,
+
+        /// Collapse groups larger than this size by session/kind/path; 0 disables collapse
+        #[arg(long, default_value_t = 0)]
+        collapse_threshold: usize,
     },
 }
 
@@ -1056,6 +1181,18 @@ pub enum DapAction {
         #[arg(short = 'b', long = "break")]
         breakpoints: Vec<String>,
 
+        /// Breakpoint condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-condition")]
+        break_conditions: Vec<String>,
+
+        /// Breakpoint hit condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-hit")]
+        break_hits: Vec<String>,
+
+        /// Breakpoint log message, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-log")]
+        break_logs: Vec<String>,
+
         /// Working directory for the debugged program
         #[arg(long)]
         cwd: Option<String>,
@@ -1100,6 +1237,18 @@ pub enum DapAction {
         /// Breakpoint location, repeatable: path:line[:column]
         #[arg(short = 'b', long = "break")]
         breakpoints: Vec<String>,
+
+        /// Breakpoint condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-condition")]
+        break_conditions: Vec<String>,
+
+        /// Breakpoint hit condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-hit")]
+        break_hits: Vec<String>,
+
+        /// Breakpoint log message, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-log")]
+        break_logs: Vec<String>,
 
         /// Target workspace directory
         #[arg(short, long)]
@@ -1201,6 +1350,20 @@ pub enum DapAction {
         bundle: bool,
     },
 
+    /// Export a repeatable mock DAP request/event transcript for a saved profile
+    Transcript {
+        /// Profile name
+        name: String,
+
+        /// Target workspace directory
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Run a non-interactive DAP client session against the built-in mock adapter
     SessionSmoke {
         /// Program binary to launch in the mock session
@@ -1225,6 +1388,18 @@ pub enum DapAction {
         /// Breakpoint location, repeatable: path:line[:column]
         #[arg(short = 'b', long = "break")]
         breakpoints: Vec<String>,
+
+        /// Breakpoint condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-condition")]
+        break_conditions: Vec<String>,
+
+        /// Breakpoint hit condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-hit")]
+        break_hits: Vec<String>,
+
+        /// Breakpoint log message, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-log")]
+        break_logs: Vec<String>,
 
         /// Working directory for the debugged program
         #[arg(long)]
@@ -1270,6 +1445,18 @@ pub enum DapAction {
         /// Breakpoint location, repeatable: path:line[:column]
         #[arg(short = 'b', long = "break")]
         breakpoints: Vec<String>,
+
+        /// Breakpoint condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-condition")]
+        break_conditions: Vec<String>,
+
+        /// Breakpoint hit condition, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-hit")]
+        break_hits: Vec<String>,
+
+        /// Breakpoint log message, repeatable; one value applies to all breakpoints, otherwise by index
+        #[arg(long = "break-log")]
+        break_logs: Vec<String>,
 
         /// Working directory for the debugged program and adapter process
         #[arg(long)]
@@ -1809,6 +1996,28 @@ pub enum BenchAction {
         warn_ms: Option<u128>,
     },
 
+    /// Measure non-interactive TUI source loading latency
+    Tui {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Warn when a probe exceeds this threshold
+        #[arg(long)]
+        warn_ms: Option<u128>,
+
+        /// Query text used for symbol source filtering
+        #[arg(long, default_value = "main")]
+        query: String,
+
+        /// File traversal options used by file/symbol source probes
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
+    },
+
     /// Measure preview target file-read latency
     Preview {
         /// Format: path:line
@@ -1821,6 +2030,34 @@ pub enum BenchAction {
         /// Warn when the probe exceeds this threshold
         #[arg(long)]
         warn_ms: Option<u128>,
+    },
+
+    /// Save the latest workspace benchmark report as the baseline
+    Baseline {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Compare the latest workspace benchmark report against the saved baseline
+    Compare {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Allowed absolute slowdown in milliseconds
+        #[arg(long, default_value_t = 10)]
+        threshold_ms: u128,
+
+        /// Allowed relative slowdown percentage
+        #[arg(long, default_value_t = 25)]
+        threshold_percent: u128,
+
+        /// Exit with an error if regressions are found
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -2421,10 +2658,13 @@ mod tests {
             &["fcs", "bench", "all", ".", "--format", "json", "--warn-ms", "10000"],
             &["fcs", "bench", "search", "main", ".", "--format", "json"],
             &["fcs", "bench", "index", ".", "--query", "main", "--format", "json"],
+            &["fcs", "bench", "tui", ".", "--query", "main", "--format", "json"],
             &["fcs", "bench", "trace", "--format", "json"],
             &["fcs", "bench", "preview", "src/main.rs:1", "--format", "json"],
             &["fcs", "trace", "export", "--format", "json"],
-            &["fcs", "trace", "graph", "--directory", "."],
+            &["fcs", "trace", "graph", "--directory", ".", "--format", "mermaid"],
+            &["fcs", "trace", "use", "smoke"],
+            &["fcs", "trace", "current"],
             &[
                 "fcs",
                 "trace",
@@ -2441,6 +2681,30 @@ mod tests {
                 "--cache",
                 "--format",
                 "json",
+            ],
+            &[
+                "fcs",
+                "trace",
+                "semantic",
+                "--from-query",
+                "kind:function name:main",
+                "--query-source",
+                "index",
+                "--query-limit",
+                "3",
+                "--directory",
+                ".",
+            ],
+            &[
+                "fcs",
+                "trace",
+                "semantic",
+                "--targets-file",
+                "targets.txt",
+                "--relation",
+                "references",
+                "--session",
+                "batch",
             ],
             &["fcs", "trace", "note", "latest", "checked"],
             &["fcs", "trace", "status", "latest", "open"],

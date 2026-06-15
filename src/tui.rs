@@ -69,6 +69,10 @@ Pins, trace, debug
   x                   delete selected debug item
   : trace semantic    record outgoing semantic edges into a trace session
   : trace semantic refs/def/incoming/outgoing also supported
+  : trace session <name> switch active trace session
+  : trace view session/timeline/graph changes the Trace source projection
+  : layout search/debug/trace/semantic changes panel proportions
+  : filter kind/path/text <value>, filter clear, group kind/path/none
 
 Command palette
   :                   open palette with fuzzy suggestions
@@ -89,6 +93,128 @@ struct PendingSemanticTrace {
     relation: String,
     source: Location,
     session: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiLayoutPreset {
+    Balanced,
+    Search,
+    Debug,
+    Trace,
+    Semantic,
+}
+
+impl TuiLayoutPreset {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "balanced" | "default" | "normal" => Some(Self::Balanced),
+            "search" | "browse" => Some(Self::Search),
+            "debug" | "dap" => Some(Self::Debug),
+            "trace" | "timeline" => Some(Self::Trace),
+            "semantic" | "graph" | "lsp" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Search => "search",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+            Self::Semantic => "semantic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiTraceView {
+    Session,
+    Timeline,
+    Graph,
+}
+
+impl TuiTraceView {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "session" | "list" | "entries" => Some(Self::Session),
+            "timeline" | "time" => Some(Self::Timeline),
+            "graph" | "edges" => Some(Self::Graph),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Timeline => "timeline",
+            Self::Graph => "graph",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiResultFilterField {
+    Kind,
+    Path,
+    Text,
+}
+
+impl TuiResultFilterField {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "kind" | "type" => Some(Self::Kind),
+            "path" | "file" | "source" => Some(Self::Path),
+            "text" | "label" | "query" => Some(Self::Text),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Path => "path",
+            Self::Text => "text",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiResultFilter {
+    field: TuiResultFilterField,
+    value: String,
+}
+
+impl TuiResultFilter {
+    fn label(&self) -> String {
+        format!("{}={}", self.field.label(), self.value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiResultGroup {
+    None,
+    Kind,
+    Path,
+}
+
+impl TuiResultGroup {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "none" | "off" | "clear" => Some(Self::None),
+            "kind" | "type" => Some(Self::Kind),
+            "path" | "file" | "source" => Some(Self::Path),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Kind => "kind",
+            Self::Path => "path",
+        }
+    }
 }
 
 struct AppState {
@@ -118,6 +244,11 @@ struct AppState {
     selected: usize,
     pinned_items: Vec<CodeItem>,
     trace_items: Vec<CodeItem>,
+    active_trace_session: String,
+    layout_preset: TuiLayoutPreset,
+    trace_view: TuiTraceView,
+    result_filter: Option<TuiResultFilter>,
+    result_group: TuiResultGroup,
     breakpoints: Vec<crate::dap::DapBreakpoint>,
     debug_profiles: Vec<crate::debugger::DebugProfile>,
     dap_snapshot: crate::dap::DapSessionSnapshot,
@@ -141,6 +272,11 @@ pub struct TuiScriptSummary {
     pub root: PathBuf,
     pub mode: String,
     pub query: String,
+    pub layout: String,
+    pub active_trace_session: String,
+    pub trace_view: String,
+    pub result_filter: String,
+    pub result_group: String,
     pub result_count: usize,
     pub selected_index: Option<usize>,
     pub selected: Option<TuiScriptItem>,
@@ -234,6 +370,30 @@ impl AppState {
             .locked_preview
             .clone()
             .map(TuiSavedLocation::into_location);
+        let active_trace_session = persisted_state
+            .active_trace_session
+            .clone()
+            .or_else(|| crate::trace::active_session().ok().flatten())
+            .unwrap_or_else(|| "tui".to_string());
+        let layout_preset = persisted_state
+            .layout_preset
+            .as_deref()
+            .and_then(TuiLayoutPreset::parse)
+            .unwrap_or(TuiLayoutPreset::Balanced);
+        let trace_view = persisted_state
+            .trace_view
+            .as_deref()
+            .and_then(TuiTraceView::parse)
+            .unwrap_or(TuiTraceView::Session);
+        let result_filter = persisted_state
+            .result_filter
+            .as_deref()
+            .and_then(parse_result_filter_value);
+        let result_group = persisted_state
+            .result_group
+            .as_deref()
+            .and_then(TuiResultGroup::parse)
+            .unwrap_or(TuiResultGroup::None);
         let mut config = config;
         let project_config = crate::workspace::read_project_config(&root)?;
         if let Some(project_config) = &project_config {
@@ -279,6 +439,11 @@ impl AppState {
             selected: 0,
             pinned_items,
             trace_items: Vec::new(),
+            active_trace_session,
+            layout_preset,
+            trace_view,
+            result_filter,
+            result_group,
             breakpoints,
             debug_profiles: Vec::new(),
             dap_snapshot: default_dap_snapshot(),
@@ -313,7 +478,7 @@ impl AppState {
     fn refresh(&mut self) -> Result<()> {
         let selected_location = self.current_location();
         self.selected = 0;
-        self.results = match self.mode {
+        let results = match self.mode {
             SourceMode::Search | SourceMode::Files | SourceMode::Symbols => {
                 let id =
                     self.source_worker
@@ -331,6 +496,7 @@ impl AppState {
                 self.debug_results()
             }
         };
+        self.results = self.project_results(results);
         self.status = format!("{}: {} result(s)", self.mode.label(), self.results.len());
         Ok(())
     }
@@ -344,7 +510,7 @@ impl AppState {
         match response.result {
             Ok(items) => {
                 self.selected = 0;
-                self.results = items;
+                self.results = self.project_results(items);
                 self.status = format!(
                     "{}: {} result(s) for '{}'",
                     response.mode.label(),
@@ -432,7 +598,6 @@ impl AppState {
     fn queue_lsp(&mut self, label: &'static str, command: LspCommand) -> Result<()> {
         let id = self.lsp_worker.request(command)?;
         self.pending_lsp = Some((id, label));
-        self.pending_semantic_trace = None;
         self.status = format!("{label}: pending...");
         Ok(())
     }
@@ -449,9 +614,12 @@ impl AppState {
             request_id: id,
             relation: relation.clone(),
             source: location,
-            session: format!("tui:semantic:{relation}"),
+            session: self.active_trace_session.clone(),
         });
-        self.set_status(format!("Trace semantic {relation}: pending..."));
+        self.set_status(format!(
+            "Trace semantic {relation}: pending in {}...",
+            self.active_trace_session
+        ));
         Ok(())
     }
 
@@ -461,10 +629,14 @@ impl AppState {
         };
 
         self.pending_lsp = None;
-        let pending_trace = self
-            .pending_semantic_trace
-            .take()
-            .filter(|trace| trace.request_id == response.id);
+        let pending_trace = match self.pending_semantic_trace.as_ref() {
+            Some(trace) if trace.request_id == response.id => self.pending_semantic_trace.take(),
+            Some(trace) if trace.request_id < response.id => {
+                self.pending_semantic_trace = None;
+                None
+            }
+            _ => None,
+        };
         match response.result {
             Ok(LspPayload::Items(items)) => {
                 let traced_entries = pending_trace
@@ -472,14 +644,17 @@ impl AppState {
                     .map(|trace| self.record_semantic_trace(trace, &items))
                     .transpose();
                 self.selected = 0;
-                self.results = items;
+                self.results = self.project_results(items);
                 match traced_entries {
                     Ok(Some(count)) => {
+                        let groups = semantic_result_groups(&self.results);
                         self.status = format!(
-                            "{}: {} result(s), traced {} semantic entry(s)",
+                            "{}: {} result(s), traced {} semantic entry(s) in {}{}",
                             response.label,
                             self.results.len(),
-                            count
+                            count,
+                            self.active_trace_session,
+                            groups.as_deref().map(|value| format!("; {value}")).unwrap_or_default()
                         );
                         self.status_level = StatusLevel::Info;
                     }
@@ -529,14 +704,15 @@ impl AppState {
             status: Some("observed".to_string()),
             priority: None,
         };
-        let source_id = crate::trace::record_location_for_workspace_with_metadata_and_id(
+        let source_record = crate::trace::record_location_for_workspace_with_metadata_dedup(
             &self.root,
             &trace.source,
             &format!("semantic {}: {}", trace.relation, location_display(&trace.source)),
             "semantic-root",
             root_metadata,
         )?;
-        let mut count = 1;
+        let source_id = source_record.id;
+        let mut count = usize::from(source_record.inserted);
         for item in items {
             let metadata = crate::trace::TraceMetadata {
                 session: Some(trace.session.clone()),
@@ -551,22 +727,180 @@ impl AppState {
                 status: Some("observed".to_string()),
                 priority: None,
             };
-            crate::trace::record_location_for_workspace_with_metadata(
+            let record = crate::trace::record_location_for_workspace_with_metadata_dedup(
                 &self.root,
                 &item.location,
                 item.display_text(),
                 &format!("semantic:{}", trace.relation),
                 metadata,
             )?;
-            count += 1;
+            if record.inserted {
+                count += 1;
+            }
         }
         Ok(count)
     }
 
     fn refresh_trace_items(&mut self) {
-        self.trace_items = crate::trace::list_for_workspace(&self.root)
-            .map(|entries| crate::trace::entries_to_items(&entries))
-            .unwrap_or_default();
+        self.trace_items = match self.trace_view {
+            TuiTraceView::Session => crate::trace::session_entries(&self.active_trace_session, Some(&self.root))
+                .map(|entries| crate::trace::entries_to_items(&entries))
+                .unwrap_or_default(),
+            TuiTraceView::Timeline => crate::trace::session_timeline(&self.active_trace_session, Some(&self.root))
+                .map(|items| trace_timeline_items_to_code_items(&items))
+                .unwrap_or_default(),
+            TuiTraceView::Graph => trace_graph_items(&self.root, &self.active_trace_session).unwrap_or_default(),
+        };
+    }
+
+    fn switch_trace_session(&mut self, session: &str) -> Result<()> {
+        let session = session.trim();
+        if session.is_empty() {
+            self.set_warning("Trace session name is empty");
+            return Ok(());
+        }
+        crate::trace::set_active_session(session)?;
+        self.active_trace_session = session.to_string();
+        self.refresh_trace_items();
+        if self.mode == SourceMode::Trace {
+            self.results = self.project_results(self.trace_items.clone());
+            self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        }
+        self.set_status(format!(
+            "Active trace session: {} ({} item(s))",
+            self.active_trace_session,
+            self.trace_items.len()
+        ));
+        Ok(())
+    }
+
+    fn show_trace_current(&mut self) {
+        self.set_status(format!(
+            "Active trace session: {} ({} item(s))",
+            self.active_trace_session,
+            self.trace_items.len()
+        ));
+    }
+
+    fn show_trace_sessions(&mut self) {
+        let sessions = crate::trace::list_sessions(false).unwrap_or_default();
+        if sessions.is_empty() {
+            self.set_warning(format!("No trace sessions; current is {}", self.active_trace_session));
+            return;
+        }
+        let names = sessions
+            .into_iter()
+            .take(8)
+            .map(|session| {
+                if session.name == self.active_trace_session {
+                    format!("{}*({})", session.name, session.entries)
+                } else {
+                    format!("{}({})", session.name, session.entries)
+                }
+            })
+            .collect::<Vec<String>>();
+        self.set_status(format!("Trace sessions: {}", names.join(", ")));
+    }
+
+    fn set_layout_preset(&mut self, preset: TuiLayoutPreset) {
+        self.layout_preset = preset;
+        self.set_status(format!("Layout preset: {}", preset.label()));
+    }
+
+    fn set_trace_view(&mut self, view: TuiTraceView) {
+        self.trace_view = view;
+        self.refresh_trace_items();
+        self.mode = SourceMode::Trace;
+        self.results = self.project_results(self.trace_items.clone());
+        self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        self.preview_scroll = 0;
+        self.set_status(format!("Trace view: {} ({} item(s))", view.label(), self.results.len()));
+    }
+
+    fn set_result_filter(&mut self, field: TuiResultFilterField, value: &str) {
+        let value = value.trim();
+        if value.is_empty() {
+            self.set_warning("Filter value is empty");
+            return;
+        }
+
+        self.result_filter = Some(TuiResultFilter {
+            field,
+            value: value.to_string(),
+        });
+        let current = std::mem::take(&mut self.results);
+        self.results = self.project_results(current);
+        self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        self.set_status(format!(
+            "Filter {} applied: {} result(s)",
+            self.result_filter_label(),
+            self.results.len()
+        ));
+    }
+
+    fn clear_result_filter(&mut self) -> Result<()> {
+        self.result_filter = None;
+        self.refresh()?;
+        self.set_status(format!("Filter cleared: {} result(s)", self.results.len()));
+        Ok(())
+    }
+
+    fn set_result_group(&mut self, group: TuiResultGroup) {
+        self.result_group = group;
+        let current = std::mem::take(&mut self.results);
+        self.results = self.project_results(current);
+        self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        self.set_status(format!("Group: {}", group.label()));
+    }
+
+    fn project_results(&self, items: Vec<CodeItem>) -> Vec<CodeItem> {
+        let mut items = match &self.result_filter {
+            Some(filter) => items
+                .into_iter()
+                .filter(|item| result_filter_matches(item, filter))
+                .collect::<Vec<CodeItem>>(),
+            None => items,
+        };
+        match self.result_group {
+            TuiResultGroup::None => {}
+            TuiResultGroup::Kind => items.sort_by_key(result_kind_group_key),
+            TuiResultGroup::Path => items.sort_by_key(result_path_group_key),
+        }
+        items
+    }
+
+    fn result_filter_label(&self) -> String {
+        self.result_filter
+            .as_ref()
+            .map(TuiResultFilter::label)
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn health_summary(&self) -> String {
+        let index = match crate::index::status(&self.root) {
+            Ok(status) if status.is_corrupt => "index=corrupt".to_string(),
+            Ok(status) if !status.exists => "index=missing".to_string(),
+            Ok(status) if status.is_stale => format!("index=stale({}/{})", status.file_count, status.symbol_count),
+            Ok(status) => format!("index=ok({}/{})", status.file_count, status.symbol_count),
+            Err(_) => "index=unknown".to_string(),
+        };
+        let lsp = if self.pending_lsp.is_some() {
+            "lsp=pending"
+        } else {
+            self.semantic_status.as_str()
+        };
+        let dap = if self.pending_dap.is_some() {
+            "dap=pending".to_string()
+        } else {
+            format!("dap={}", self.dap_snapshot.state.as_str())
+        };
+        format!(
+            "{index} {lsp} {dap} trace={}:{} filter={} group={}",
+            self.active_trace_session,
+            self.trace_view.label(),
+            self.result_filter_label(),
+            self.result_group.label()
+        )
     }
 
     fn refresh_debug_profiles(&mut self) {
@@ -605,6 +939,11 @@ impl AppState {
             locked_preview: self.locked_preview.as_ref().map(TuiSavedLocation::from_location),
             preview_scroll: self.preview_scroll,
             command_history,
+            active_trace_session: Some(self.active_trace_session.clone()),
+            layout_preset: Some(self.layout_preset.label().to_string()),
+            trace_view: Some(self.trace_view.label().to_string()),
+            result_filter: self.result_filter.as_ref().map(TuiResultFilter::label),
+            result_group: Some(self.result_group.label().to_string()),
             ..TuiPersistentState::default()
         }
     }
@@ -693,7 +1032,7 @@ impl AppState {
 
     fn load_pinned_results(&mut self) {
         self.mode = SourceMode::Pinned;
-        self.results = self.pinned_items.clone();
+        self.results = self.project_results(self.pinned_items.clone());
         self.selected = 0;
         self.preview_scroll = 0;
         self.set_status(format!("Pins: {} result(s)", self.results.len()));
@@ -705,7 +1044,22 @@ impl AppState {
             return Ok(());
         };
 
-        crate::trace::record_code_item_for_workspace(&self.root, &item, "tui-open")?;
+        let metadata = crate::trace::TraceMetadata {
+            session: Some(self.active_trace_session.clone()),
+            parent: None,
+            branch: Some("tui".to_string()),
+            tags: vec!["tui".to_string(), "open".to_string()],
+            note: None,
+            status: None,
+            priority: None,
+        };
+        crate::trace::record_location_for_workspace_with_metadata(
+            &self.root,
+            &item.location,
+            item.display_text(),
+            "tui-open",
+            metadata,
+        )?;
         self.push_navigation(item.clone());
         crate::editor::open_location(&item.location, self.config.editor.command.as_deref())?;
         self.refresh_trace_items();
@@ -719,7 +1073,22 @@ impl AppState {
             return Ok(());
         };
 
-        crate::trace::record_code_item_for_workspace(&self.root, &item, "bookmark")?;
+        let metadata = crate::trace::TraceMetadata {
+            session: Some(self.active_trace_session.clone()),
+            parent: None,
+            branch: Some("tui".to_string()),
+            tags: vec!["tui".to_string(), "bookmark".to_string()],
+            note: None,
+            status: None,
+            priority: None,
+        };
+        crate::trace::record_location_for_workspace_with_metadata(
+            &self.root,
+            &item.location,
+            item.display_text(),
+            "bookmark",
+            metadata,
+        )?;
         self.push_navigation(item.clone());
         self.refresh_trace_items();
         self.status = format!("Bookmarked {}", item.display_text());
@@ -1234,22 +1603,14 @@ impl AppState {
             return Ok(());
         }
 
+        let entries = crate::trace::session_entries(&self.active_trace_session, Some(&self.root))?;
         let mut seen = std::collections::BTreeSet::new();
-        let breakpoints = self
-            .trace_items
-            .iter()
-            .filter_map(|item| {
-                let line = item.location.line?;
-                let key = (item.location.path.clone(), line, item.location.column);
-                if seen.insert(key) {
-                    Some(crate::dap::DapBreakpoint::from_location(&item.location))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<crate::dap::DapBreakpoint>>();
+        let breakpoints = self.iter_session_entries_as_breakpoints(&entries, &mut seen);
         if breakpoints.is_empty() {
-            self.set_warning("Trace has no line locations for a DAP profile");
+            self.set_warning(format!(
+                "Trace session {} has no line locations for a DAP profile",
+                self.active_trace_session
+            ));
             return Ok(());
         }
 
@@ -1257,8 +1618,34 @@ impl AppState {
         profile.name = name.to_string();
         profile.breakpoints = breakpoints;
         crate::dap::save_profile(&self.root, profile)?;
-        self.set_status(format!("Saved DAP profile from trace: {name}"));
+        self.set_status(format!(
+            "Saved DAP profile from trace session {}: {name}",
+            self.active_trace_session
+        ));
         Ok(())
+    }
+
+    fn iter_session_entries_as_breakpoints(
+        &self,
+        entries: &[crate::trace::TraceEntry],
+        seen: &mut std::collections::BTreeSet<(PathBuf, usize, Option<usize>)>,
+    ) -> Vec<crate::dap::DapBreakpoint> {
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let line = entry.line?;
+                let key = (entry.path.clone(), line, entry.column);
+                if seen.insert(key) {
+                    Some(crate::dap::DapBreakpoint::from_location(&Location::new(
+                        entry.path.clone(),
+                        Some(line),
+                        entry.column,
+                    )))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<crate::dap::DapBreakpoint>>()
     }
 
     fn dap_stopped_location(&self) -> Option<Location> {
@@ -1315,16 +1702,21 @@ impl AppState {
         };
         let location = Location::new(&path, Some(stopped_location.line), stopped_location.column);
         let reason = snapshot.stop_reason.as_deref().unwrap_or("stopped");
+        let breakpoint_state = dap_breakpoint_state(snapshot);
+        let mut tags = vec![
+            "dap".to_string(),
+            "debug".to_string(),
+            "stop".to_string(),
+            reason.to_string(),
+        ];
+        if let Some(state) = &breakpoint_state {
+            tags.push(state.to_string());
+        }
         let metadata = crate::trace::TraceMetadata {
-            session: Some(format!("dap:{}", snapshot.profile)),
+            session: Some(self.active_trace_session.clone()),
             parent: None,
             branch: Some(snapshot.adapter.clone()),
-            tags: vec![
-                "dap".to_string(),
-                "debug".to_string(),
-                "stop".to_string(),
-                reason.to_string(),
-            ],
+            tags,
             note: Some(dap_trace_note(snapshot)),
             status: Some("observed".to_string()),
             priority: None,
@@ -1672,6 +2064,43 @@ impl AppState {
             return Ok(true);
         }
 
+        if let Some(rest) = command.strip_prefix("layout ") {
+            match TuiLayoutPreset::parse(rest) {
+                Some(preset) => self.set_layout_preset(preset),
+                None => self.set_warning(format!("Unknown layout preset: {}", rest.trim())),
+            }
+            return Ok(true);
+        }
+
+        if let Some(rest) = command.strip_prefix("filter ") {
+            let rest = rest.trim();
+            if matches!(rest, "clear" | "none" | "off") {
+                self.clear_result_filter()?;
+                return Ok(true);
+            }
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let field = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            match TuiResultFilterField::parse(field) {
+                Some(field) => self.set_result_filter(field, value),
+                None => self.set_warning(format!("Unknown filter field: {field}")),
+            }
+            return Ok(true);
+        }
+
+        if let Some(rest) = command.strip_prefix("group ") {
+            match TuiResultGroup::parse(rest) {
+                Some(group) => self.set_result_group(group),
+                None => self.set_warning(format!("Unknown result group: {}", rest.trim())),
+            }
+            return Ok(true);
+        }
+
+        if matches!(command, "health" | "status health") {
+            self.set_status(self.health_summary());
+            return Ok(true);
+        }
+
         if let Some(rest) = command.strip_prefix("preview ") {
             match rest.trim() {
                 "lock" | "toggle" => self.toggle_preview_lock(),
@@ -1824,16 +2253,28 @@ impl AppState {
         }
 
         if let Some(rest) = command.strip_prefix("trace ") {
-            if matches!(rest.trim(), "break" | "breakpoint") {
+            let rest = rest.trim();
+            if matches!(rest, "break" | "breakpoint") {
                 self.add_trace_breakpoint();
-            } else if let Some(name) = rest.trim().strip_prefix("dap-profile ") {
+            } else if let Some(name) = rest.strip_prefix("session ").or_else(|| rest.strip_prefix("use ")) {
+                self.switch_trace_session(name)?;
+            } else if let Some(view) = rest.strip_prefix("view ") {
+                match TuiTraceView::parse(view) {
+                    Some(view) => self.set_trace_view(view),
+                    None => self.set_warning(format!("Unknown trace view: {}", view.trim())),
+                }
+            } else if matches!(rest, "current" | "session" | "active") {
+                self.show_trace_current();
+            } else if matches!(rest, "sessions" | "list") {
+                self.show_trace_sessions();
+            } else if let Some(name) = rest.strip_prefix("dap-profile ") {
                 self.save_dap_profile_from_trace(name)?;
-            } else if let Some(relation) = rest.trim().strip_prefix("semantic") {
+            } else if let Some(relation) = rest.strip_prefix("semantic") {
                 self.queue_trace_semantic(relation.trim())?;
-            } else if is_semantic_relation_alias(rest.trim()) {
-                self.queue_trace_semantic(rest.trim())?;
+            } else if is_semantic_relation_alias(rest) {
+                self.queue_trace_semantic(rest)?;
             } else {
-                self.set_warning(format!("Unknown trace command: {}", rest.trim()));
+                self.set_warning(format!("Unknown trace command: {rest}"));
             }
             return Ok(true);
         }
@@ -1891,6 +2332,14 @@ impl AppState {
             | "diagnostics" | "search" | "text" => {
                 let mode = parse_mode(Some(command))?;
                 self.set_source(mode)?;
+                Ok(true)
+            }
+            "layout" => {
+                self.set_status(format!("Layout preset: {}", self.layout_preset.label()));
+                Ok(true)
+            }
+            "health" => {
+                self.set_status(self.health_summary());
                 Ok(true)
             }
             "delete" | "del" | "remove" => {
@@ -2113,6 +2562,10 @@ pub fn format_script_summary(summary: &TuiScriptSummary, format: &str) -> Result
 
 fn execute_script_command(app: &mut AppState, command: &str) -> Result<()> {
     let command = command.strip_prefix(':').unwrap_or(command).trim();
+    if let Some(rest) = command.strip_prefix("assert ") {
+        return execute_script_assertion(app, rest.trim());
+    }
+
     if let Some(rest) = command.strip_prefix("command ") {
         return app.execute_palette_command(rest.trim());
     }
@@ -2153,6 +2606,130 @@ fn execute_script_command(app: &mut AppState, command: &str) -> Result<()> {
     app.execute_palette_command(command)
 }
 
+fn execute_script_assertion(app: &AppState, assertion: &str) -> Result<()> {
+    if let Some(expected) = assertion.strip_prefix("status contains ") {
+        return assert_contains("status", &app.status, expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("selected contains ") {
+        let selected = app
+            .current_item()
+            .map(|item| item.display_text().to_string())
+            .unwrap_or_else(|| "none".to_string());
+        return assert_contains("selected", &selected, expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("mode ") {
+        let expected = parse_mode(Some(expected.trim()))?;
+        return assert_equal("mode", app.mode.short_label(), expected.short_label());
+    }
+    if let Some(expected) = assertion.strip_prefix("layout ") {
+        let expected = TuiLayoutPreset::parse(expected.trim())
+            .ok_or_else(|| AppError::General(format!("Unsupported layout assertion: {}", expected.trim())))?;
+        return assert_equal("layout", app.layout_preset.label(), expected.label());
+    }
+    if let Some(expected) = assertion.strip_prefix("trace-view ") {
+        let expected = TuiTraceView::parse(expected.trim())
+            .ok_or_else(|| AppError::General(format!("Unsupported trace-view assertion: {}", expected.trim())))?;
+        return assert_equal("trace-view", app.trace_view.label(), expected.label());
+    }
+    if let Some(expected) = assertion.strip_prefix("filter ") {
+        return assert_equal("filter", &app.result_filter_label(), expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("group ") {
+        let expected = TuiResultGroup::parse(expected.trim())
+            .ok_or_else(|| AppError::General(format!("Unsupported group assertion: {}", expected.trim())))?;
+        return assert_equal("group", app.result_group.label(), expected.label());
+    }
+    if let Some(expected) = assertion
+        .strip_prefix("trace-session ")
+        .or_else(|| assertion.strip_prefix("session "))
+    {
+        return assert_equal("trace-session", &app.active_trace_session, expected.trim());
+    }
+    if assertion == "pending none" {
+        let pending = script_pending(app);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        return Err(AppError::General(format!(
+            "TUI script assertion failed: pending expected none, got {}",
+            pending.join(", ")
+        )));
+    }
+    if let Some(rest) = assertion.strip_prefix("results ") {
+        return assert_count("results", app.results.len(), rest.trim());
+    }
+    if let Some(rest) = assertion.strip_prefix("trace ") {
+        return assert_count("trace", app.trace_items.len(), rest.trim());
+    }
+    if let Some(rest) = assertion.strip_prefix("breakpoints ") {
+        return assert_count("breakpoints", app.breakpoints.len(), rest.trim());
+    }
+    if let Some(rest) = assertion.strip_prefix("pins ") {
+        return assert_count("pins", app.pinned_items.len(), rest.trim());
+    }
+    if let Some(rest) = assertion.strip_prefix("navigation ") {
+        return assert_count("navigation", app.navigation.len(), rest.trim());
+    }
+
+    Err(AppError::General(format!(
+        "Unsupported TUI script assertion: {assertion}"
+    )))
+}
+
+fn assert_contains(name: &str, actual: &str, expected: &str) -> Result<()> {
+    if actual.contains(expected) {
+        return Ok(());
+    }
+    Err(AppError::General(format!(
+        "TUI script assertion failed: {name} should contain {expected:?}, got {actual:?}"
+    )))
+}
+
+fn assert_equal(name: &str, actual: &str, expected: &str) -> Result<()> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(AppError::General(format!(
+        "TUI script assertion failed: {name} expected {expected:?}, got {actual:?}"
+    )))
+}
+
+fn assert_count(name: &str, actual: usize, expression: &str) -> Result<()> {
+    let mut parts = expression.split_whitespace();
+    let operator = parts
+        .next()
+        .ok_or_else(|| AppError::General(format!("Missing assertion operator for {name}")))?;
+    let expected = parts
+        .next()
+        .ok_or_else(|| AppError::General(format!("Missing assertion count for {name}")))?
+        .parse::<usize>()
+        .map_err(|err| AppError::General(format!("Invalid assertion count for {name}: {err}")))?;
+    if parts.next().is_some() {
+        return Err(AppError::General(format!(
+            "Unexpected trailing assertion text for {name}: {expression}"
+        )));
+    }
+    let matched = match operator {
+        "==" | "=" => actual == expected,
+        "!=" => actual != expected,
+        ">" => actual > expected,
+        ">=" => actual >= expected,
+        "<" => actual < expected,
+        "<=" => actual <= expected,
+        other => {
+            return Err(AppError::General(format!(
+                "Unsupported assertion operator for {name}: {other}"
+            )))
+        }
+    };
+    if matched {
+        return Ok(());
+    }
+    Err(AppError::General(format!(
+        "TUI script assertion failed: {name} {operator} {expected}, got {actual}"
+    )))
+}
+
 fn wait_for_script_idle(app: &mut AppState, timeout: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -2191,6 +2768,11 @@ fn script_summary(app: &AppState, steps: Vec<TuiScriptStep>) -> TuiScriptSummary
         root: app.root.clone(),
         mode: app.mode.short_label().to_string(),
         query: app.query.clone(),
+        layout: app.layout_preset.label().to_string(),
+        active_trace_session: app.active_trace_session.clone(),
+        trace_view: app.trace_view.label().to_string(),
+        result_filter: app.result_filter_label(),
+        result_group: app.result_group.label().to_string(),
         result_count: app.results.len(),
         selected_index: selected_script_index(app),
         selected: app.current_item().map(script_item),
@@ -2260,6 +2842,13 @@ fn format_script_summary_text(summary: &TuiScriptSummary) -> String {
     output.push_str(&format!("root: {}\n", summary.root.display()));
     output.push_str(&format!("mode: {}\n", summary.mode));
     output.push_str(&format!("query: {}\n", summary.query));
+    output.push_str(&format!("layout: {}\n", summary.layout));
+    output.push_str(&format!("trace_session: {}\n", summary.active_trace_session));
+    output.push_str(&format!("trace_view: {}\n", summary.trace_view));
+    output.push_str(&format!(
+        "projection: filter={} group={}\n",
+        summary.result_filter, summary.result_group
+    ));
     output.push_str(&format!("results: {}\n", summary.result_count));
     if let Some(selected) = &summary.selected {
         output.push_str(&format!(
@@ -2357,6 +2946,118 @@ fn same_code_item(left: &CodeItem, right: &CodeItem) -> bool {
 
 fn saved_items_to_code_items(items: Vec<TuiSavedItem>) -> Vec<CodeItem> {
     items.into_iter().filter_map(TuiSavedItem::into_code_item).collect()
+}
+
+fn parse_result_filter_value(value: &str) -> Option<TuiResultFilter> {
+    let (field, value) = value.split_once('=').or_else(|| value.split_once(':'))?;
+    let field = TuiResultFilterField::parse(field)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(TuiResultFilter {
+        field,
+        value: value.to_string(),
+    })
+}
+
+fn result_filter_matches(item: &CodeItem, filter: &TuiResultFilter) -> bool {
+    let needle = filter.value.to_lowercase();
+    match filter.field {
+        TuiResultFilterField::Kind => {
+            code_item_kind_label(&item.kind).contains(&needle) || item.detail.to_lowercase().contains(&needle)
+        }
+        TuiResultFilterField::Path => item.location.path.to_string_lossy().to_lowercase().contains(&needle),
+        TuiResultFilterField::Text => {
+            item.display_text().to_lowercase().contains(&needle)
+                || item.label.to_lowercase().contains(&needle)
+                || item.detail.to_lowercase().contains(&needle)
+        }
+    }
+}
+
+fn result_kind_group_key(item: &CodeItem) -> (String, String) {
+    (
+        code_item_kind_label(&item.kind).to_string(),
+        item.display_text().to_string(),
+    )
+}
+
+fn result_path_group_key(item: &CodeItem) -> (String, String) {
+    let path = item.location.path.to_string_lossy().replace('\\', "/");
+    (path, item.display_text().to_string())
+}
+
+fn trace_timeline_items_to_code_items(items: &[crate::trace::TraceTimelineItem]) -> Vec<CodeItem> {
+    items
+        .iter()
+        .map(|item| {
+            let line = item.line.unwrap_or(1);
+            let display_path = item.path.to_string_lossy().replace('\\', "/");
+            let tags = if item.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" tags={}", item.tags.join(","))
+            };
+            let status = item
+                .status
+                .as_deref()
+                .map(|value| format!(" status={value}"))
+                .unwrap_or_default();
+            CodeItem::symbol(
+                item.path.clone(),
+                display_path,
+                line,
+                item.column,
+                format!("#{} {}{}{} {}", item.id, item.timestamp, status, tags, item.label),
+                format!("trace-timeline:{}", item.kind),
+            )
+        })
+        .collect()
+}
+
+fn trace_graph_items(root: &std::path::Path, session: &str) -> Result<Vec<CodeItem>> {
+    let report = crate::trace::graph_report_with_options(
+        Some(root),
+        &crate::trace::TraceGraphOptions {
+            filter: crate::trace::TraceEntryFilter {
+                session: Some(session.to_string()),
+                ..crate::trace::TraceEntryFilter::default()
+            },
+            collapse_threshold: 12,
+        },
+    )?;
+    let mut items = Vec::new();
+    for collapsed in &report.collapsed {
+        let display_path = collapsed.path.to_string_lossy().replace('\\', "/");
+        items.push(CodeItem::symbol(
+            collapsed.path.clone(),
+            display_path,
+            1,
+            None,
+            format!(
+                "summary {} entries={} session={} kind={}",
+                collapsed.id, collapsed.entries, collapsed.session, collapsed.kind
+            ),
+            "trace-graph-summary",
+        ));
+    }
+    for edge in &report.edges {
+        let Some(node) = report.nodes.iter().find(|node| node.id == edge.to) else {
+            continue;
+        };
+        let line = node.line.unwrap_or(1);
+        let display_path = node.path.to_string_lossy().replace('\\', "/");
+        items.push(CodeItem::symbol(
+            node.path.clone(),
+            display_path,
+            line,
+            node.column,
+            format!("{} -> {} [{}] {}", edge.from, edge.to, edge.kind, edge.label),
+            "trace-graph-edge",
+        ));
+    }
+    Ok(items)
 }
 
 fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
@@ -2591,6 +3292,46 @@ fn limited_join(values: &[String], max: usize) -> String {
     }
 }
 
+fn semantic_result_groups(items: &[CodeItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for item in items {
+        let key = match item.kind {
+            CodeItemKind::File => "file".to_string(),
+            CodeItemKind::Symbol => item.detail.split_whitespace().next().unwrap_or("symbol").to_string(),
+            CodeItemKind::TextMatch => "text".to_string(),
+        };
+        *counts.entry(key).or_default() += 1;
+    }
+    Some(
+        counts
+            .into_iter()
+            .map(|(kind, count)| format!("{kind}={count}"))
+            .collect::<Vec<String>>()
+            .join(", "),
+    )
+}
+
+fn dap_breakpoint_state(snapshot: &crate::dap::DapSessionSnapshot) -> Option<&'static str> {
+    if snapshot.breakpoints.is_empty() {
+        return None;
+    }
+    let verified = snapshot
+        .breakpoints
+        .iter()
+        .filter(|line| line.split_whitespace().any(|part| part == "verified"))
+        .count();
+    if verified == snapshot.breakpoints.len() {
+        Some("verified-breakpoints")
+    } else if verified == 0 {
+        Some("unverified-breakpoints")
+    } else {
+        Some("partial-breakpoints")
+    }
+}
+
 fn dap_trace_note(snapshot: &crate::dap::DapSessionSnapshot) -> String {
     let mut parts = Vec::new();
     parts.push(format!("status={}", snapshot.status));
@@ -2609,6 +3350,15 @@ fn dap_trace_note(snapshot: &crate::dap::DapSessionSnapshot) -> String {
         parts.push(format!("watches={}", limited_join(&snapshot.watches, 4)));
     }
     if !snapshot.breakpoints.is_empty() {
+        let verified = snapshot
+            .breakpoints
+            .iter()
+            .filter(|line| line.split_whitespace().any(|part| part == "verified"))
+            .count();
+        parts.push(format!(
+            "breakpoint_verification={verified}/{}",
+            snapshot.breakpoints.len()
+        ));
         parts.push(format!("breakpoints={}", limited_join(&snapshot.breakpoints, 4)));
     }
     parts.join("; ")
@@ -2743,6 +3493,26 @@ fn palette_command_names() -> &'static [&'static str] {
         "trace semantic outgoing",
         "trace refs",
         "trace def",
+        "trace session ",
+        "trace view session",
+        "trace view timeline",
+        "trace view graph",
+        "trace current",
+        "trace sessions",
+        "layout search",
+        "layout debug",
+        "layout trace",
+        "layout semantic",
+        "layout balanced",
+        "filter kind ",
+        "filter path ",
+        "filter source ",
+        "filter text ",
+        "filter clear",
+        "group kind",
+        "group path",
+        "group none",
+        "health",
         "break",
         "debug",
         "dap smoke",
@@ -2830,8 +3600,8 @@ fn command_hint_text(command: &str) -> String {
 }
 
 fn command_help_text() -> String {
-    "Commands: source <mode> | query <text> | def refs type impl symbols diag incoming outgoing hover | trace semantic/breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down quit"
-        .to_string()
+    "Commands: source <mode> | query <text> | layout search/debug/trace/semantic | filter kind/path/text <value> | group kind/path/none | trace view/session/current/sessions/semantic/breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down | health | quit"
+		.to_string()
 }
 
 fn compact_status(text: &str) -> String {
@@ -2921,8 +3691,12 @@ mod tests {
         assert!(palette_command_matches("break sy").contains(&"break sync"));
         assert!(palette_command_matches("trace dap").contains(&"trace dap-profile "));
         assert!(palette_command_matches("trace sem").contains(&"trace semantic"));
+        assert!(palette_command_matches("trace view g").contains(&"trace view graph"));
+        assert!(palette_command_matches("layout d").contains(&"layout debug"));
+        assert!(palette_command_matches("filter k").contains(&"filter kind "));
         assert!(command_help_text().contains("watch add/del/clear/refresh"));
-        assert!(command_help_text().contains("trace semantic"));
+        assert!(command_help_text().contains("layout search/debug/trace/semantic"));
+        assert!(command_help_text().contains("trace view/session/current/sessions/semantic"));
     }
 
     #[test]

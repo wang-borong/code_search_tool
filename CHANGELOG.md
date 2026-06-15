@@ -4,6 +4,14 @@
 
 ### Added
 
+- Added TUI layout presets, trace session/timeline/graph views, result filtering/grouping commands, health summaries, persistent layout/filter state, and matching `tui-script` assertions.
+- Added trace graph filters/collapse controls, filtered session diffs, session rename/merge/split commands, and trace store verify/repair/compact maintenance commands.
+- Added DAP advanced breakpoint metadata for CLI launch/profile/session smoke/adapter sessions plus saved-profile transcript export.
+- Added benchmark baseline/compare commands, TUI source rows in `bench all`, and smoke tiers (`fast`, `full`, `release`) with coverage for the new trace/DAP/bench/TUI surfaces.
+- Added active trace sessions across CLI/TUI with `trace use/current`, TUI `trace session/current/sessions`, current-session trace panels, and current-session DAP profile generation.
+- Added batch semantic tracing from `--targets-file` and `--from-query`, deduplicated semantic trace records, fallback confidence/reason metadata, and trace graph export in text/json/mermaid/dot.
+- Added `tui-script assert ...` checks plus non-interactive `bench tui` source-load baselines and trace graph timing.
+- Added config doctor checks for TUI key conflicts, theme color conflicts, and saved DAP profile conflicts or missing launch inputs.
 - Added lightweight syntax highlighting for the ratatui preview pane and richer color styling across results, trace, debug, and activity panels.
 - Added semantic trace recording with `trace semantic` and TUI `: trace semantic [relation]`, linking LSP/index graph edges into trace sessions.
 - Added `tui-script` for headless TUI command playback, including selection, movement, waits, DAP smoke commands, and text/JSON summaries.

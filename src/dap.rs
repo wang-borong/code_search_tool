@@ -523,7 +523,7 @@ pub struct MockDapAdapter {
     next_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapSessionSmokeReport {
     pub request_count: usize,
     pub response_count: usize,

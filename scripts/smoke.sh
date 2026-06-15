@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+SMOKE_TIER="${1:-full}"
+case "$SMOKE_TIER" in
+	fast | full | release) ;;
+	*)
+		echo "usage: scripts/smoke.sh [fast|full|release]" >&2
+		exit 2
+		;;
+esac
+
 if ! command -v rtk >/dev/null 2>&1; then
 	rtk() {
 		"$@"
@@ -50,16 +59,44 @@ rtk tee "$SMOKE_ROOT/tui-script.fcs" >/dev/null <<'EOF'
 source symbols
 query main
 select 1
+layout debug
+assert layout debug
+filter kind function
+assert filter kind=function
+group path
+assert group path
+filter clear
+assert filter none
+group none
+assert group none
+trace view timeline
+assert trace-view timeline
+trace view graph
+assert trace-view graph
+source symbols
+select 1
 preview down
 break
 dap smoke
 wait 1000
 source debug
+assert results >= 1
+assert breakpoints >= 1
+assert pending none
+EOF
+rtk tee "$SMOKE_ROOT/semantic-targets.txt" >/dev/null <<EOF
+$SMOKE_ROOT/main.c:8:5
+$SMOKE_ROOT/main.c:4:2
 EOF
 
-rtk cargo test
-rtk cargo clippy -- -D warnings
+if [[ "$SMOKE_TIER" != "fast" ]]; then
+	rtk cargo test
+	rtk cargo clippy -- -D warnings
+fi
 rtk cargo build
+if [[ "$SMOKE_TIER" == "release" ]]; then
+	rtk cargo build --release
+fi
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs complete bash >/dev/null
@@ -131,8 +168,11 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs query "kind:function n
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench search main "$SMOKE_ROOT" --format json --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench index "$SMOKE_ROOT" --format json --limit 5 --query main --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench trace --format json --warn-ms 10000
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench tui "$SMOKE_ROOT" --query main --format json --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench preview "$SMOKE_ROOT/main.c:8" --format json --warn-ms 10000
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench all "$SMOKE_ROOT" --format json --limit 5 --query main --warn-ms 10000
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench baseline "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs bench compare "$SMOKE_ROOT" --format json --strict >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs files --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs symbol --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs type-def --help
@@ -158,13 +198,23 @@ fi
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace export --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format mermaid >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format dot >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace use "$TRACE_SESSION_NAME"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace current
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT/main.c:8:5" --session "$TRACE_SESSION_NAME" --tag smoke
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace note latest "smoke note"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace status latest open
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace priority latest high
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace semantic "$SMOKE_ROOT/main.c:8:5" --directory "$SMOKE_ROOT" --relation outgoing --session "$TRACE_SESSION_NAME" --tag smoke --fallback index --cache --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace semantic --from-query "kind:function name:main" --directory "$SMOKE_ROOT" --query-source index --query-limit 2 --relation references --tag smoke --fallback index --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace semantic --targets-file "$SMOKE_ROOT/semantic-targets.txt" --directory "$SMOKE_ROOT" --relation outgoing --session "$TRACE_SESSION_NAME" --tag smoke --fallback index --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT/main.c:4:2" --session "${TRACE_SESSION_NAME}-next" --tag smoke
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace list --session "$TRACE_SESSION_NAME" --tag smoke
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format json --session "$TRACE_SESSION_NAME" --tag smoke --collapse-threshold 1 >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format mermaid --session "$TRACE_SESSION_NAME" --relation outgoing --collapse-threshold 1 >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace graph --format dot --session "$TRACE_SESSION_NAME" --kind bookmark >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace sessions
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace report "$TRACE_SESSION_NAME" --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace timeline "$TRACE_SESSION_NAME" --format json
@@ -173,6 +223,15 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace replay-plan "$TR
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace structured "$TRACE_SESSION_NAME" --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace insights "$TRACE_SESSION_NAME" --directory "$SMOKE_ROOT" --format json
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace diff "$TRACE_SESSION_NAME" "${TRACE_SESSION_NAME}-next" --format json
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace diff "$TRACE_SESSION_NAME" "${TRACE_SESSION_NAME}-next" --format json --filter semantic >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT/main.c:4:2" --session "${TRACE_SESSION_NAME}-edit-a" --tag edit
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace add "$SMOKE_ROOT/main.c:8:5" --session "${TRACE_SESSION_NAME}-edit-b" --tag keep
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace rename "${TRACE_SESSION_NAME}-edit-a" "${TRACE_SESSION_NAME}-edit-renamed"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace merge "${TRACE_SESSION_NAME}-edit-renamed" "${TRACE_SESSION_NAME}-edit-b"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace split "${TRACE_SESSION_NAME}-edit-b" "${TRACE_SESSION_NAME}-edit-split" --tag edit
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace verify --directory "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace repair --directory "$SMOKE_ROOT" --format json >/dev/null
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace compact --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace archive "$TRACE_SESSION_NAME"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace sessions --archived
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs trace unarchive "$TRACE_SESSION_NAME"
@@ -211,19 +270,23 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs debug run-profile "$PR
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs debug delete-profile "$PROFILE_NAME" --directory "$SMOKE_ROOT"
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap launch target/debug/fcs -b src/main.rs:1 --bundle -- --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap launch target/debug/fcs -b src/main.rs:1 --break-condition "argc > 0" --break-hit 1 --break-log "hit main" --bundle -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap launch target/debug/fcs --request attach --process-id $$ --bundle
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapters
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapters --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap templates
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap templates --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs -b src/main.rs:1 --cwd . --env FCS_SMOKE=1 -- --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs -b src/main.rs:1 --break-condition "argc > 0" --break-hit 1 --break-log "hit main" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs --request attach --process-id $$ --cwd . --env FCS_SMOKE=1
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap from-trace "$TRACE_SESSION_NAME" target/debug/fcs --name "${DAP_PROFILE_NAME}-trace" --directory "$SMOKE_ROOT" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap save-profile "$DAP_PROFILE_NAME" target/debug/fcs -b src/main.rs:1 --directory "$SMOKE_ROOT" -- --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap save-profile "${DAP_PROFILE_NAME}-advanced" target/debug/fcs -b src/main.rs:1 --break-condition "argc > 0" --break-hit 1 --break-log "hit main" --directory "$SMOKE_ROOT" -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap profiles "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap doctor "$SMOKE_ROOT" --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap doctor "$SMOKE_ROOT" --name "$DAP_PROFILE_NAME" --format text
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap request-profile "$DAP_PROFILE_NAME" --directory "$SMOKE_ROOT" --bundle
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap transcript "$DAP_PROFILE_NAME" --directory "$SMOKE_ROOT" --format json >/dev/null
 
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace profile delete "$WORKSPACE_PROFILE_NAME"
