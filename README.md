@@ -133,7 +133,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 
 ```bash
 # 格式
-fcs search <search_pattern> [directory] [options]
+fcs search <search_pattern> [path ...] [options]
 
 # 示例 1：在当前目录下搜索 "fn main"
 fcs search "fn main"
@@ -141,7 +141,10 @@ fcs search "fn main"
 # 示例 2：在指定目录 "/path/to/project" 下搜索 "struct Config"
 fcs search "struct Config" /path/to/project
 
-# 示例 3：传入额外的 Ripgrep 选项（例如不忽略任何文件、忽略大小写）
+# 示例 3：在多个文件或目录中搜索 "main"
+fcs search main install.sh README.md src
+
+# 示例 4：传入额外的 Ripgrep 选项（例如不忽略任何文件、忽略大小写）
 fcs search "TODO" -o --no-ignore -o -i
 ```
 

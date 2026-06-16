@@ -350,8 +350,9 @@ pub enum Commands {
         /// Search pattern (regex)
         pattern: String,
 
-        /// Target directory to search in
-        directory: Option<String>,
+        /// Target paths to search in
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
 
         /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
         #[arg(short, long, allow_hyphen_values = true)]
@@ -2455,7 +2456,7 @@ pub enum IgnoreAction {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Commands};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -2464,8 +2465,22 @@ mod tests {
     }
 
     #[test]
+    fn search_accepts_multiple_paths() {
+        let cli = Cli::try_parse_from(["fcs", "search", "main", "install.sh", "README.md"]).unwrap();
+
+        match cli.command {
+            Commands::Search { pattern, paths, .. } => {
+                assert_eq!(pattern, "main");
+                assert_eq!(paths, vec!["install.sh".to_string(), "README.md".to_string()]);
+            }
+            command => panic!("expected search command, got {command:?}"),
+        }
+    }
+
+    #[test]
     fn release_smoke_commands_parse() {
         let cases: &[&[&str]] = &[
+            &["fcs", "search", "main", "install.sh", "README.md"],
             &["fcs", "tui", "--mode", "files", "--query", "main"],
             &[
                 "fcs",

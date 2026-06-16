@@ -24,18 +24,18 @@ use fcs::search;
 
 fn handle_search(
     pattern: &str,
-    directory: Option<&String>,
+    paths: &[String],
     options: &[String],
     config: &fcs::config::Config,
 ) -> Result<(), AppError> {
     // Step 1: Search using regex + ignore crates + default ignore patterns
-    fcs::history::record("search", pattern, directory)?;
+    fcs::history::record("search", pattern, paths.first())?;
     let mut final_options = config.search.rg_options.clone();
     final_options.extend(options.iter().cloned());
 
-    let ignore_path = resolve_ignore_file(directory);
+    let ignore_path = resolve_ignore_file(paths.first());
 
-    let results = search::search(pattern, directory, &final_options, &config.search.ignore, &ignore_path)?;
+    let results = search::search_paths(pattern, paths, &final_options, &config.search.ignore, &ignore_path)?;
     let flat = results.flat();
 
     if flat.is_empty() {
@@ -5401,12 +5401,8 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
         } => {
             handle_symbols(directory.as_ref(), query.as_ref(), &option, &config)?;
         }
-        Commands::Search {
-            pattern,
-            directory,
-            option,
-        } => {
-            handle_search(&pattern, directory.as_ref(), &option, &config)?;
+        Commands::Search { pattern, paths, option } => {
+            handle_search(&pattern, &paths, &option, &config)?;
         }
         Commands::Complete { shell } => {
             let mut cmd = Cli::command();

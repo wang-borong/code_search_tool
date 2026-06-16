@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -163,12 +163,51 @@ pub fn search(
     default_ignore: &[String],
     ignore_file: &Path,
 ) -> Result<SearchResults> {
-    search_with_cancel(pattern, dir, rg_opts, default_ignore, ignore_file, None, None)
+    let paths: &[String] = match dir {
+        Some(dir) => std::slice::from_ref(dir),
+        None => &[],
+    };
+    search_paths(pattern, paths, rg_opts, default_ignore, ignore_file)
+}
+
+/// Run a regex search over one or more files/directories.
+pub fn search_paths(
+    pattern: &str,
+    paths: &[String],
+    rg_opts: &[String],
+    default_ignore: &[String],
+    ignore_file: &Path,
+) -> Result<SearchResults> {
+    search_with_cancel_paths(pattern, paths, rg_opts, default_ignore, ignore_file, None, None)
 }
 
 pub fn search_with_cancel(
     pattern: &str,
     dir: Option<&String>,
+    rg_opts: &[String],
+    default_ignore: &[String],
+    ignore_file: &Path,
+    cancel: Option<&SearchCancel>,
+    max_results: Option<usize>,
+) -> Result<SearchResults> {
+    let paths: &[String] = match dir {
+        Some(dir) => std::slice::from_ref(dir),
+        None => &[],
+    };
+    search_with_cancel_paths(
+        pattern,
+        paths,
+        rg_opts,
+        default_ignore,
+        ignore_file,
+        cancel,
+        max_results,
+    )
+}
+
+pub fn search_with_cancel_paths(
+    pattern: &str,
+    paths: &[String],
     rg_opts: &[String],
     default_ignore: &[String],
     ignore_file: &Path,
@@ -405,57 +444,18 @@ pub fn search_with_cancel(
         .build()
         .map_err(|e| AppError::General(e.to_string()))?;
 
-    let root = dir
-        .map(|d| Path::new(d).to_path_buf())
-        .unwrap_or_else(|| Path::new(".").to_path_buf());
-
-    let mut builder = WalkBuilder::new(&root);
-    builder
-        .hidden(false)
-        .standard_filters(true)
-        .ignore(true)
-        .git_ignore(true)
-        .git_global(true)
-        .follow_links(follow_links);
-
-    if let Some(depth) = max_depth {
-        builder.max_depth(Some(depth));
-    }
-
-    if no_ignore {
-        builder.ignore(false);
-        builder.git_ignore(false);
-        builder.git_global(false);
-        builder.parents(false);
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![Path::new(".").to_path_buf()]
     } else {
-        if ignore_file.exists() {
-            if let Some(err) = builder.add_ignore(ignore_file) {
-                return Err(AppError::General(format!("Failed to add ignore file: {err}")));
-            }
-        }
-        if !default_ignore.is_empty() {
-            let mut ovr = ignore::overrides::OverrideBuilder::new(&root);
-            for pat in default_ignore {
-                let pat = if pat.starts_with('!') {
-                    pat.clone()
-                } else {
-                    format!("!{}", pat)
-                };
-                ovr.add(&pat).map_err(|e| AppError::General(e.to_string()))?;
-            }
-            let overrides = ovr.build().map_err(|e| AppError::General(e.to_string()))?;
-            builder.overrides(overrides);
-        }
-    }
-
-    let walker = builder.build();
+        paths.iter().map(|path| Path::new(path).to_path_buf()).collect()
+    };
 
     let mut by_file: std::collections::BTreeMap<String, Vec<SearchResult>> = std::collections::BTreeMap::new();
     let mut total_results = 0usize;
 
     let mut searcher = SearcherBuilder::new().invert_match(invert_match).build();
 
-    for entry in walker {
+    for root in roots {
         if cancel.is_some_and(SearchCancel::is_cancelled) {
             return Err(AppError::General("Search cancelled".to_string()));
         }
@@ -463,75 +463,123 @@ pub fn search_with_cancel(
             break;
         }
 
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
+        let mut builder = WalkBuilder::new(&root);
+        builder
+            .hidden(false)
+            .standard_filters(true)
+            .ignore(true)
+            .git_ignore(true)
+            .git_global(true)
+            .follow_links(follow_links);
+
+        if let Some(depth) = max_depth {
+            builder.max_depth(Some(depth));
         }
 
-        let path = entry.path();
-        let rel_path = path_to_relative(path);
-        let mut file_results = Vec::new();
-
-        // Perform search using ripgrep searcher.
-        // Borrow rel_path and file_results instead of moving them.
-        let rel_path_clone = rel_path.clone();
-        let search_res = searcher.search_path(
-            &matcher,
-            path,
-            UTF8(|line_num, line_text| {
-                if cancel.is_some_and(SearchCancel::is_cancelled) {
-                    return Ok(false);
+        if no_ignore {
+            builder.ignore(false);
+            builder.git_ignore(false);
+            builder.git_global(false);
+            builder.parents(false);
+        } else {
+            if ignore_file.exists() {
+                if let Some(err) = builder.add_ignore(ignore_file) {
+                    return Err(AppError::General(format!("Failed to add ignore file: {err}")));
                 }
-                if max_results.is_some_and(|limit| total_results >= limit) {
-                    return Ok(false);
+            }
+            if !default_ignore.is_empty() {
+                let mut ovr = ignore::overrides::OverrideBuilder::new(&root);
+                for pat in default_ignore {
+                    let pat = if pat.starts_with('!') {
+                        pat.clone()
+                    } else {
+                        format!("!{}", pat)
+                    };
+                    ovr.add(&pat).map_err(|e| AppError::General(e.to_string()))?;
                 }
-                if let Some(limit) = max_count {
-                    if limit == 0 {
-                        return Ok(false);
-                    }
-                }
-
-                let line_num = line_num as usize;
-                // strip trailing newlines
-                let clean_line = line_text.trim_end_matches(&['\r', '\n'][..]).to_string();
-                let display = format!("{rel_path_clone}:{line_num}:{clean_line}");
-
-                let mut match_ranges = Vec::new();
-                for m in re.find_iter(&clean_line) {
-                    let char_start = clean_line[..m.start()].chars().count();
-                    let char_end = char_start + clean_line[m.start()..m.end()].chars().count();
-                    match_ranges.push((char_start, char_end));
-                }
-
-                file_results.push(SearchResult {
-                    path: rel_path_clone.clone(),
-                    line_num,
-                    line_text: clean_line,
-                    display,
-                    match_ranges,
-                });
-                total_results += 1;
-
-                if let Some(limit) = max_count {
-                    if file_results.len() >= limit {
-                        return Ok(false);
-                    }
-                }
-
-                Ok(true)
-            }),
-        );
-
-        // If search succeeded and we found matches, insert them
-        if search_res.is_ok() && !file_results.is_empty() {
-            by_file.insert(rel_path, file_results);
+                let overrides = ovr.build().map_err(|e| AppError::General(e.to_string()))?;
+                builder.overrides(overrides);
+            }
         }
 
-        if cancel.is_some_and(SearchCancel::is_cancelled) {
-            return Err(AppError::General("Search cancelled".to_string()));
+        for entry in builder.build() {
+            if cancel.is_some_and(SearchCancel::is_cancelled) {
+                return Err(AppError::General("Search cancelled".to_string()));
+            }
+            if max_results.is_some_and(|limit| total_results >= limit) {
+                break;
+            }
+
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                continue;
+            }
+
+            let path = entry.path();
+            let rel_path = path_to_relative(path);
+            let mut file_results = Vec::new();
+
+            // Perform search using ripgrep searcher.
+            // Borrow rel_path and file_results instead of moving them.
+            let rel_path_clone = rel_path.clone();
+            let search_res = searcher.search_path(
+                &matcher,
+                path,
+                UTF8(|line_num, line_text| {
+                    if cancel.is_some_and(SearchCancel::is_cancelled) {
+                        return Ok(false);
+                    }
+                    if max_results.is_some_and(|limit| total_results >= limit) {
+                        return Ok(false);
+                    }
+                    if let Some(limit) = max_count {
+                        if limit == 0 {
+                            return Ok(false);
+                        }
+                    }
+
+                    let line_num = line_num as usize;
+                    // strip trailing newlines
+                    let clean_line = line_text.trim_end_matches(&['\r', '\n'][..]).to_string();
+                    let display = format!("{rel_path_clone}:{line_num}:{clean_line}");
+
+                    let mut match_ranges = Vec::new();
+                    for m in re.find_iter(&clean_line) {
+                        let char_start = clean_line[..m.start()].chars().count();
+                        let char_end = char_start + clean_line[m.start()..m.end()].chars().count();
+                        match_ranges.push((char_start, char_end));
+                    }
+
+                    file_results.push(SearchResult {
+                        path: rel_path_clone.clone(),
+                        line_num,
+                        line_text: clean_line,
+                        display,
+                        match_ranges,
+                    });
+                    total_results += 1;
+
+                    if let Some(limit) = max_count {
+                        if file_results.len() >= limit {
+                            return Ok(false);
+                        }
+                    }
+
+                    Ok(true)
+                }),
+            );
+
+            // If search succeeded and we found matches, insert them.
+            if search_res.is_ok() && !file_results.is_empty() {
+                by_file.entry(rel_path).or_default().extend(file_results);
+            }
+
+            if cancel.is_some_and(SearchCancel::is_cancelled) {
+                return Err(AppError::General("Search cancelled".to_string()));
+            }
         }
     }
 
@@ -556,6 +604,32 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+
+    #[test]
+    fn test_search_paths_searches_multiple_files() {
+        let temp_dir = std::env::temp_dir().join(format!("fcs_search_multi_path_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let install_path = temp_dir.join("install.sh");
+        let readme_path = temp_dir.join("README.md");
+        std::fs::write(&install_path, "needle in install\n").unwrap();
+        std::fs::write(&readme_path, "needle in readme\n").unwrap();
+
+        let paths = vec![
+            install_path.to_string_lossy().to_string(),
+            readme_path.to_string_lossy().to_string(),
+        ];
+        let ignore_file = temp_dir.join("nonexistent.ignore");
+        let res = search_paths("needle", &paths, &[], &[], &ignore_file).unwrap();
+        let flat = res.flat();
+
+        assert_eq!(flat.len(), 2);
+        assert!(flat.iter().any(|result| result.path.ends_with("install.sh")));
+        assert!(flat.iter().any(|result| result.path.ends_with("README.md")));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_search_options() {
