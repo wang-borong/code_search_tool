@@ -8,6 +8,8 @@ use crate::config::Config;
 use crate::core::CodeItem;
 use crate::errors::{AppError, Result};
 
+const MAX_TUI_SOURCE_ITEMS: usize = 2000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SourceMode {
     Search,
@@ -128,6 +130,16 @@ impl SourceProvider for FilesSource {
 
 impl SourceProvider for SymbolsSource {
     fn load(&self, request: &SourceRequest) -> Result<Vec<CodeItem>> {
+        if let Some(items) = crate::index::query_code_items_with_cancel(
+            &request.root,
+            crate::index::IndexListKind::Symbols,
+            &request.query,
+            MAX_TUI_SOURCE_ITEMS,
+            Some(&request.cancel),
+        )? {
+            return Ok(items);
+        }
+
         let dir = request.root.to_string_lossy().to_string();
         let items = crate::symbols::find_symbols(Some(&dir), &[], &request.config.search.ignore, &request.ignore_path)?;
         Ok(filter_items(items, &request.query))

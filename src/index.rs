@@ -1,22 +1,29 @@
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
-use crate::core::CodeItem;
+use crate::core::{CodeItem, CodeItemKind, Location};
 use crate::errors::{AppError, Result};
 
 const INDEX_VERSION: u32 = 3;
 const INDEX_FILE_NAME: &str = "code_index.toml";
+const INDEX_META_FILE_NAME: &str = "code_index_meta.toml";
+const INDEX_FILES_FILE_NAME: &str = "code_index_files.toml";
+const INDEX_SYMBOLS_FILE_NAME: &str = "code_index_symbols.jsonl";
+const INDEX_SYMBOLS_MMAP_FILE_NAME: &str = "code_index_symbols.mmidx";
 const INDEX_SHARD_DIR_NAME: &str = "code_index_shards";
 const INDEX_SHARD_MANIFEST_FILE_NAME: &str = "manifest.toml";
 const INDEX_TMP_EXTENSION: &str = "tmp";
 const INDEX_DAEMON_HEARTBEAT_FILE_NAME: &str = "index-daemon.toml";
 const MAX_DAEMON_REPORT_CYCLES: usize = 128;
+const INDEX_SYMBOLS_MMAP_MAGIC: &str = "FCS_SYMBOLS_V1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodeIndex {
@@ -123,7 +130,7 @@ pub struct IndexStatus {
     pub missing_tracked_files: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexCount {
     pub name: String,
     pub count: usize,
@@ -140,6 +147,40 @@ pub struct IndexStats {
     pub built_at_unix: Option<u64>,
     pub languages: Vec<IndexCount>,
     pub symbol_kinds: Vec<IndexCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexSourceSnapshot {
+    source_index: String,
+    source_index_size_bytes: u64,
+    source_index_modified_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexMetadataSnapshot {
+    version: u32,
+    root: String,
+    built_at_unix: u64,
+    options: IndexOptionsSnapshot,
+    file_count: usize,
+    symbol_count: usize,
+    source_size_bytes: u64,
+    index_size_bytes: u64,
+    languages: Vec<IndexCount>,
+    symbol_kinds: Vec<IndexCount>,
+    source: IndexSourceSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexFilesSnapshot {
+    version: u32,
+    root: String,
+    built_at_unix: u64,
+    options: IndexOptionsSnapshot,
+    file_count: usize,
+    symbol_count: usize,
+    files: Vec<IndexedFile>,
+    source: IndexSourceSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,7 +425,7 @@ pub fn build(
         symbols,
     };
     let path = index_path(&root)?;
-    write_index(&path, &index)?;
+    write_workspace_index(&root, &path, &index)?;
 
     Ok(IndexBuildReport {
         path,
@@ -420,6 +461,10 @@ pub fn status(root: &Path) -> Result<IndexStatus> {
             changed_tracked_files: 0,
             missing_tracked_files: 0,
         });
+    }
+
+    if let Some(snapshot) = read_index_files_snapshot(&root, &path)? {
+        return status_from_file_snapshot(&root, path, snapshot);
     }
 
     let read_state = read_index_state(&path)?;
@@ -470,8 +515,8 @@ pub fn status(root: &Path) -> Result<IndexStatus> {
 
     for file in &index.files {
         let path = indexed_path(&root, &file.path);
-        match file_metadata(&root, &path) {
-            Ok(current) if is_same_file_snapshot(&current, file) => {}
+        match file_status_metadata(&root, &path) {
+            Ok(current) if is_same_file_status_snapshot(&current, file) => {}
             Ok(_) => changed_tracked_files += 1,
             Err(_) => missing_tracked_files += 1,
         }
@@ -497,9 +542,14 @@ pub fn status(root: &Path) -> Result<IndexStatus> {
 }
 
 pub fn load(root: &Path) -> Result<Option<CodeIndex>> {
-    let path = index_path(root)?;
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
     if !path.exists() {
         return Ok(None);
+    }
+
+    if let Some(index) = read_code_index_sidecars(&root, &path)? {
+        return Ok(Some(index));
     }
 
     read_index(&path).map(Some)
@@ -509,6 +559,22 @@ pub fn stats(root: &Path) -> Result<IndexStats> {
     let root = normalize_root(root);
     let path = index_path(&root)?;
     let index_size_bytes = fs::metadata(&path).ok().map_or(0, |metadata| metadata.len());
+    if path.exists() {
+        if let Some(metadata) = read_index_metadata_snapshot(&root, &path)? {
+            return Ok(IndexStats {
+                path,
+                exists: true,
+                file_count: metadata.file_count,
+                symbol_count: metadata.symbol_count,
+                source_size_bytes: metadata.source_size_bytes,
+                index_size_bytes: metadata.index_size_bytes,
+                built_at_unix: Some(metadata.built_at_unix),
+                languages: metadata.languages,
+                symbol_kinds: metadata.symbol_kinds,
+            });
+        }
+    }
+
     let Some(index) = load(&root)? else {
         return Ok(IndexStats {
             path,
@@ -816,6 +882,7 @@ pub fn compact(root: &Path, dry_run: bool) -> Result<IndexCompactReport> {
 
     if !dry_run {
         write_index_contents(&path, &compacted)?;
+        write_index_sidecars(&root, &path, &index)?;
     }
 
     Ok(IndexCompactReport {
@@ -881,6 +948,14 @@ pub fn refresh(
         || status.changed_tracked_files > 0
         || status.missing_tracked_files > 0;
     if !needs_refresh {
+        if ensure_index_sidecars(&root, &status.path)? {
+            return Ok(IndexRefreshReport {
+                path: status.path,
+                rebuilt: false,
+                reason: "sidecars refreshed".to_string(),
+                build_report: None,
+            });
+        }
         return Ok(IndexRefreshReport {
             path: status.path,
             rebuilt: false,
@@ -1022,17 +1097,28 @@ pub fn needs_schema_migration(contents: &str) -> Result<bool> {
 }
 
 pub fn list(root: &Path, kind: IndexListKind, limit: usize) -> Result<Vec<String>> {
-    let Some(index) = load(root)? else {
+    let root = normalize_root(root);
+    let limit = limit.max(1);
+    let path = index_path(&root)?;
+    if kind == IndexListKind::Files {
+        if let Some(snapshot) = read_index_files_snapshot(&root, &path)? {
+            return Ok(snapshot.files.iter().take(limit).map(format_file_entry).collect());
+        }
+    }
+    if kind == IndexListKind::Symbols {
+        if let Some(entries) = list_symbols_mmap(&root, &path, limit)? {
+            return Ok(entries);
+        }
+        if let Some(entries) = list_symbols_jsonl(&root, &path, limit)? {
+            return Ok(entries);
+        }
+    }
+
+    let Some(index) = load(&root)? else {
         return Ok(Vec::new());
     };
-    let limit = limit.max(1);
     let entries = match kind {
-        IndexListKind::Files => index
-            .files
-            .iter()
-            .take(limit)
-            .map(|file| format!("{} [{}] ({} bytes)", file.path, file.language, file.size_bytes))
-            .collect(),
+        IndexListKind::Files => index.files.iter().take(limit).map(format_file_entry).collect(),
         IndexListKind::Symbols => index.symbols.iter().take(limit).map(format_symbol_entry).collect(),
     };
 
@@ -1040,13 +1126,68 @@ pub fn list(root: &Path, kind: IndexListKind, limit: usize) -> Result<Vec<String
 }
 
 pub fn query(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Result<Vec<String>> {
-    let Some(index) = load(root)? else {
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
+    if kind == IndexListKind::Files {
+        if let Some(snapshot) = read_index_files_snapshot(&root, &path)? {
+            return Ok(format_scored_entries(score_index_files(&snapshot.files, query), limit));
+        }
+    }
+    if kind == IndexListKind::Symbols {
+        if let Some(entries) = query_symbols_mmap(&root, &path, query, limit)? {
+            return Ok(entries);
+        }
+        if let Some(entries) = query_symbols_jsonl(&root, &path, query, limit)? {
+            return Ok(entries);
+        }
+    }
+
+    let Some(index) = load(&root)? else {
         return Ok(Vec::new());
     };
     Ok(format_scored_entries(
         score_code_index_entries(&index, kind, query),
         limit,
     ))
+}
+
+pub fn query_code_items(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Result<Option<Vec<CodeItem>>> {
+    query_code_items_with_cancel(root, kind, query, limit, None)
+}
+
+pub fn query_code_items_with_cancel(
+    root: &Path,
+    kind: IndexListKind,
+    query: &str,
+    limit: usize,
+    cancel: Option<&crate::search::SearchCancel>,
+) -> Result<Option<Vec<CodeItem>>> {
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
+    match kind {
+        IndexListKind::Files => {
+            if let Some(snapshot) = read_index_files_snapshot(&root, &path)? {
+                return Ok(Some(scored_file_items(&root, &snapshot.files, query, limit, cancel)?));
+            }
+        }
+        IndexListKind::Symbols => {
+            if let Some(items) = query_symbol_items_mmap(&root, &path, query, limit, cancel)? {
+                return Ok(Some(items));
+            }
+            if let Some(items) = query_symbol_items_jsonl(&root, &path, query, limit, cancel)? {
+                return Ok(Some(items));
+            }
+        }
+    }
+
+    let Some(index) = load(&root)? else {
+        return Ok(None);
+    };
+    let items = match kind {
+        IndexListKind::Files => scored_file_items(&root, &index.files, query, limit, cancel)?,
+        IndexListKind::Symbols => scored_symbol_items(&root, index.symbols.iter(), query, limit, cancel)?,
+    };
+    Ok(Some(items))
 }
 
 pub fn query_shards(root: &Path, kind: IndexListKind, query_text: &str, limit: usize) -> Result<Vec<String>> {
@@ -1072,6 +1213,38 @@ pub fn query_shards_report(
 
     let manifest = read_shard_manifest(&status.manifest_path)?;
     let shard_dir = shard_dir(&root)?;
+    let main_index_path = index_path(&root)?;
+    match kind {
+        IndexListKind::Files => {
+            if let Some(snapshot) = read_index_files_snapshot(&root, &main_index_path)? {
+                return Ok(IndexShardQueryReport {
+                    entries: format_scored_entries(score_index_files(&snapshot.files, query_text), limit),
+                    shard_count: manifest.shards.len(),
+                    shards_scanned: 0,
+                    fallback_used: false,
+                });
+            }
+        }
+        IndexListKind::Symbols => {
+            if let Some(entries) = query_symbols_mmap(&root, &main_index_path, query_text, limit)? {
+                return Ok(IndexShardQueryReport {
+                    entries,
+                    shard_count: manifest.shards.len(),
+                    shards_scanned: 0,
+                    fallback_used: false,
+                });
+            }
+            if let Some(entries) = query_symbols_jsonl(&root, &main_index_path, query_text, limit)? {
+                return Ok(IndexShardQueryReport {
+                    entries,
+                    shard_count: manifest.shards.len(),
+                    shards_scanned: 0,
+                    fallback_used: false,
+                });
+            }
+        }
+    }
+
     let candidate_shards = candidate_shards_for_query(&manifest, query_text);
     let shards_to_scan = if candidate_shards.is_empty() {
         manifest.shards.iter().collect::<Vec<_>>()
@@ -1157,16 +1330,7 @@ fn score_code_index_entries(index: &CodeIndex, kind: IndexListKind, query: &str)
     let query = query.trim();
     if query.is_empty() {
         return match kind {
-            IndexListKind::Files => index
-                .files
-                .iter()
-                .map(|file| {
-                    (
-                        0,
-                        format!("{} [{}] ({} bytes)", file.path, file.language, file.size_bytes),
-                    )
-                })
-                .collect(),
+            IndexListKind::Files => index.files.iter().map(|file| (0, format_file_entry(file))).collect(),
             IndexListKind::Symbols => index
                 .symbols
                 .iter()
@@ -1176,11 +1340,7 @@ fn score_code_index_entries(index: &CodeIndex, kind: IndexListKind, query: &str)
     }
 
     match kind {
-        IndexListKind::Files => index
-            .files
-            .iter()
-            .filter_map(|file| fuzzy_score(&file.path, query).map(|score| (score, file.path.clone())))
-            .collect(),
+        IndexListKind::Files => score_index_files(&index.files, query),
         IndexListKind::Symbols => index
             .symbols
             .iter()
@@ -1193,6 +1353,83 @@ fn score_code_index_entries(index: &CodeIndex, kind: IndexListKind, query: &str)
     }
 }
 
+fn score_index_files(files: &[IndexedFile], query: &str) -> Vec<(usize, String)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return files.iter().map(|file| (0, format_file_entry(file))).collect();
+    }
+
+    files
+        .iter()
+        .filter_map(|file| {
+            let haystack = format!("{} {}", file.path, file.language);
+            fuzzy_score(&haystack, query).map(|score| (score, format_file_entry(file)))
+        })
+        .collect()
+}
+
+fn scored_file_items(
+    root: &Path,
+    files: &[IndexedFile],
+    query: &str,
+    limit: usize,
+    cancel: Option<&crate::search::SearchCancel>,
+) -> Result<Vec<CodeItem>> {
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+    for file in files {
+        if cancel.is_some_and(crate::search::SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
+        let item = file_to_code_item(root, file);
+        if query.is_empty() {
+            scored.push((0, item.display_text().to_string(), item));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let haystack = format!("{} {}", file.path, file.language);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored_item(&mut scored, (score, item.display_text().to_string(), item), limit);
+        }
+    }
+
+    Ok(format_scored_items(scored, limit))
+}
+
+fn scored_symbol_items<'a>(
+    root: &Path,
+    symbols: impl Iterator<Item = &'a IndexedSymbol>,
+    query: &str,
+    limit: usize,
+    cancel: Option<&crate::search::SearchCancel>,
+) -> Result<Vec<CodeItem>> {
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+    for symbol in symbols {
+        if cancel.is_some_and(crate::search::SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
+        let item = symbol_to_code_item(root, symbol);
+        if query.is_empty() {
+            scored.push((0, item.display_text().to_string(), item));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored_item(&mut scored, (score, item.display_text().to_string(), item), limit);
+        }
+    }
+
+    Ok(format_scored_items(scored, limit))
+}
+
 fn format_scored_entries(mut scored: Vec<(usize, String)>, limit: usize) -> Vec<String> {
     let mut seen = HashSet::new();
     scored.sort_by_key(|(score, entry)| (*score, entry.clone()));
@@ -1203,8 +1440,55 @@ fn format_scored_entries(mut scored: Vec<(usize, String)>, limit: usize) -> Vec<
         .collect()
 }
 
+fn format_scored_items(mut scored: Vec<(usize, String, CodeItem)>, limit: usize) -> Vec<CodeItem> {
+    let mut seen = HashSet::new();
+    scored.sort_by_key(|(score, display, _)| (*score, display.clone()));
+    scored
+        .into_iter()
+        .filter(|(_, display, _)| seen.insert(display.clone()))
+        .take(limit.max(1))
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
+fn push_bounded_scored(scored: &mut Vec<(usize, String)>, entry: (usize, String), limit: usize) {
+    scored.push(entry);
+    if scored.len() > limit.max(1) * 4 {
+        scored.sort_by_key(|(score, entry)| (*score, entry.clone()));
+        scored.truncate(limit.max(1));
+    }
+}
+
+fn push_bounded_scored_item(
+    scored: &mut Vec<(usize, String, CodeItem)>,
+    entry: (usize, String, CodeItem),
+    limit: usize,
+) {
+    scored.push(entry);
+    if scored.len() > limit.max(1) * 4 {
+        scored.sort_by_key(|(score, display, _)| (*score, display.clone()));
+        scored.truncate(limit.max(1));
+    }
+}
+
 pub fn index_path(root: &Path) -> Result<PathBuf> {
     Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_FILE_NAME))
+}
+
+fn index_meta_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_META_FILE_NAME))
+}
+
+fn index_files_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_FILES_FILE_NAME))
+}
+
+fn index_symbols_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_SYMBOLS_FILE_NAME))
+}
+
+fn index_symbols_mmap_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(INDEX_SYMBOLS_MMAP_FILE_NAME))
 }
 
 fn daemon_heartbeat_path(root: &Path) -> Result<PathBuf> {
@@ -1242,6 +1526,34 @@ fn write_daemon_heartbeat(path: &Path, heartbeat: &IndexDaemonHeartbeat) -> Resu
     Ok(())
 }
 
+fn status_from_file_snapshot(root: &Path, path: PathBuf, snapshot: IndexFilesSnapshot) -> Result<IndexStatus> {
+    let mut changed_tracked_files = 0;
+    let mut missing_tracked_files = 0;
+    for file in &snapshot.files {
+        let path = indexed_path(root, &file.path);
+        match file_status_metadata(root, &path) {
+            Ok(current) if is_same_file_status_snapshot(&current, file) => {}
+            Ok(_) => changed_tracked_files += 1,
+            Err(_) => missing_tracked_files += 1,
+        }
+    }
+
+    Ok(IndexStatus {
+        path,
+        exists: true,
+        version: Some(snapshot.version),
+        schema_status: IndexSchemaStatus::Current,
+        is_stale: changed_tracked_files > 0 || missing_tracked_files > 0,
+        is_corrupt: false,
+        message: None,
+        file_count: snapshot.file_count,
+        symbol_count: snapshot.symbol_count,
+        built_at_unix: Some(snapshot.built_at_unix),
+        changed_tracked_files,
+        missing_tracked_files,
+    })
+}
+
 fn push_daemon_cycle(cycles: &mut Vec<IndexDaemonCycle>, cycle: IndexDaemonCycle) {
     if cycles.len() >= MAX_DAEMON_REPORT_CYCLES {
         cycles.remove(0);
@@ -1249,9 +1561,122 @@ fn push_daemon_cycle(cycles: &mut Vec<IndexDaemonCycle>, cycle: IndexDaemonCycle
     cycles.push(cycle);
 }
 
+fn write_workspace_index(root: &Path, path: &Path, index: &CodeIndex) -> Result<()> {
+    write_index(path, index)?;
+    write_index_sidecars(root, path, index)
+}
+
 fn write_index(path: &Path, index: &CodeIndex) -> Result<()> {
     let contents = toml::to_string_pretty(index).map_err(|err| AppError::General(err.to_string()))?;
     write_index_contents(path, &contents)
+}
+
+fn write_index_sidecars(root: &Path, path: &Path, index: &CodeIndex) -> Result<()> {
+    let source = index_source_snapshot(path)?;
+    let metadata = IndexMetadataSnapshot {
+        version: INDEX_VERSION,
+        root: index.root.clone(),
+        built_at_unix: index.built_at_unix,
+        options: index.options.clone(),
+        file_count: index.files.len(),
+        symbol_count: index.symbols.len(),
+        source_size_bytes: index.files.iter().map(|file| file.size_bytes).sum(),
+        index_size_bytes: source.source_index_size_bytes,
+        languages: count_values(index.files.iter().map(|file| file.language.as_str())),
+        symbol_kinds: count_values(index.symbols.iter().map(|symbol| symbol.kind.as_str())),
+        source: source.clone(),
+    };
+    let files = IndexFilesSnapshot {
+        version: INDEX_VERSION,
+        root: index.root.clone(),
+        built_at_unix: index.built_at_unix,
+        options: index.options.clone(),
+        file_count: index.files.len(),
+        symbol_count: index.symbols.len(),
+        files: index.files.clone(),
+        source: source.clone(),
+    };
+    write_toml_atomic(&index_files_path(root)?, &files)?;
+    write_index_symbols_jsonl(&index_symbols_path(root)?, &index.symbols)?;
+    write_index_symbols_mmap(&index_symbols_mmap_path(root)?, &source, &index.symbols)?;
+    write_toml_atomic(&index_meta_path(root)?, &metadata)
+}
+
+fn ensure_index_sidecars(root: &Path, path: &Path) -> Result<bool> {
+    let metadata_ready = read_index_metadata_snapshot(root, path)?.is_some();
+    let files_ready = read_index_files_snapshot(root, path)?.is_some();
+    let symbols_ready = metadata_ready && index_symbols_path(root)?.exists();
+    let symbols_mmap_ready = metadata_ready && index_symbols_mmap_valid_path(root, path)?.is_some();
+    if metadata_ready && files_ready && symbols_ready && symbols_mmap_ready {
+        return Ok(false);
+    }
+    let Some(index) = load(root)? else {
+        return Ok(false);
+    };
+    write_index_sidecars(root, path, &index)?;
+    Ok(true)
+}
+
+fn write_toml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let contents = toml::to_string_pretty(value).map_err(|err| AppError::General(err.to_string()))?;
+    write_index_contents(path, &contents)
+}
+
+fn write_index_symbols_jsonl(path: &Path, symbols: &[IndexedSymbol]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension(INDEX_TMP_EXTENSION);
+    let file = fs::File::create(&tmp_path)?;
+    let mut writer = BufWriter::new(file);
+    for symbol in symbols {
+        serde_json::to_writer(&mut writer, symbol).map_err(|err| AppError::General(err.to_string()))?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn write_index_symbols_mmap(path: &Path, source: &IndexSourceSnapshot, symbols: &[IndexedSymbol]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension(INDEX_TMP_EXTENSION);
+    let file = fs::File::create(&tmp_path)?;
+    let mut writer = BufWriter::new(file);
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}",
+        INDEX_SYMBOLS_MMAP_MAGIC,
+        source.source_index_size_bytes,
+        source.source_index_modified_unix,
+        symbols.len()
+    )?;
+    for symbol in symbols {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            escape_mmap_field(&symbol.path),
+            symbol.line,
+            symbol.column.unwrap_or(0),
+            escape_mmap_field(&symbol.label),
+            escape_mmap_field(&symbol.detail),
+            escape_mmap_field(&symbol.name),
+            escape_mmap_field(&symbol.kind),
+            escape_mmap_field(&symbol.language),
+            symbol.range.start_line,
+            symbol.range.start_column,
+            symbol.range.end_line,
+            symbol.range.end_column,
+            escape_mmap_field(symbol.parent.as_deref().unwrap_or(""))
+        )?;
+    }
+    writer.flush()?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
 }
 
 fn write_index_contents(path: &Path, contents: &str) -> Result<()> {
@@ -1265,15 +1690,488 @@ fn write_index_contents(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn read_index_metadata_snapshot(root: &Path, index_path: &Path) -> Result<Option<IndexMetadataSnapshot>> {
+    let path = index_meta_path(root)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let Ok(snapshot) = toml::from_str::<IndexMetadataSnapshot>(&contents) else {
+        return Ok(None);
+    };
+    if sidecar_matches_source(root, index_path, snapshot.version, &snapshot.root, &snapshot.source)? {
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
+}
+
+fn read_code_index_sidecars(root: &Path, index_path: &Path) -> Result<Option<CodeIndex>> {
+    let Some(metadata) = read_index_metadata_snapshot(root, index_path)? else {
+        return Ok(None);
+    };
+    let Some(files) = read_index_files_snapshot(root, index_path)? else {
+        return Ok(None);
+    };
+    let mut symbols = match read_symbols_mmap_snapshot(root, index_path)? {
+        Some(symbols) => symbols,
+        None => match read_symbols_jsonl_snapshot(root, index_path)? {
+            Some(symbols) => symbols,
+            None => return Ok(None),
+        },
+    };
+
+    if files.files.len() != metadata.file_count || symbols.len() != metadata.symbol_count {
+        return Ok(None);
+    }
+
+    finalize_symbol_metadata(&mut symbols);
+    Ok(Some(CodeIndex {
+        version: INDEX_VERSION,
+        root: metadata.root,
+        built_at_unix: metadata.built_at_unix,
+        options: metadata.options,
+        files: files.files,
+        symbols,
+    }))
+}
+
+fn read_index_files_snapshot(root: &Path, index_path: &Path) -> Result<Option<IndexFilesSnapshot>> {
+    let path = index_files_path(root)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let Ok(snapshot) = toml::from_str::<IndexFilesSnapshot>(&contents) else {
+        return Ok(None);
+    };
+    if sidecar_matches_source(root, index_path, snapshot.version, &snapshot.root, &snapshot.source)? {
+        return Ok(Some(snapshot));
+    }
+    Ok(None)
+}
+
+fn read_symbols_mmap_snapshot(root: &Path, index_path: &Path) -> Result<Option<Vec<IndexedSymbol>>> {
+    let Some(map) = map_symbols_mmap(root, index_path)? else {
+        return Ok(None);
+    };
+    let Some(body) = symbols_mmap_body(root, index_path, &map)? else {
+        return Ok(None);
+    };
+    let mut symbols = Vec::new();
+    for record in mmap_record_lines(body) {
+        let Some(symbol) = parse_mmap_symbol_record(record) else {
+            return Ok(None);
+        };
+        symbols.push(symbol);
+    }
+    Ok(Some(symbols))
+}
+
+fn list_symbols_mmap(root: &Path, index_path: &Path, limit: usize) -> Result<Option<Vec<String>>> {
+    let Some(map) = map_symbols_mmap(root, index_path)? else {
+        return Ok(None);
+    };
+    let Some(body) = symbols_mmap_body(root, index_path, &map)? else {
+        return Ok(None);
+    };
+    let limit = limit.max(1);
+    let mut entries = Vec::new();
+    for record in mmap_record_lines(body).take(limit) {
+        let Some(symbol) = parse_mmap_symbol_record(record) else {
+            return Ok(None);
+        };
+        entries.push(format_symbol_entry(&symbol));
+    }
+    Ok(Some(entries))
+}
+
+fn query_symbols_mmap(root: &Path, index_path: &Path, query: &str, limit: usize) -> Result<Option<Vec<String>>> {
+    let Some(map) = map_symbols_mmap(root, index_path)? else {
+        return Ok(None);
+    };
+    let Some(body) = symbols_mmap_body(root, index_path, &map)? else {
+        return Ok(None);
+    };
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+    for record in mmap_record_lines(body) {
+        let Some(symbol) = parse_mmap_symbol_record(record) else {
+            return Ok(None);
+        };
+        if query.is_empty() {
+            scored.push((0, format_symbol_entry(&symbol)));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let entry = format_symbol_entry(&symbol);
+        let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored(&mut scored, (score, entry), limit);
+        }
+    }
+    Ok(Some(format_scored_entries(scored, limit)))
+}
+
+fn query_symbol_items_mmap(
+    root: &Path,
+    index_path: &Path,
+    query: &str,
+    limit: usize,
+    cancel: Option<&crate::search::SearchCancel>,
+) -> Result<Option<Vec<CodeItem>>> {
+    let Some(map) = map_symbols_mmap(root, index_path)? else {
+        return Ok(None);
+    };
+    let Some(body) = symbols_mmap_body(root, index_path, &map)? else {
+        return Ok(None);
+    };
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+    for record in mmap_record_lines(body) {
+        if cancel.is_some_and(crate::search::SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
+        let Some(symbol) = parse_mmap_symbol_record(record) else {
+            return Ok(None);
+        };
+        let item = symbol_to_code_item(root, &symbol);
+        if query.is_empty() {
+            scored.push((0, item.display_text().to_string(), item));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored_item(&mut scored, (score, item.display_text().to_string(), item), limit);
+        }
+    }
+    Ok(Some(format_scored_items(scored, limit)))
+}
+
+fn map_symbols_mmap(root: &Path, index_path: &Path) -> Result<Option<Mmap>> {
+    let Some(path) = index_symbols_mmap_valid_path(root, index_path)? else {
+        return Ok(None);
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(None);
+    };
+    if file.metadata().ok().is_none_or(|metadata| metadata.len() == 0) {
+        return Ok(None);
+    }
+    // SAFETY: the mmap is read-only, scoped to this process, and the file is only
+    // replaced atomically by fcs writers; readers validate the header before use.
+    let map = unsafe { Mmap::map(&file) }.map_err(|err| AppError::General(err.to_string()))?;
+    Ok(Some(map))
+}
+
+fn index_symbols_mmap_valid_path(root: &Path, index_path: &Path) -> Result<Option<PathBuf>> {
+    if read_index_metadata_snapshot(root, index_path)?.is_none() {
+        return Ok(None);
+    }
+    let path = index_symbols_mmap_path(root)?;
+    let Ok(file) = fs::File::open(&path) else {
+        return Ok(None);
+    };
+    let mut reader = BufReader::new(file);
+    let mut header = String::new();
+    if reader.read_line(&mut header).is_err() {
+        return Ok(None);
+    }
+    if symbols_mmap_header_matches(root, index_path, header.trim_end_matches(['\r', '\n']))? {
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
+
+fn symbols_mmap_body<'a>(root: &Path, index_path: &Path, map: &'a [u8]) -> Result<Option<&'a [u8]>> {
+    let Some(header_end) = map.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let Ok(header) = std::str::from_utf8(&map[..header_end]) else {
+        return Ok(None);
+    };
+    if !symbols_mmap_header_matches(root, index_path, header)? {
+        return Ok(None);
+    }
+    Ok(Some(&map[header_end + 1..]))
+}
+
+fn symbols_mmap_header_matches(root: &Path, index_path: &Path, header: &str) -> Result<bool> {
+    let mut parts = header.split('\t');
+    if parts.next() != Some(INDEX_SYMBOLS_MMAP_MAGIC) {
+        return Ok(false);
+    }
+    let source_size = parts.next().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
+    let source_mtime = parts.next().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
+    let symbol_count = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    let current = index_source_snapshot(index_path)?;
+    let Some(metadata) = read_index_metadata_snapshot(root, index_path)? else {
+        return Ok(false);
+    };
+    Ok(metadata.symbol_count == symbol_count
+        && source_size == current.source_index_size_bytes
+        && source_mtime == current.source_index_modified_unix)
+}
+
+fn mmap_record_lines(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    body.split(|byte| *byte == b'\n').filter(|line| !line.is_empty())
+}
+
+fn parse_mmap_symbol_record(record: &[u8]) -> Option<IndexedSymbol> {
+    let fields = record.split(|byte| *byte == b'\t').collect::<Vec<&[u8]>>();
+    if fields.len() != 13 {
+        return None;
+    }
+
+    let column = parse_usize_field(fields[2])?;
+    let parent = decode_mmap_field(fields[12])?;
+    Some(IndexedSymbol {
+        path: decode_mmap_field(fields[0])?,
+        line: parse_usize_field(fields[1])?,
+        column: (column > 0).then_some(column),
+        label: decode_mmap_field(fields[3])?,
+        detail: decode_mmap_field(fields[4])?,
+        name: decode_mmap_field(fields[5])?,
+        kind: decode_mmap_field(fields[6])?,
+        language: decode_mmap_field(fields[7])?,
+        range: IndexedSymbolRange {
+            start_line: parse_usize_field(fields[8])?,
+            start_column: parse_usize_field(fields[9])?,
+            end_line: parse_usize_field(fields[10])?,
+            end_column: parse_usize_field(fields[11])?,
+        },
+        parent: (!parent.is_empty()).then_some(parent),
+    })
+}
+
+fn parse_usize_field(value: &[u8]) -> Option<usize> {
+    std::str::from_utf8(value).ok()?.parse::<usize>().ok()
+}
+
+fn escape_mmap_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn decode_mmap_field(value: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(value).ok()?;
+    if !text.contains('\\') {
+        return Some(text.to_string());
+    }
+
+    let mut decoded = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => decoded.push('\\'),
+            't' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            other => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+        }
+    }
+    Some(decoded)
+}
+
+fn read_symbols_jsonl_snapshot(root: &Path, index_path: &Path) -> Result<Option<Vec<IndexedSymbol>>> {
+    let Some(path) = index_symbols_jsonl_path(root, index_path)? else {
+        return Ok(None);
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(None);
+    };
+    let reader = BufReader::new(file);
+    let mut symbols = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(symbol) = serde_json::from_str::<IndexedSymbol>(&line) else {
+            return Ok(None);
+        };
+        symbols.push(symbol);
+    }
+    Ok(Some(symbols))
+}
+
+fn list_symbols_jsonl(root: &Path, index_path: &Path, limit: usize) -> Result<Option<Vec<String>>> {
+    let Some(path) = index_symbols_jsonl_path(root, index_path)? else {
+        return Ok(None);
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(None);
+    };
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    for line in reader.lines().take(limit.max(1)) {
+        let line = line?;
+        let Ok(symbol) = serde_json::from_str::<IndexedSymbol>(&line) else {
+            return Ok(None);
+        };
+        entries.push(format_symbol_entry(&symbol));
+    }
+    Ok(Some(entries))
+}
+
+fn query_symbols_jsonl(root: &Path, index_path: &Path, query: &str, limit: usize) -> Result<Option<Vec<String>>> {
+    let Some(path) = index_symbols_jsonl_path(root, index_path)? else {
+        return Ok(None);
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(None);
+    };
+    let reader = BufReader::new(file);
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(symbol) = serde_json::from_str::<IndexedSymbol>(&line) else {
+            return Ok(None);
+        };
+        if query.is_empty() {
+            scored.push((0, format_symbol_entry(&symbol)));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let entry = format_symbol_entry(&symbol);
+        let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored(&mut scored, (score, entry), limit);
+        }
+    }
+    Ok(Some(format_scored_entries(scored, limit)))
+}
+
+fn query_symbol_items_jsonl(
+    root: &Path,
+    index_path: &Path,
+    query: &str,
+    limit: usize,
+    cancel: Option<&crate::search::SearchCancel>,
+) -> Result<Option<Vec<CodeItem>>> {
+    let Some(path) = index_symbols_jsonl_path(root, index_path)? else {
+        return Ok(None);
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(None);
+    };
+    let reader = BufReader::new(file);
+    let query = query.trim();
+    let limit = limit.max(1);
+    let mut scored = Vec::new();
+
+    for line in reader.lines() {
+        if cancel.is_some_and(crate::search::SearchCancel::is_cancelled) {
+            return Err(AppError::General("Search cancelled".to_string()));
+        }
+        let line = line?;
+        let Ok(symbol) = serde_json::from_str::<IndexedSymbol>(&line) else {
+            return Ok(None);
+        };
+        let item = symbol_to_code_item(root, &symbol);
+        if query.is_empty() {
+            scored.push((0, item.display_text().to_string(), item));
+            if scored.len() >= limit {
+                break;
+            }
+            continue;
+        }
+        let haystack = format!("{} {} {} {}", symbol.path, symbol.name, symbol.kind, symbol.detail);
+        if let Some(score) = fuzzy_score(&haystack, query) {
+            push_bounded_scored_item(&mut scored, (score, item.display_text().to_string(), item), limit);
+        }
+    }
+
+    Ok(Some(format_scored_items(scored, limit)))
+}
+
+fn index_symbols_jsonl_path(root: &Path, index_path: &Path) -> Result<Option<PathBuf>> {
+    if read_index_metadata_snapshot(root, index_path)?.is_none() {
+        return Ok(None);
+    }
+    let path = index_symbols_path(root)?;
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
+
+fn sidecar_matches_source(
+    root: &Path,
+    index_path: &Path,
+    version: u32,
+    sidecar_root: &str,
+    source: &IndexSourceSnapshot,
+) -> Result<bool> {
+    if version != INDEX_VERSION || sidecar_root.trim().is_empty() || normalize_root(Path::new(sidecar_root)) != root {
+        return Ok(false);
+    }
+    let source_index = if source.source_index.trim().is_empty() {
+        index_path.to_path_buf()
+    } else {
+        PathBuf::from(&source.source_index)
+    };
+    if normalize_root(&source_index) != normalize_root(index_path) {
+        return Ok(false);
+    }
+    let Ok(current) = index_source_snapshot(index_path) else {
+        return Ok(false);
+    };
+    Ok(source.source_index_size_bytes == current.source_index_size_bytes
+        && source.source_index_modified_unix == current.source_index_modified_unix)
+}
+
+fn index_source_snapshot(path: &Path) -> Result<IndexSourceSnapshot> {
+    let metadata = fs::metadata(path)?;
+    let modified_unix = metadata.modified().ok().and_then(system_time_to_unix).unwrap_or(0);
+    Ok(IndexSourceSnapshot {
+        source_index: path.display().to_string(),
+        source_index_size_bytes: metadata.len(),
+        source_index_modified_unix: modified_unix,
+    })
+}
+
 fn read_index(path: &Path) -> Result<CodeIndex> {
     let contents = fs::read_to_string(path)?;
     migrate_index_contents(&contents)
 }
 
 fn load_recoverable(root: &Path) -> Result<Option<CodeIndex>> {
-    let path = index_path(root)?;
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
     if !path.exists() {
         return Ok(None);
+    }
+
+    if let Some(index) = read_code_index_sidecars(&root, &path)? {
+        return Ok(Some(index));
     }
 
     match read_index_state(&path)? {
@@ -1470,6 +2368,23 @@ fn file_metadata(root: &Path, path: &Path) -> Result<IndexedFile> {
     })
 }
 
+fn file_status_metadata(root: &Path, path: &Path) -> Result<IndexedFile> {
+    let metadata = fs::metadata(path)?;
+    let modified_unix = metadata.modified().ok().and_then(system_time_to_unix).unwrap_or(0);
+    let relative = relative_path(root, path);
+
+    Ok(IndexedFile {
+        path: relative.clone(),
+        size_bytes: metadata.len(),
+        modified_unix,
+        language: language_for_path(Path::new(&relative)),
+        content_hash: String::new(),
+        symbol_count: 0,
+        last_indexed_unix: 0,
+        scan_error: None,
+    })
+}
+
 fn file_metadata_by_path(files: &[IndexedFile]) -> HashMap<String, IndexedFile> {
     files
         .iter()
@@ -1563,6 +2478,10 @@ fn is_same_file_snapshot(left: &IndexedFile, right: &IndexedFile) -> bool {
     left.path == right.path && left.size_bytes == right.size_bytes && left.modified_unix == right.modified_unix
 }
 
+fn is_same_file_status_snapshot(left: &IndexedFile, right: &IndexedFile) -> bool {
+    left.path == right.path && left.size_bytes == right.size_bytes && left.modified_unix == right.modified_unix
+}
+
 fn apply_file_symbol_counts(files: &mut [IndexedFile], symbols: &[IndexedSymbol]) {
     let mut counts = HashMap::<String, usize>::new();
     for symbol in symbols {
@@ -1645,6 +2564,14 @@ fn is_container_symbol(kind: &str) -> bool {
     matches!(kind, "class" | "struct" | "enum" | "trait" | "impl")
 }
 
+fn format_file_entry(file: &IndexedFile) -> String {
+    format!("{} [{}] ({} bytes)", file.path, file.language, file.size_bytes)
+}
+
+fn file_to_code_item(root: &Path, file: &IndexedFile) -> CodeItem {
+    CodeItem::file_with_display(indexed_path(root, &file.path), file.path.clone())
+}
+
 fn language_for_path(path: &Path) -> String {
     match path.extension().and_then(|extension| extension.to_str()).unwrap_or("") {
         "c" => "c",
@@ -1680,6 +2607,17 @@ fn format_symbol_entry(symbol: &IndexedSymbol) -> String {
         symbol.range.end_line,
         symbol.range.end_column,
         parent
+    )
+}
+
+fn symbol_to_code_item(root: &Path, symbol: &IndexedSymbol) -> CodeItem {
+    let display = format!("{}:{}:{}", symbol.path, symbol.line, symbol.detail);
+    CodeItem::from_parts(
+        CodeItemKind::Symbol,
+        symbol.path.clone(),
+        symbol.detail.clone(),
+        Location::new(indexed_path(root, &symbol.path), Some(symbol.line), symbol.column),
+        display,
     )
 }
 
@@ -1748,10 +2686,20 @@ mod tests {
         let report = build(&temp_dir, &[], &[], &ignore_file).unwrap();
         let index = load(&temp_dir).unwrap().unwrap();
         let status = status(&temp_dir).unwrap();
+        let stats = stats(&temp_dir).unwrap();
+        let files = list(&temp_dir, IndexListKind::Files, 10).unwrap();
         let symbols = list(&temp_dir, IndexListKind::Symbols, 10).unwrap();
+        let queried_files = query(&temp_dir, IndexListKind::Files, "src/main", 10).unwrap();
         let queried = query(&temp_dir, IndexListKind::Symbols, "main", 10).unwrap();
+        let symbol_items = query_code_items(&temp_dir, IndexListKind::Symbols, "main", 10)
+            .unwrap()
+            .expect("index-backed symbol items should be available");
 
         assert!(report.path.ends_with(INDEX_FILE_NAME));
+        assert!(index_meta_path(&temp_dir).unwrap().exists());
+        assert!(index_files_path(&temp_dir).unwrap().exists());
+        assert!(index_symbols_path(&temp_dir).unwrap().exists());
+        assert!(index_symbols_mmap_path(&temp_dir).unwrap().exists());
         assert!(report.file_count >= 2);
         assert_eq!(report.removed_files, 0);
         assert_eq!(index.version, INDEX_VERSION);
@@ -1769,6 +2717,14 @@ mod tests {
         }));
         assert!(symbols.iter().any(|symbol| symbol.contains("main [function]")));
         assert!(queried.iter().any(|symbol| symbol.contains("main [function]")));
+        assert!(symbol_items.iter().any(|item| {
+            item.display_text().contains("src/main.rs:1:main [function]")
+                && item.location.path() == temp_dir.join("src").join("main.rs")
+        }));
+        assert!(files.iter().any(|file| file.contains("src/main.rs")));
+        assert!(queried_files.iter().any(|file| file.contains("src/main.rs")));
+        assert_eq!(stats.file_count, report.file_count);
+        assert_eq!(stats.symbol_count, report.symbol_count);
         assert!(status.exists);
         assert_eq!(status.version, Some(INDEX_VERSION));
         assert_eq!(status.changed_tracked_files, 0);
@@ -1799,6 +2755,9 @@ mod tests {
         let fallback_report = query_shards_report(&temp_dir, IndexListKind::Symbols, "alpha", 10).unwrap();
         let build_report = build_shards(&temp_dir, 2).unwrap();
         let status = shard_status(&temp_dir).unwrap();
+        let sidecar_shard_query = query_shards_report(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
+        fs::remove_file(index_symbols_mmap_path(&temp_dir).unwrap()).unwrap();
+        fs::remove_file(index_symbols_path(&temp_dir).unwrap()).unwrap();
         let shard_query = query_shards(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
         let full_shard_query = query_shards_report(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
         let hinted_shard_query =
@@ -1817,6 +2776,11 @@ mod tests {
         assert!(status.exists);
         assert!(!status.stale);
         assert_eq!(status.shard_count, build_report.shard_count);
+        assert!(sidecar_shard_query
+            .entries
+            .iter()
+            .any(|entry| entry.contains("gamma [function]")));
+        assert_eq!(sidecar_shard_query.shards_scanned, 0);
         assert!(shard_query.iter().any(|entry| entry.contains("gamma [function]")));
         assert_eq!(full_shard_query.shards_scanned, build_report.shard_count);
         assert!(!full_shard_query.fallback_used);
@@ -1867,6 +2831,30 @@ mod tests {
         let status = status(&temp_dir).unwrap();
 
         assert!(status.changed_tracked_files >= 1);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn refresh_recreates_missing_lightweight_sidecars_without_rebuild() {
+        let temp_dir = temp_workspace_dir("sidecar_refresh");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("lib.rs"), "pub fn first() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+
+        build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        fs::remove_file(index_meta_path(&temp_dir).unwrap()).unwrap();
+        fs::remove_file(index_files_path(&temp_dir).unwrap()).unwrap();
+        fs::remove_file(index_symbols_mmap_path(&temp_dir).unwrap()).unwrap();
+        let report = refresh(&temp_dir, &[], &[], &ignore_file).unwrap();
+
+        assert!(!report.rebuilt);
+        assert_eq!(report.reason, "sidecars refreshed");
+        assert!(index_meta_path(&temp_dir).unwrap().exists());
+        assert!(index_files_path(&temp_dir).unwrap().exists());
+        assert!(index_symbols_mmap_path(&temp_dir).unwrap().exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

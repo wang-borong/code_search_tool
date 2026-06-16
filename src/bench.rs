@@ -4,7 +4,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::CodeItem;
 use crate::errors::{AppError, Result};
+
+const TUI_SOURCE_LIMIT: usize = 2000;
 
 const BENCHMARK_FILE: &str = "benchmark-report.json";
 const BENCHMARK_BASELINE_FILE: &str = "benchmark-baseline.json";
@@ -273,19 +276,18 @@ fn tui_source_rows(
     });
 
     let start = Instant::now();
-    let symbols = crate::symbols::find_symbols(Some(&root_arg), options, default_ignore, ignore_file)?;
-    let matched_symbols = if query.trim().is_empty() {
-        symbols.len()
-    } else {
-        symbols
-            .iter()
-            .filter(|item| item.display_text().contains(query) || item.detail.contains(query))
-            .count()
-    };
+    let symbols =
+        match crate::index::query_code_items(root, crate::index::IndexListKind::Symbols, query, TUI_SOURCE_LIMIT)? {
+            Some(items) => items,
+            None => {
+                let symbols = crate::symbols::find_symbols(Some(&root_arg), options, default_ignore, ignore_file)?;
+                filter_bench_items(symbols, query)
+            }
+        };
     rows.push(BenchRow {
         name: "tui_symbols_source".to_string(),
         elapsed_ms: start.elapsed().as_millis(),
-        count: matched_symbols,
+        count: symbols.len(),
     });
 
     let start = Instant::now();
@@ -297,6 +299,18 @@ fn tui_source_rows(
     });
 
     Ok(rows)
+}
+
+fn filter_bench_items(items: Vec<CodeItem>, query: &str) -> Vec<CodeItem> {
+    if query.trim().is_empty() {
+        return items;
+    }
+
+    items
+        .into_iter()
+        .filter(|item| item.display_text().contains(query) || item.detail.contains(query))
+        .take(TUI_SOURCE_LIMIT)
+        .collect()
 }
 
 pub fn run_preview_read(path: &Path) -> Result<BenchReport> {
