@@ -39,7 +39,11 @@ pub(super) fn selection_style(theme: &TuiThemeConfig, fg: Color, bg: Color) -> S
     theme_style(theme, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
 }
 
-pub(super) fn preview_lines(window: &PreviewWindow, theme: &TuiThemeConfig) -> Vec<Line<'static>> {
+pub(super) fn preview_lines_with_matches(
+    window: &PreviewWindow,
+    theme: &TuiThemeConfig,
+    match_terms: &[String],
+) -> Vec<Line<'static>> {
     if let Some(message) = &window.message {
         return vec![Line::from(Span::styled(
             message.clone(),
@@ -71,7 +75,8 @@ pub(super) fn preview_lines(window: &PreviewWindow, theme: &TuiThemeConfig) -> V
                 Span::styled(format!(" {:>5} ", line.number), number_style),
                 Span::styled("| ".to_string(), theme_style(theme, line_style.fg(Color::DarkGray))),
             ];
-            spans.extend(highlight_code(&window.path, &line.text, line_style, theme));
+            let code_spans = highlight_code(&window.path, &line.text, line_style, theme);
+            spans.extend(highlight_matches_in_spans(code_spans, match_terms, theme));
             Line::from(spans)
         })
         .collect()
@@ -453,6 +458,99 @@ fn push_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
     spans.push(Span::styled(text.to_string(), style));
 }
 
+fn highlight_matches_in_spans(
+    spans: Vec<Span<'static>>,
+    match_terms: &[String],
+    theme: &TuiThemeConfig,
+) -> Vec<Span<'static>> {
+    let terms = normalized_match_terms(match_terms);
+    if terms.is_empty() {
+        return spans;
+    }
+
+    let match_style = theme_style(
+        theme,
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut highlighted = Vec::new();
+    for span in spans {
+        let text = span.content.into_owned();
+        let ranges = match_ranges(&text, &terms);
+        if ranges.is_empty() {
+            highlighted.push(Span::styled(text, span.style));
+            continue;
+        }
+
+        let mut cursor = 0;
+        for (start, end) in ranges {
+            if cursor < start {
+                highlighted.push(Span::styled(text[cursor..start].to_string(), span.style));
+            }
+            highlighted.push(Span::styled(
+                text[start..end].to_string(),
+                span.style.patch(match_style),
+            ));
+            cursor = end;
+        }
+        if cursor < text.len() {
+            highlighted.push(Span::styled(text[cursor..].to_string(), span.style));
+        }
+    }
+    highlighted
+}
+
+fn normalized_match_terms(match_terms: &[String]) -> Vec<String> {
+    let mut terms = match_terms
+        .iter()
+        .flat_map(|term| term.split_whitespace())
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+                .to_ascii_lowercase()
+        })
+        .filter(|term| term.len() >= 2)
+        .collect::<Vec<String>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn match_ranges(text: &str, terms: &[String]) -> Vec<(usize, usize)> {
+    if !text.is_ascii() {
+        return Vec::new();
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let mut ranges = Vec::new();
+    for term in terms {
+        if term.is_empty() || !term.is_ascii() {
+            continue;
+        }
+
+        let mut offset = 0;
+        while let Some(index) = lower[offset..].find(term) {
+            let start = offset + index;
+            let end = start + term.len();
+            ranges.push((start, end));
+            offset = end;
+        }
+    }
+
+    ranges.sort_by_key(|(start, end)| (*start, *end));
+    let mut merged = Vec::<(usize, usize)>::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
 const RUST_KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn", "for", "if",
     "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
@@ -568,10 +666,33 @@ mod tests {
         };
 
         let theme = TuiThemeConfig::default();
-        let lines = preview_lines(&window, &theme);
+        let lines = preview_lines_with_matches(&window, &theme, &[]);
 
         assert_eq!(lines.len(), 2);
         assert!(lines[1].spans.iter().any(|span| span.content.contains("pub")));
+    }
+
+    #[test]
+    fn preview_match_terms_highlight_query_hits() {
+        let window = PreviewWindow {
+            path: Path::new("src/main.rs").to_path_buf(),
+            target_line: 1,
+            target_column: None,
+            lines: vec![super::super::preview_cache::PreviewLine {
+                number: 1,
+                text: "fn main() { run_main(); }".to_string(),
+                is_target: true,
+            }],
+            message: None,
+        };
+
+        let theme = TuiThemeConfig::default();
+        let lines = preview_lines_with_matches(&window, &theme, &["main".to_string()]);
+
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content == "main" && span.style.bg == Some(Color::Yellow)));
     }
 
     #[test]

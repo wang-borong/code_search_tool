@@ -118,6 +118,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace doctor "$SMO
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace config-schema --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace config-schema --format text >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace config-doctor "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace config-migrate "$SMOKE_ROOT" --dry-run
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace profile save "$WORKSPACE_PROFILE_NAME" "$SMOKE_ROOT" --description "smoke profile" --index-root "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace profile list
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace profile show "$WORKSPACE_PROFILE_NAME"

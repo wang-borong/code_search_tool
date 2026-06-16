@@ -176,9 +176,21 @@ pub struct IndexShardManifest {
     pub root: String,
     pub source_index: String,
     pub source_built_at_unix: u64,
+    #[serde(default)]
+    pub source_index_size_bytes: u64,
+    #[serde(default)]
+    pub source_index_modified_unix: u64,
     pub file_count: usize,
     pub symbol_count: usize,
     pub shards: Vec<IndexShardInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexShardQueryReport {
+    pub entries: Vec<String>,
+    pub shard_count: usize,
+    pub shards_scanned: usize,
+    pub fallback_used: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,12 +672,21 @@ pub fn build_shards(root: &Path, target_symbols_per_shard: usize) -> Result<Inde
             .then_with(|| right.files.cmp(&left.files))
             .then_with(|| left.name.cmp(&right.name))
     });
+    let source_metadata = fs::metadata(&index_path).ok();
+    let source_index_size_bytes = source_metadata.as_ref().map_or(0, |metadata| metadata.len());
+    let source_index_modified_unix = source_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(system_time_to_unix)
+        .unwrap_or(0);
 
     let manifest = IndexShardManifest {
         version: INDEX_VERSION,
         root: root.to_string_lossy().to_string(),
         source_index: index_path.display().to_string(),
         source_built_at_unix: index.built_at_unix,
+        source_index_size_bytes,
+        source_index_modified_unix,
         file_count: index.files.len(),
         symbol_count: index.symbols.len(),
         shards: shards.clone(),
@@ -700,6 +721,53 @@ pub fn shard_status(root: &Path) -> Result<IndexShardStatus> {
     }
 
     let manifest = read_shard_manifest(&manifest_path)?;
+    let shard_dir = shard_dir(&root)?;
+    let missing_shard = manifest
+        .shards
+        .iter()
+        .any(|shard| !shard_dir.join(&shard.file_name).exists());
+
+    if manifest.source_index_size_bytes > 0 && manifest.source_index_modified_unix > 0 {
+        let source_index = if manifest.source_index.trim().is_empty() {
+            index_path(&root)?
+        } else {
+            PathBuf::from(&manifest.source_index)
+        };
+        let source_metadata = fs::metadata(source_index).ok();
+        let source_index_size_bytes = source_metadata.as_ref().map_or(0, |metadata| metadata.len());
+        let source_index_modified_unix = source_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_to_unix)
+            .unwrap_or(0);
+        let source_missing = source_metadata.is_none();
+        let stale = manifest.version != INDEX_VERSION
+            || normalize_root(Path::new(&manifest.root)) != root
+            || source_missing
+            || manifest.source_index_size_bytes != source_index_size_bytes
+            || manifest.source_index_modified_unix != source_index_modified_unix
+            || missing_shard;
+        let reason = if missing_shard {
+            "one or more shard files are missing".to_string()
+        } else if source_missing {
+            "main index missing".to_string()
+        } else if stale {
+            "shards do not match the current main index metadata".to_string()
+        } else {
+            "fresh".to_string()
+        };
+
+        return Ok(IndexShardStatus {
+            manifest_path,
+            exists: true,
+            stale,
+            reason,
+            shard_count: manifest.shards.len(),
+            file_count: manifest.file_count,
+            symbol_count: manifest.symbol_count,
+        });
+    }
+
     let Some(index) = load(&root)? else {
         return Ok(IndexShardStatus {
             manifest_path,
@@ -712,11 +780,6 @@ pub fn shard_status(root: &Path) -> Result<IndexShardStatus> {
         });
     };
 
-    let shard_dir = shard_dir(&root)?;
-    let missing_shard = manifest
-        .shards
-        .iter()
-        .any(|shard| !shard_dir.join(&shard.file_name).exists());
     let stale = manifest.version != INDEX_VERSION
         || normalize_root(Path::new(&manifest.root)) != root
         || manifest.source_built_at_unix != index.built_at_unix
@@ -987,21 +1050,107 @@ pub fn query(root: &Path, kind: IndexListKind, query: &str, limit: usize) -> Res
 }
 
 pub fn query_shards(root: &Path, kind: IndexListKind, query_text: &str, limit: usize) -> Result<Vec<String>> {
+    Ok(query_shards_report(root, kind, query_text, limit)?.entries)
+}
+
+pub fn query_shards_report(
+    root: &Path,
+    kind: IndexListKind,
+    query_text: &str,
+    limit: usize,
+) -> Result<IndexShardQueryReport> {
     let root = normalize_root(root);
     let status = shard_status(&root)?;
     if !status.exists || status.stale {
-        return query(&root, kind, query_text, limit);
+        return Ok(IndexShardQueryReport {
+            entries: query(&root, kind, query_text, limit)?,
+            shard_count: status.shard_count,
+            shards_scanned: 0,
+            fallback_used: true,
+        });
     }
 
     let manifest = read_shard_manifest(&status.manifest_path)?;
     let shard_dir = shard_dir(&root)?;
+    let candidate_shards = candidate_shards_for_query(&manifest, query_text);
+    let shards_to_scan = if candidate_shards.is_empty() {
+        manifest.shards.iter().collect::<Vec<_>>()
+    } else {
+        candidate_shards
+    };
+    let mut scored = score_shard_entries(&shard_dir, &shards_to_scan, kind, query_text)?;
+    let mut shards_scanned = shards_to_scan.len();
+
+    if scored.is_empty() && shards_scanned != manifest.shards.len() {
+        let all_shards = manifest.shards.iter().collect::<Vec<_>>();
+        scored = score_shard_entries(&shard_dir, &all_shards, kind, query_text)?;
+        shards_scanned = all_shards.len();
+    }
+
+    Ok(IndexShardQueryReport {
+        entries: format_scored_entries(scored, limit),
+        shard_count: manifest.shards.len(),
+        shards_scanned,
+        fallback_used: false,
+    })
+}
+
+fn score_shard_entries(
+    shard_dir: &Path,
+    shards: &[&IndexShardInfo],
+    kind: IndexListKind,
+    query_text: &str,
+) -> Result<Vec<(usize, String)>> {
     let mut scored = Vec::new();
-    for shard in &manifest.shards {
+    for shard in shards {
         let shard_path = shard_dir.join(&shard.file_name);
         let index = read_index(&shard_path)?;
         scored.extend(score_code_index_entries(&index, kind, query_text));
     }
-    Ok(format_scored_entries(scored, limit))
+    Ok(scored)
+}
+
+fn candidate_shards_for_query<'a>(manifest: &'a IndexShardManifest, query_text: &str) -> Vec<&'a IndexShardInfo> {
+    let hints = query_shard_hints(query_text);
+    if hints.is_empty() {
+        return Vec::new();
+    }
+
+    manifest
+        .shards
+        .iter()
+        .filter(|shard| {
+            let name = shard.name.to_lowercase();
+            let file_name = shard.file_name.trim_end_matches(".toml").to_lowercase();
+            hints.iter().any(|hint| hint == &name || hint == &file_name)
+        })
+        .collect()
+}
+
+fn query_shard_hints(query_text: &str) -> HashSet<String> {
+    query_text
+        .split_whitespace()
+        .filter_map(query_token_shard_hint)
+        .collect()
+}
+
+fn query_token_shard_hint(token: &str) -> Option<String> {
+    let value = token.split_once(':').map_or(token, |(_, value)| value);
+    let value =
+        value.trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\')));
+    if value.is_empty() {
+        return None;
+    }
+
+    let normalized = value.replace('\\', "/");
+    if !normalized.contains('/') {
+        return Some(normalized.to_lowercase());
+    }
+
+    normalized
+        .split('/')
+        .find(|part| !part.trim().is_empty())
+        .map(|part| part.to_lowercase())
 }
 
 fn score_code_index_entries(index: &CodeIndex, kind: IndexListKind, query: &str) -> Vec<(usize, String)> {
@@ -1647,14 +1796,19 @@ mod tests {
         build(&temp_dir, &[], &[], &ignore_file).unwrap();
         let report = shard_report(&temp_dir, 2).unwrap();
         let fallback_query = query_shards(&temp_dir, IndexListKind::Symbols, "alpha", 10).unwrap();
+        let fallback_report = query_shards_report(&temp_dir, IndexListKind::Symbols, "alpha", 10).unwrap();
         let build_report = build_shards(&temp_dir, 2).unwrap();
         let status = shard_status(&temp_dir).unwrap();
         let shard_query = query_shards(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
+        let full_shard_query = query_shards_report(&temp_dir, IndexListKind::Symbols, "gamma", 10).unwrap();
+        let hinted_shard_query =
+            query_shards_report(&temp_dir, IndexListKind::Symbols, "hot/lib.rs gamma", 10).unwrap();
 
         assert_eq!(report.recommended_shards, 2);
         assert_eq!(report.buckets[0].name, "hot");
         assert!(report.buckets[0].symbols > report.buckets[1].symbols);
         assert!(fallback_query.iter().any(|entry| entry.contains("alpha [function]")));
+        assert!(fallback_report.fallback_used);
         assert!(build_report.wrote);
         assert!(build_report.shard_count >= 2);
         assert!(build_report.shards.iter().any(|shard| shard.name == "hot"));
@@ -1664,6 +1818,14 @@ mod tests {
         assert!(!status.stale);
         assert_eq!(status.shard_count, build_report.shard_count);
         assert!(shard_query.iter().any(|entry| entry.contains("gamma [function]")));
+        assert_eq!(full_shard_query.shards_scanned, build_report.shard_count);
+        assert!(!full_shard_query.fallback_used);
+        assert!(hinted_shard_query
+            .entries
+            .iter()
+            .any(|entry| entry.contains("gamma [function]")));
+        assert_eq!(hinted_shard_query.shards_scanned, 1);
+        assert!(!hinted_shard_query.fallback_used);
         assert!(shard_report(&temp_dir, 0).is_err());
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::remove_dir_all(&cache_dir);

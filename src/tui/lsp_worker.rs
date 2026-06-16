@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::core::{CodeItem, Location};
 use crate::errors::{AppError, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum LspCommand {
     Definition(Location),
     TypeDefinition(Location),
@@ -109,7 +109,7 @@ fn run_lsp_request(
     clients: &mut HashMap<crate::lsp::LspProviderKind, crate::lsp::LspClient>,
     command: LspCommand,
 ) -> (&'static str, Result<LspPayload>) {
-    let label = match command {
+    let label = match &command {
         LspCommand::Definition(_) => "Definitions",
         LspCommand::TypeDefinition(_) => "Type Definitions",
         LspCommand::Implementation(_) => "Implementations",
@@ -127,6 +127,38 @@ fn run_lsp_request(
 }
 
 fn run_lsp_command(
+    root: &Path,
+    config: &Config,
+    clients: &mut HashMap<crate::lsp::LspProviderKind, crate::lsp::LspClient>,
+    command: LspCommand,
+) -> Result<LspPayload> {
+    let fallback_request = semantic_fallback_request(&command);
+    let primary_result = run_lsp_command_primary(root, config, clients, command);
+    match primary_result {
+        Ok(LspPayload::Items(items)) if items.is_empty() => {
+            if let Some(request) = fallback_request {
+                let fallback = semantic_fallback_items(root, &request, "lsp returned no edges")?;
+                if !fallback.is_empty() {
+                    return Ok(LspPayload::Items(fallback));
+                }
+            }
+            Ok(LspPayload::Items(items))
+        }
+        Err(err) => {
+            if let Some(request) = fallback_request {
+                let reason = format!("lsp failed: {err}");
+                let fallback = semantic_fallback_items(root, &request, &reason)?;
+                if !fallback.is_empty() {
+                    return Ok(LspPayload::Items(fallback));
+                }
+            }
+            Err(err)
+        }
+        result => result,
+    }
+}
+
+fn run_lsp_command_primary(
     root: &Path,
     config: &Config,
     clients: &mut HashMap<crate::lsp::LspProviderKind, crate::lsp::LspClient>,
@@ -156,6 +188,84 @@ fn run_lsp_command(
     }
 }
 
+#[derive(Debug, Clone)]
+struct SemanticFallbackRequest {
+    location: Location,
+    relation: String,
+}
+
+fn semantic_fallback_request(command: &LspCommand) -> Option<SemanticFallbackRequest> {
+    let (location, relation) = match command {
+        LspCommand::Definition(location) => (location, "definition"),
+        LspCommand::TypeDefinition(location) => (location, "type"),
+        LspCommand::Implementation(location) => (location, "implementation"),
+        LspCommand::References(location) => (location, "references"),
+        LspCommand::IncomingCalls(location) => (location, "incoming"),
+        LspCommand::OutgoingCalls(location) => (location, "outgoing"),
+        LspCommand::Diagnostics(_)
+        | LspCommand::WorkspaceSymbols(_)
+        | LspCommand::DocumentSymbols(_)
+        | LspCommand::Hover(_) => return None,
+    };
+    Some(SemanticFallbackRequest {
+        location: location.clone(),
+        relation: relation.to_string(),
+    })
+}
+
+fn semantic_fallback_items(root: &Path, request: &SemanticFallbackRequest, reason: &str) -> Result<Vec<CodeItem>> {
+    let edges = crate::graph::index_fallback_edges(
+        root,
+        &request.location,
+        &request.relation,
+        reason,
+        &crate::graph::GraphOptions {
+            limit: 50,
+            depth: 1,
+            fanout: 0,
+            exclude: Vec::new(),
+        },
+    )?;
+    Ok(edges
+        .into_iter()
+        .map(|edge| fallback_edge_to_item(root, edge))
+        .collect())
+}
+
+fn fallback_edge_to_item(root: &Path, edge: crate::graph::GraphEdge) -> CodeItem {
+    let (path_label, line, name) = parse_fallback_target(&edge.to);
+    let path = PathBuf::from(&path_label);
+    let path = if path.is_absolute() { path } else { root.join(path) };
+    CodeItem::symbol(
+        path,
+        path_label,
+        line,
+        None,
+        format!("{name} ({})", edge.detail),
+        edge.kind,
+    )
+}
+
+fn parse_fallback_target(target: &str) -> (String, usize, String) {
+    let Some((path, rest)) = target.split_once(':') else {
+        return (target.to_string(), 1, target.to_string());
+    };
+    let digits = rest
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    let line = digits.parse::<usize>().unwrap_or(1).max(1);
+    let name = rest
+        .get(digits.len()..)
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches(':')
+        .trim()
+        .to_string();
+    let name = if name.is_empty() { path.to_string() } else { name };
+    (path.to_string(), line, name)
+}
+
 fn provider_for_command(
     root: &Path,
     config: &crate::config::LspConfig,
@@ -173,5 +283,26 @@ fn provider_for_command(
             crate::lsp::provider_for_path(path, config)
         }
         LspCommand::WorkspaceSymbols(_) => Ok(crate::lsp::provider_for_workspace(root, config)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fallback_target_with_path_line_and_name() {
+        let (path, line, name) = parse_fallback_target("src/main.rs:42 handle_request");
+
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(line, 42);
+        assert_eq!(name, "handle_request");
+    }
+
+    #[test]
+    fn semantic_fallback_excludes_non_navigation_commands() {
+        let command = LspCommand::Hover(Location::new("src/main.rs", Some(1), None));
+
+        assert!(semantic_fallback_request(&command).is_none());
     }
 }

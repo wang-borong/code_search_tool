@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,9 @@ use crate::errors::{AppError, Result};
 
 const BENCHMARK_FILE: &str = "benchmark-report.json";
 const BENCHMARK_BASELINE_FILE: &str = "benchmark-baseline.json";
+const BENCHMARK_HISTORY_FILE: &str = "benchmark-history.json";
+const BENCHMARK_HISTORY_LIMIT: usize = 20;
+const SLOW_ROW_EXPLAIN_MS: u128 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BenchReport {
@@ -40,6 +43,12 @@ pub struct BenchRegression {
     pub current_ms: u128,
     pub delta_ms: i128,
     pub delta_percent: i128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BenchHistoryEntry {
+    recorded_at_unix: u64,
+    rows: Vec<BenchRow>,
 }
 
 impl BenchReport {
@@ -315,6 +324,14 @@ pub fn format_report(report: &BenchReport, format: &str) -> Result<String> {
             for warning in &report.warnings {
                 output.push_str(&format!("warning: {warning}\n"));
             }
+            for explanation in slow_row_explanations(report) {
+                output.push_str(&format!("explain: {explanation}\n"));
+            }
+            if let Some(root) = &report.root {
+                for trend in benchmark_trend_lines(root, report)? {
+                    output.push_str(&format!("trend: {trend}\n"));
+                }
+            }
             Ok(output)
         }
         "json" => serde_json::to_string_pretty(report)
@@ -447,6 +464,7 @@ fn write_report(root: &Path, report: &BenchReport) -> Result<()> {
     }
     let contents = serde_json::to_string_pretty(report).map_err(|err| AppError::General(err.to_string()))?;
     fs::write(path, contents)?;
+    append_benchmark_history(root, report)?;
     Ok(())
 }
 
@@ -467,9 +485,124 @@ fn benchmark_baseline_path(root: &Path) -> Result<PathBuf> {
     Ok(crate::workspace::cache_dir_for_root(root)?.join(BENCHMARK_BASELINE_FILE))
 }
 
+fn benchmark_history_path(root: &Path) -> Result<PathBuf> {
+    Ok(crate::workspace::cache_dir_for_root(root)?.join(BENCHMARK_HISTORY_FILE))
+}
+
+fn append_benchmark_history(root: &Path, report: &BenchReport) -> Result<()> {
+    let path = benchmark_history_path(root)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut history = read_benchmark_history(root)?;
+    history.push(BenchHistoryEntry {
+        recorded_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
+        rows: report.rows.clone(),
+    });
+    if history.len() > BENCHMARK_HISTORY_LIMIT {
+        let overflow = history.len() - BENCHMARK_HISTORY_LIMIT;
+        history.drain(0..overflow);
+    }
+    let contents = serde_json::to_string_pretty(&history).map_err(|err| AppError::General(err.to_string()))?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn read_benchmark_history(root: &Path) -> Result<Vec<BenchHistoryEntry>> {
+    let path = benchmark_history_path(root)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path)?;
+    serde_json::from_str(&contents).map_err(|err| AppError::General(format!("Corrupt benchmark history: {err}")))
+}
+
+fn benchmark_trend_lines(root: &Path, report: &BenchReport) -> Result<Vec<String>> {
+    let history = read_benchmark_history(root)?;
+    if history.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let mut lines = Vec::new();
+    for row in &report.rows {
+        let previous = history.iter().rev().skip(1).find_map(|entry| {
+            entry
+                .rows
+                .iter()
+                .find(|candidate| candidate.name == row.name)
+                .map(|candidate| candidate.elapsed_ms)
+        });
+        let Some(previous_ms) = previous else {
+            continue;
+        };
+        let delta = row.elapsed_ms as i128 - previous_ms as i128;
+        if delta == 0 {
+            continue;
+        }
+        let direction = if delta > 0 { "slower" } else { "faster" };
+        lines.push(format!(
+            "{} {}ms -> {}ms ({} {}ms)",
+            row.name,
+            previous_ms,
+            row.elapsed_ms,
+            direction,
+            delta.unsigned_abs()
+        ));
+    }
+    Ok(lines)
+}
+
+fn slow_row_explanations(report: &BenchReport) -> Vec<String> {
+    report
+        .rows
+        .iter()
+        .filter(|row| row.elapsed_ms >= SLOW_ROW_EXPLAIN_MS)
+        .map(|row| {
+            let hint = if row.name.contains("search") {
+                "check ignore patterns and narrow the search root".to_string()
+            } else if row.name.contains("index_query") {
+                slow_index_query_hint(report)
+            } else if row.name.contains("index_build") {
+                "review index_roots and generated directories".to_string()
+            } else if row.name.contains("tui_symbols") {
+                "prefer the index source or rebuild a fresh symbol cache".to_string()
+            } else if row.name.contains("trace") {
+                "archive old trace sessions or filter by session".to_string()
+            } else {
+                "compare with benchmark history and inspect workspace health".to_string()
+            };
+            format!("{} took {}ms; {}", row.name, row.elapsed_ms, hint)
+        })
+        .collect()
+}
+
+fn slow_index_query_hint(report: &BenchReport) -> String {
+    let Some(root) = &report.root else {
+        return "build index shards for large symbol tables".to_string();
+    };
+    let Ok(status) = crate::index::shard_status(root) else {
+        return "build index shards for large symbol tables".to_string();
+    };
+
+    if status.exists && !status.stale {
+        return "use index shard-query with a top-level path hint for large symbol tables".to_string();
+    }
+    if status.exists && status.stale {
+        return "refresh stale index shards with `fcs index shards --write`".to_string();
+    }
+    "build index shards for large symbol tables".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_bench_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("fcs_bench_{name}_{}", std::process::id()))
+    }
 
     #[test]
     fn benchmark_report_formats_text() {
@@ -484,5 +617,90 @@ mod tests {
 
         assert!(output.contains("Root: /tmp/fcs"));
         assert!(output.contains("index_status\t1\t2"));
+    }
+
+    #[test]
+    fn benchmark_report_explains_slow_rows() {
+        let mut report = BenchReport::new(None);
+        report.rows.push(BenchRow {
+            name: "index_query_symbols".to_string(),
+            elapsed_ms: 700,
+            count: 4,
+        });
+
+        let output = format_report(&report, "text").unwrap();
+
+        assert!(output.contains("explain: index_query_symbols took 700ms"));
+        assert!(output.contains("build index shards"));
+    }
+
+    #[test]
+    fn benchmark_report_uses_shard_query_hint_when_shards_are_fresh() {
+        let temp_dir = temp_bench_dir("fresh_shard_hint");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        let cache_dir = crate::workspace::cache_dir_for_root(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&cache_dir);
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        crate::index::build_shards(&temp_dir, 1).unwrap();
+
+        let mut report = BenchReport::new(Some(temp_dir.clone()));
+        report.rows.push(BenchRow {
+            name: "index_query_symbols".to_string(),
+            elapsed_ms: 700,
+            count: 1,
+        });
+
+        let output = format_report(&report, "text").unwrap();
+
+        assert!(output.contains("use index shard-query"));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn benchmark_history_reports_trend() {
+        let temp_dir = temp_bench_dir("history");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        if let Some(cache_dir) = benchmark_history_path(&temp_dir)
+            .unwrap()
+            .parent()
+            .map(Path::to_path_buf)
+        {
+            let _ = fs::remove_dir_all(cache_dir);
+        }
+
+        let mut first = BenchReport::new(Some(temp_dir.clone()));
+        first.rows.push(BenchRow {
+            name: "search".to_string(),
+            elapsed_ms: 10,
+            count: 1,
+        });
+        write_report(&temp_dir, &first).unwrap();
+
+        let mut second = BenchReport::new(Some(temp_dir.clone()));
+        second.rows.push(BenchRow {
+            name: "search".to_string(),
+            elapsed_ms: 15,
+            count: 1,
+        });
+        write_report(&temp_dir, &second).unwrap();
+
+        let output = format_report(&second, "text").unwrap();
+
+        assert!(output.contains("trend: search 10ms -> 15ms"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        if let Some(cache_dir) = benchmark_history_path(&temp_dir)
+            .unwrap()
+            .parent()
+            .map(Path::to_path_buf)
+        {
+            let _ = fs::remove_dir_all(cache_dir);
+        }
     }
 }

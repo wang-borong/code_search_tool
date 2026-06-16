@@ -79,12 +79,13 @@ impl GraphFormat {
 
 pub fn lsp_edges(origin: &Location, relation: &str, items: &[CodeItem]) -> Vec<GraphEdge> {
     let from = location_label(origin);
+    let relation = normalize_relation_label(relation);
     items
         .iter()
         .map(|item| GraphEdge {
             from: from.clone(),
             to: location_label(&item.location),
-            kind: relation.to_string(),
+            kind: relation.clone(),
             detail: item.display_text().to_string(),
         })
         .collect()
@@ -113,6 +114,7 @@ pub fn index_fallback_edges(
     });
 
     let from = location_label(origin);
+    let relation = normalize_relation_label(relation);
     let edges = symbols
         .into_iter()
         .take(options.limit.max(1))
@@ -271,18 +273,25 @@ fn dedupe_edges(mut edges: Vec<GraphEdge>) -> Vec<GraphEdge> {
             .then_with(|| left.detail.cmp(&right.detail))
     });
 
-    let mut seen = HashSet::<(String, String, String, String)>::new();
+    let mut seen = HashSet::<(String, String, String)>::new();
     edges
         .into_iter()
-        .filter(|edge| {
-            seen.insert((
-                edge.from.clone(),
-                edge.to.clone(),
-                edge.kind.clone(),
-                edge.detail.clone(),
-            ))
-        })
+        .filter(|edge| seen.insert((edge.from.clone(), edge.to.clone(), edge.kind.clone())))
         .collect()
+}
+
+fn normalize_relation_label(relation: &str) -> String {
+    match relation.trim() {
+        "ref" | "refs" | "reference" | "references" => "references",
+        "def" | "definition" | "definitions" => "definition",
+        "type" | "type-def" | "type-definition" | "type_def" => "type",
+        "impl" | "implementation" | "implementations" => "implementation",
+        "incoming" | "incoming-call" | "incoming-calls" => "incoming",
+        "outgoing" | "outgoing-call" | "outgoing-calls" => "outgoing",
+        "" => "semantic",
+        other => other,
+    }
+    .to_string()
 }
 
 fn format_edges_text(edges: &[GraphEdge]) -> String {

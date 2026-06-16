@@ -119,7 +119,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `x`：在 Debug source 中删除当前 profile 或断点。
 - `F5` / `F6` / `F10` / `F11` / `Shift-F11` / `Ctrl-F5`：对 TUI DAP worker 执行 continue、pause、next、step in、step out、stop。
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
-- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
+- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`status copy/health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`var page/next/prev`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：在状态栏显示快捷键提示。
 
@@ -351,7 +351,7 @@ fcs bench baseline .
 fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
 ```
 
-`bench baseline` 会把最近一次 `bench all` 的报告保存为 `benchmark-baseline.json`；`bench compare` 对比当前报告与基线，适合 release smoke 或本地性能回归门禁。
+`bench baseline` 会把最近一次 `bench all` 的报告保存为 `benchmark-baseline.json`；`bench compare` 对比当前报告与基线，适合 release smoke 或本地性能回归门禁。每次写入 workspace benchmark report 时也会追加 `benchmark-history.json`，text 输出会在有历史时显示 `trend:`，慢项会显示 `explain:` 建议。
 
 workspace profile 和配置诊断适合 monorepo 或多根项目：
 
@@ -364,6 +364,7 @@ fcs workspace plan
 fcs workspace workflows . --format text
 fcs workspace config-doctor .
 fcs workspace config-schema --format toml
+fcs workspace config-migrate . --dry-run
 ```
 
 ---

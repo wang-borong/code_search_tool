@@ -34,7 +34,6 @@ use sources::{
 use sources::{SourceRequest, SourceResponse};
 use state::{TuiPersistentState, TuiSavedBreakpoint, TuiSavedItem, TuiSavedLocation};
 
-const HELP_TEXT: &str = "? help  / query  : command  n/N cycle  p pin  [/ ] back/fwd  gd/gr jump  Enter open";
 const HELP_OVERLAY_TEXT: &str = "\
 fcs workbench
 
@@ -967,6 +966,16 @@ impl AppState {
         self.status_level = StatusLevel::Error;
     }
 
+    fn copy_status_to_cache(&mut self) -> Result<()> {
+        let path = crate::workspace::cache_dir_for_root(&self.root)?.join("tui-status.txt");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, &self.status)?;
+        self.set_status(format!("Status exported: {}", path.display()));
+        Ok(())
+    }
+
     fn next_source(&mut self) -> Result<()> {
         self.mode = source_mode_after(self.mode, 1);
         self.preview_scroll = 0;
@@ -1574,6 +1583,32 @@ impl AppState {
         self.queue_dap_command("DAP evaluate", DapCommand::Evaluate(expression.to_string()))
     }
 
+    fn queue_next_variable_page(&mut self, direction: isize) -> Result<()> {
+        let Some(_reference) = self.dap_snapshot.variables_reference else {
+            self.set_warning("No expanded variable reference to page");
+            return Ok(());
+        };
+        let visible_count = if self.dap_snapshot.variable_items.is_empty() {
+            None
+        } else {
+            Some(self.dap_snapshot.variable_items.len())
+        };
+        let count = self.dap_snapshot.variables_count.or(visible_count).unwrap_or(20);
+        let start = self.dap_snapshot.variables_start.unwrap_or(0);
+        let next_start = if direction < 0 {
+            start.saturating_sub(count)
+        } else {
+            start.saturating_add(count)
+        };
+        self.queue_dap_command(
+            "DAP variable page",
+            DapCommand::VariablesPage {
+                start: next_start,
+                count,
+            },
+        )
+    }
+
     fn add_dap_stopped_breakpoint(&mut self) {
         let Some(location) = self.dap_stopped_location() else {
             self.set_warning("DAP session has no stopped location");
@@ -1672,14 +1707,20 @@ impl AppState {
             Ok(snapshot) => {
                 let request_count = snapshot.request_count;
                 let trace_result = self.record_dap_stopped_location(&snapshot);
+                let focused = self.focus_dap_stopped_location(&snapshot);
                 self.dap_snapshot = snapshot;
                 match trace_result {
                     Ok(true) => self.set_status(format!(
-                        "{} completed: {request_count} request(s), debug stop traced",
-                        response.label
+                        "{} completed: {request_count} request(s), debug stop traced{}",
+                        response.label,
+                        if focused { ", focused" } else { "" }
                     )),
                     Ok(false) => {
-                        self.set_status(format!("{} completed: {request_count} request(s)", response.label));
+                        self.set_status(format!(
+                            "{} completed: {request_count} request(s){}",
+                            response.label,
+                            if focused { ", focused" } else { "" }
+                        ));
                     }
                     Err(err) => self.set_warning(format!("{} completed, trace failed: {err}", response.label)),
                 }
@@ -1729,6 +1770,42 @@ impl AppState {
             metadata,
         )?;
         Ok(true)
+    }
+
+    fn focus_dap_stopped_location(&mut self, snapshot: &crate::dap::DapSessionSnapshot) -> bool {
+        if snapshot.state != crate::dap::DapSessionState::Stopped {
+            return false;
+        }
+        let Some(stopped_location) = &snapshot.stopped_location else {
+            return false;
+        };
+
+        let path = if stopped_location.path.is_absolute() {
+            stopped_location.path.clone()
+        } else {
+            self.root.join(&stopped_location.path)
+        };
+        let location = Location::new(&path, Some(stopped_location.line), stopped_location.column);
+        let display = format!("{}:{}:{}", path.display(), stopped_location.line, snapshot.status);
+        let item = CodeItem::from_parts(
+            CodeItemKind::TextMatch,
+            "DAP stopped",
+            snapshot.status.clone(),
+            location,
+            display,
+        );
+        if self
+            .current_item()
+            .is_some_and(|current| current.location == item.location)
+        {
+            return false;
+        }
+        self.results = vec![item.clone()];
+        self.selected = 0;
+        self.preview_scroll = 0;
+        self.mode = SourceMode::Debug;
+        self.push_navigation(item);
+        true
     }
 
     fn jump_to_dap_stopped_location(&mut self) {
@@ -2101,6 +2178,11 @@ impl AppState {
             return Ok(true);
         }
 
+        if matches!(command, "status copy" | "status save" | "status export") {
+            self.copy_status_to_cache()?;
+            return Ok(true);
+        }
+
         if let Some(rest) = command.strip_prefix("preview ") {
             match rest.trim() {
                 "lock" | "toggle" => self.toggle_preview_lock(),
@@ -2197,6 +2279,10 @@ impl AppState {
                     })?;
                     self.queue_dap_command("DAP variable page", DapCommand::VariablesPage { start, count })?;
                 }
+            } else if matches!(rest, "next" | "page-next") {
+                self.queue_next_variable_page(1)?;
+            } else if matches!(rest, "prev" | "previous" | "page-prev") {
+                self.queue_next_variable_page(-1)?;
             } else {
                 self.set_warning(format!("Unknown variable command: {rest}"));
             }
@@ -3093,6 +3179,8 @@ fn default_dap_snapshot() -> crate::dap::DapSessionSnapshot {
         last_error: None,
         error: None,
         stopped_location: None,
+        watch_history: Vec::new(),
+        evaluation_history: Vec::new(),
     }
 }
 
@@ -3147,11 +3235,20 @@ fn dap_panel_lines(snapshot: &crate::dap::DapSessionSnapshot) -> Vec<String> {
     if !snapshot.watches.is_empty() {
         lines.push(format!("Watches: {}", limited_join(&snapshot.watches, 3)));
     }
+    if !snapshot.watch_history.is_empty() {
+        lines.push(format!("Watch history: {}", limited_join(&snapshot.watch_history, 3)));
+    }
     if !snapshot.breakpoints.is_empty() {
         lines.push(format!("Breakpoints: {}", limited_join(&snapshot.breakpoints, 3)));
     }
     if let Some(evaluation) = &snapshot.last_evaluation {
         lines.push(format!("Eval: {evaluation}"));
+    }
+    if !snapshot.evaluation_history.is_empty() {
+        lines.push(format!(
+            "Eval history: {}",
+            limited_join(&snapshot.evaluation_history, 3)
+        ));
     }
     if let Some(reason) = &snapshot.stop_reason {
         lines.push(format!("Stop reason: {reason}"));
@@ -3544,6 +3641,8 @@ fn palette_command_names() -> &'static [&'static str] {
         "watch refresh",
         "var expand ",
         "var page ",
+        "var next",
+        "var prev",
         "eval ",
         "break if ",
         "break hit ",
@@ -3572,6 +3671,8 @@ fn palette_command_names() -> &'static [&'static str] {
         "preview up",
         "preview down",
         "preview reset",
+        "status copy",
+        "status health",
         "quit",
     ]
 }
@@ -3600,7 +3701,7 @@ fn command_hint_text(command: &str) -> String {
 }
 
 fn command_help_text() -> String {
-    "Commands: source <mode> | query <text> | layout search/debug/trace/semantic | filter kind/path/text <value> | group kind/path/none | trace view/session/current/sessions/semantic/breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | eval <expr> | preview lock/up/down | health | quit"
+    "Commands: source <mode> | query <text> | layout search/debug/trace/semantic | filter kind/path/text <value> | group kind/path/none | trace view/session/current/sessions/semantic/breakpoint/dap-profile | break if/hit/log/delete/sync | dap start/real/sync/next/continue/pause/restart/stop/jump/adapters | watch add/del/clear/refresh | var page/next/prev | eval <expr> | preview lock/up/down | status copy/health | quit"
 		.to_string()
 }
 

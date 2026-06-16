@@ -586,6 +586,10 @@ pub struct DapSessionSnapshot {
     pub variable_items: Vec<DapVariable>,
     #[serde(default)]
     pub watches: Vec<String>,
+    #[serde(default)]
+    pub watch_history: Vec<String>,
+    #[serde(default)]
+    pub evaluation_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_evaluation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -616,6 +620,8 @@ pub struct DapSnapshotRequest<'a> {
     pub variables_start: Option<usize>,
     pub variables_count: Option<usize>,
     pub capabilities: &'a [String],
+    pub watch_history: &'a [String],
+    pub evaluation_history: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1066,7 +1072,7 @@ impl<T: DapTransport> DapClient<T> {
         let deadline = Instant::now() + self.options.event_timeout;
         for _ in 0..self.options.max_read_frames {
             let Some(message) = self.read_inbound_until(deadline)? else {
-                return Err(self.timeout_error("event", event_name));
+                return Err(self.timeout_error("event", event_name, self.options.event_timeout));
             };
 
             match message {
@@ -1122,7 +1128,11 @@ impl<T: DapTransport> DapClient<T> {
         let deadline = Instant::now() + self.options.request_timeout;
         for _ in 0..self.options.max_read_frames {
             let Some(message) = self.read_inbound_until(deadline)? else {
-                return Err(self.timeout_error("response", &format!("request {request_seq}")));
+                return Err(self.timeout_error(
+                    "response",
+                    &format!("request {request_seq}"),
+                    self.options.request_timeout,
+                ));
             };
 
             match message {
@@ -1169,10 +1179,10 @@ impl<T: DapTransport> DapClient<T> {
         )))
     }
 
-    fn timeout_error(&self, wait_kind: &str, target: &str) -> AppError {
+    fn timeout_error(&self, wait_kind: &str, target: &str, timeout: Duration) -> AppError {
         AppError::General(format!(
             "Timed out waiting for DAP {wait_kind} {target} after {:?}",
-            self.options.request_timeout
+            timeout
         ))
     }
 }
@@ -1479,6 +1489,8 @@ pub fn refresh_session_snapshot_with_breakpoints<T: DapTransport>(
             variables_start: None,
             variables_count: None,
             capabilities: &[],
+            watch_history: &[],
+            evaluation_history: &[],
         },
     )
 }
@@ -1559,6 +1571,8 @@ pub fn refresh_session_snapshot_with_request<T: DapTransport>(
         scope_items: scopes,
         variable_items: variables,
         watches,
+        watch_history: request.watch_history.to_vec(),
+        evaluation_history: request.evaluation_history.to_vec(),
         last_evaluation: request.last_evaluation,
         stop_reason,
         last_event,
@@ -2780,6 +2794,8 @@ mod tests {
                 variables_start: Some(1),
                 variables_count: Some(1),
                 capabilities: &[],
+                watch_history: &[],
+                evaluation_history: &[],
             },
         )
         .unwrap();

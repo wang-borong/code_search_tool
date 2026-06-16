@@ -10,6 +10,7 @@ use crate::config::ActionConfig;
 use crate::errors::{AppError, Result};
 
 const DEFAULT_LATENCY_WARN_MS: u64 = 500;
+const LARGE_INDEX_SYMBOL_THRESHOLD: usize = 5_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -206,6 +207,14 @@ pub struct WorkspaceAdvice {
     pub level: AdviceLevel,
     pub message: String,
     pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectConfigMigrationReport {
+    pub path: PathBuf,
+    pub dry_run: bool,
+    pub changed: bool,
+    pub added_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,6 +613,8 @@ pub fn advise_with_lsp_commands(
         });
     }
 
+    push_index_shard_advice(&mut advice, &status.root, LARGE_INDEX_SYMBOL_THRESHOLD);
+
     if !status.cache_dir.join("latency-smoke.tsv").exists() {
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Info,
@@ -673,6 +684,44 @@ pub fn advise_with_lsp_commands(
         cache_checks,
         advice,
     })
+}
+
+fn push_index_shard_advice(advice: &mut Vec<WorkspaceAdvice>, root: &Path, symbol_threshold: usize) {
+    let Ok(index_status) = crate::index::status(root) else {
+        return;
+    };
+    if !index_status.exists || index_status.symbol_count <= symbol_threshold {
+        return;
+    }
+
+    let Ok(shard_status) = crate::index::shard_status(root) else {
+        return;
+    };
+    if !shard_status.exists {
+        advice.push(WorkspaceAdvice {
+            level: AdviceLevel::Info,
+            message: format!(
+                "Large index has {} symbols without shard cache",
+                index_status.symbol_count
+            ),
+            action: Some("Run: rtk cargo run -- index shards --write".to_string()),
+        });
+    } else if shard_status.stale {
+        advice.push(WorkspaceAdvice {
+            level: AdviceLevel::Warning,
+            message: format!("Index shard cache is stale: {}", shard_status.reason),
+            action: Some("Run: rtk cargo run -- index shards --write".to_string()),
+        });
+    } else {
+        advice.push(WorkspaceAdvice {
+            level: AdviceLevel::Info,
+            message: format!(
+                "Index shard cache is available: {} shard(s), {} symbol(s)",
+                shard_status.shard_count, shard_status.symbol_count
+            ),
+            action: Some("Use: rtk cargo run -- index shard-query <query> --kind symbols".to_string()),
+        });
+    }
 }
 
 pub fn write_project_config(directory: Option<&String>, force: bool) -> Result<PathBuf> {
@@ -856,6 +905,73 @@ pub fn project_config_schema(format: &str) -> Result<String> {
             "Unsupported project config schema format: {other}"
         ))),
     }
+}
+
+pub fn migrate_project_config(directory: Option<&String>, dry_run: bool) -> Result<ProjectConfigMigrationReport> {
+    let root = resolve_root(directory)?;
+    let path = root.join(".fcs.toml");
+    if !path.exists() {
+        return Err(AppError::FileNotFound(path.display().to_string()));
+    }
+
+    let original = fs::read_to_string(&path)?;
+    let mut value = original
+        .parse::<toml::Value>()
+        .map_err(|err| AppError::General(format!("Invalid project config TOML: {err}")))?;
+    let defaults = toml::Value::try_from(ProjectConfig::for_workspace(&root)?)
+        .map_err(|err| AppError::General(format!("Failed to build project config defaults: {err}")))?;
+    let mut added_keys = Vec::new();
+    merge_missing_toml_keys("", &mut value, &defaults, &mut added_keys);
+
+    let migrated = toml::to_string_pretty(&value)
+        .map(|mut text| {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text
+        })
+        .map_err(|err| AppError::General(format!("Failed to serialize migrated project config: {err}")))?;
+    let changed = normalize_toml_text(&original) != normalize_toml_text(&migrated);
+    if changed && !dry_run {
+        fs::write(&path, migrated)?;
+    }
+
+    Ok(ProjectConfigMigrationReport {
+        path,
+        dry_run,
+        changed,
+        added_keys,
+    })
+}
+
+fn merge_missing_toml_keys(
+    prefix: &str,
+    value: &mut toml::Value,
+    defaults: &toml::Value,
+    added_keys: &mut Vec<String>,
+) {
+    let (Some(value_table), Some(default_table)) = (value.as_table_mut(), defaults.as_table()) else {
+        return;
+    };
+
+    for (key, default_value) in default_table {
+        let full_key = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value_table.get_mut(key) {
+            Some(current_value) => merge_missing_toml_keys(&full_key, current_value, default_value, added_keys),
+            None => {
+                value_table.insert(key.clone(), default_value.clone());
+                added_keys.push(full_key);
+            }
+        }
+    }
+}
+
+fn normalize_toml_text(value: &str) -> String {
+    value.lines().map(str::trim_end).collect::<Vec<&str>>().join("\n")
 }
 
 pub fn cache_dir_for_root(root: &Path) -> Result<PathBuf> {
@@ -1312,6 +1428,32 @@ mod tests {
     }
 
     #[test]
+    fn migrates_project_config_by_adding_missing_keys() {
+        let temp_dir = temp_workspace_dir("project_config_migrate");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        let config_path = temp_dir.join(".fcs.toml");
+        fs::write(&config_path, "project_type = \"custom\"\n").unwrap();
+        let dir = temp_dir.to_string_lossy().to_string();
+
+        let dry_run = migrate_project_config(Some(&dir), true).unwrap();
+        assert!(dry_run.changed);
+        assert!(dry_run.added_keys.iter().any(|key| key == "languages"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), "project_type = \"custom\"\n");
+
+        let report = migrate_project_config(Some(&dir), false).unwrap();
+        let contents = fs::read_to_string(&config_path).unwrap();
+
+        assert!(report.changed);
+        assert!(contents.contains("project_type = \"custom\""));
+        assert!(contents.contains("languages"));
+        assert!(contents.contains("rust_analyzer_command"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn workspace_cache_path_is_stable_and_namespaced() {
         let root = PathBuf::from("/tmp/fcs-project");
         let cache_root = PathBuf::from("/tmp/fcs-cache/workspaces");
@@ -1390,6 +1532,56 @@ mod tests {
             .any(|message| message.contains("clangd command is not available")));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn index_shard_advice_reports_missing_large_shards() {
+        let temp_dir = temp_workspace_dir("advice_shards");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(
+            temp_dir.join("src").join("main.rs"),
+            "pub fn alpha() {}\npub fn beta() {}\n",
+        )
+        .unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
+
+        let mut advice = Vec::new();
+        push_index_shard_advice(&mut advice, &temp_dir, 1);
+
+        assert!(advice.iter().any(|item| item.message.contains("without shard cache")));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn index_shard_advice_reports_available_shards() {
+        let temp_dir = temp_workspace_dir("advice_shards_available");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(
+            temp_dir.join("src").join("main.rs"),
+            "pub fn alpha() {}\npub fn beta() {}\n",
+        )
+        .unwrap();
+        let cache_dir = crate::workspace::cache_dir_for_root(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&cache_dir);
+        let ignore_file = temp_dir.join("missing.ignore");
+        crate::index::build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        crate::index::build_shards(&temp_dir, 1).unwrap();
+
+        let mut advice = Vec::new();
+        push_index_shard_advice(&mut advice, &temp_dir, 1);
+
+        assert!(advice.iter().any(
+            |item| item.action.as_deref() == Some("Use: rtk cargo run -- index shard-query <query> --kind symbols")
+        ));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]

@@ -64,9 +64,11 @@ struct DapRuntime {
     adapter: String,
     status: String,
     watch_expressions: Vec<String>,
+    watch_history: Vec<String>,
     breakpoint_results: Vec<crate::dap::DapBreakpointResult>,
     capabilities: Vec<String>,
     last_evaluation: Option<String>,
+    evaluation_history: Vec<String>,
     selected_thread_id: Option<u64>,
     selected_frame_id: Option<u64>,
     selected_variables_reference: Option<u64>,
@@ -135,7 +137,7 @@ fn run_dap_request(
     command: DapCommand,
     runtime: &mut Option<DapRuntime>,
 ) -> (&'static str, Result<crate::dap::DapSessionSnapshot>) {
-    match command {
+    let result = match command {
         DapCommand::MockSession(profile) => ("DAP mock session", crate::dap::run_mock_session_snapshot(&profile)),
         DapCommand::StartMock(profile) => ("DAP start", start_mock_session(runtime, profile)),
         DapCommand::StartReal { spec, profile } => ("DAP real start", start_real_session(runtime, spec, profile)),
@@ -162,6 +164,11 @@ fn run_dap_request(
             let result = stop_runtime(runtime);
             ("DAP stop", result)
         }
+    };
+
+    match result {
+        (label, Ok(snapshot)) => (label, Ok(snapshot)),
+        (label, Err(err)) => (label, recover_dap_failure(runtime, err)),
     }
 }
 
@@ -178,6 +185,7 @@ fn start_mock_session(
         adapter: "mock".to_string(),
         status: "stopped".to_string(),
         watch_expressions: Vec::new(),
+        watch_history: Vec::new(),
         breakpoint_results: launch_report.breakpoint_results,
         capabilities: launch_report
             .capabilities
@@ -206,6 +214,7 @@ fn start_mock_session(
             })
             .unwrap_or_default(),
         last_evaluation: None,
+        evaluation_history: Vec::new(),
         selected_thread_id: None,
         selected_frame_id: None,
         selected_variables_reference: None,
@@ -235,6 +244,7 @@ fn start_real_session(
         adapter: adapter.clone(),
         status: "stopped".to_string(),
         watch_expressions: Vec::new(),
+        watch_history: Vec::new(),
         breakpoint_results: launch_report.breakpoint_results,
         capabilities: launch_report
             .capabilities
@@ -263,6 +273,7 @@ fn start_real_session(
             })
             .unwrap_or_default(),
         last_evaluation: None,
+        evaluation_history: Vec::new(),
         selected_thread_id: None,
         selected_frame_id: None,
         selected_variables_reference: None,
@@ -470,14 +481,21 @@ fn evaluate_runtime(runtime: &mut Option<DapRuntime>, expression: String) -> Res
     }
     let frame_id = runtime.refresh("evaluating")?.selected_frame_id;
     let result = runtime.client.evaluate_data(&expression, frame_id, "repl")?;
-    runtime.last_evaluation = Some(format!("{} = {}", expression, result.result));
+    let evaluation = format!("{} = {}", expression, result.result);
+    runtime.last_evaluation = Some(evaluation.clone());
+    runtime.evaluation_history.push(evaluation);
     runtime.refresh("evaluated")
 }
 
 fn add_watch(runtime: &mut Option<DapRuntime>, expression: String) -> Result<crate::dap::DapSessionSnapshot> {
     let runtime = active_runtime(runtime)?;
-    if !expression.trim().is_empty() && !runtime.watch_expressions.iter().any(|watch| watch == &expression) {
-        runtime.watch_expressions.push(expression);
+    if !expression.trim().is_empty() {
+        if !runtime.watch_history.iter().any(|watch| watch == &expression) {
+            runtime.watch_history.push(expression.clone());
+        }
+        if !runtime.watch_expressions.iter().any(|watch| watch == &expression) {
+            runtime.watch_expressions.push(expression);
+        }
     }
     if runtime.is_running() {
         return Ok(runtime.fast_snapshot("watch added (running)"));
@@ -531,6 +549,8 @@ impl DapRuntime {
             variables_start: self.variable_page_start,
             variables_count: self.variable_page_count,
             capabilities: &self.capabilities,
+            watch_history: &self.watch_history,
+            evaluation_history: &self.evaluation_history,
         })?;
         self.selected_thread_id = snapshot.selected_thread_id;
         self.selected_frame_id = snapshot.selected_frame_id;
@@ -557,6 +577,8 @@ impl DapRuntime {
         snapshot.commands = self.client.commands();
         snapshot.events = self.client.events();
         snapshot.capabilities = self.capabilities.clone();
+        snapshot.watch_history = self.watch_history.clone();
+        snapshot.evaluation_history = self.evaluation_history.clone();
         snapshot.last_event = snapshot.events.last().cloned();
         snapshot.last_request = snapshot.commands.last().cloned();
         snapshot.last_error = None;
@@ -731,7 +753,46 @@ fn empty_snapshot(adapter: &str, status: &str, profile: &str) -> crate::dap::Dap
         last_error: None,
         error: None,
         stopped_location: None,
+        watch_history: Vec::new(),
+        evaluation_history: Vec::new(),
     }
+}
+
+fn recover_dap_failure(runtime: &mut Option<DapRuntime>, err: AppError) -> Result<crate::dap::DapSessionSnapshot> {
+    let message = err.to_string();
+    let Some(session) = runtime.as_mut() else {
+        return Err(AppError::General(message));
+    };
+
+    let status = format!("error: {}", compact_error(&message));
+    session.status = status.clone();
+    let mut snapshot = session.fast_snapshot(&status);
+    snapshot.state = crate::dap::DapSessionState::Errored;
+    snapshot.error = Some(message.clone());
+    snapshot.last_error = Some(message.clone());
+
+    if is_adapter_lost_error(&message) {
+        *runtime = None;
+    }
+    Ok(snapshot)
+}
+
+fn compact_error(message: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 120;
+    if message.chars().count() <= MAX_ERROR_CHARS {
+        return message.to_string();
+    }
+    let mut compact = message.chars().take(MAX_ERROR_CHARS).collect::<String>();
+    compact.push_str("...");
+    compact
+}
+
+fn is_adapter_lost_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("adapter exited")
+        || lower.contains("stdout reader stopped")
+        || lower.contains("broken pipe")
+        || lower.contains("timed out waiting for dap")
 }
 
 fn adapter_label(spec: &crate::dap::DapAdapterProcessSpec) -> String {

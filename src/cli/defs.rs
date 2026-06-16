@@ -1699,6 +1699,16 @@ pub enum WorkspaceAction {
         force: bool,
     },
 
+    /// Migrate an existing .fcs.toml by adding missing supported keys
+    ConfigMigrate {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Print the migration report without writing the file
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Manage named workspace profiles for monorepos and repeated roots
     Profile {
         #[command(subcommand)]

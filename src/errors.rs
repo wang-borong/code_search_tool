@@ -24,4 +24,32 @@ pub enum AppError {
     General(String),
 }
 
+impl AppError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "FCS-IO",
+            Self::Regex(_) => "FCS-REGEX",
+            Self::Ignore(_) => "FCS-IGNORE",
+            Self::FileNotFound(_) => "FCS-NOT-FOUND",
+            Self::InvalidPreview(_) => "FCS-INVALID-PREVIEW",
+            Self::Skim(_) => "FCS-PICKER",
+            Self::General(_) => "FCS-GENERAL",
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_errors_have_stable_codes() {
+        assert_eq!(
+            AppError::InvalidPreview("bad location".to_string()).code(),
+            "FCS-INVALID-PREVIEW"
+        );
+        assert_eq!(AppError::General("failed".to_string()).code(), "FCS-GENERAL");
+    }
+}

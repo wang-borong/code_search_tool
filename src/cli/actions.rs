@@ -408,6 +408,22 @@ fn handle_workspace_config_schema(format: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn handle_workspace_config_migrate(directory: Option<&String>, dry_run: bool) -> Result<(), AppError> {
+    let report = fcs::workspace::migrate_project_config(directory, dry_run)?;
+    println!("Project config: {}", report.path.display());
+    println!("dry_run: {}", report.dry_run);
+    println!("changed: {}", report.changed);
+    if report.added_keys.is_empty() {
+        println!("added_keys: none");
+    } else {
+        println!("added_keys:");
+        for key in report.added_keys {
+            println!("  - {key}");
+        }
+    }
+    Ok(())
+}
+
 fn format_workspace_profile(profile: &fcs::workspace::WorkspaceProfile, active: bool) -> String {
     let marker = if active { " [active]" } else { "" };
     format!(
@@ -807,22 +823,26 @@ fn handle_index_shard_query(
     let root = fcs::workspace::resolve_root(directory)?;
     let kind = fcs::index::IndexListKind::parse(kind)?;
     let start = Instant::now();
-    let entries = fcs::index::query_shards(&root, kind, query, limit)?;
+    let report = fcs::index::query_shards_report(&root, kind, query, limit)?;
     let elapsed_ms = start.elapsed().as_millis();
 
-    if entries.is_empty() {
+    if report.entries.is_empty() {
         println!("No indexed shard entries matched");
         if timing {
             println!("timing_ms: {elapsed_ms}");
+            println!("shards_scanned: {}/{}", report.shards_scanned, report.shard_count);
+            println!("fallback_used: {}", report.fallback_used);
         }
         return Ok(());
     }
 
-    for entry in entries {
+    for entry in report.entries {
         println!("{entry}");
     }
     if timing {
         println!("timing_ms: {elapsed_ms}");
+        println!("shards_scanned: {}/{}", report.shards_scanned, report.shard_count);
+        println!("fallback_used: {}", report.fallback_used);
     }
     if warn_ms.is_some_and(|threshold| elapsed_ms > threshold as u128) {
         eprintln!("warning: index shard query took {elapsed_ms}ms");
@@ -1015,9 +1035,12 @@ fn handle_index_profile(
     );
 
     let start = Instant::now();
-    let shard_entries = fcs::index::query_shards(&root, kind, query, limit)?;
+    let shard_report = fcs::index::query_shards_report(&root, kind, query, limit)?;
     let shard_note = if shard_status.exists && !shard_status.stale {
-        "shard cache".to_string()
+        format!(
+            "shard cache scanned={}/{}",
+            shard_report.shards_scanned, shard_report.shard_count
+        )
     } else {
         "main index fallback".to_string()
     };
@@ -1025,7 +1048,7 @@ fn handle_index_profile(
         &mut probes,
         "shard_query",
         start.elapsed().as_millis(),
-        shard_entries.len(),
+        shard_report.entries.len(),
         shard_note,
     );
 
@@ -4293,6 +4316,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             WorkspaceAction::Config { directory, force } => {
                 let path = fcs::workspace::write_project_config(directory.as_ref(), force)?;
                 println!("Wrote project config: {}", path.display());
+            }
+            WorkspaceAction::ConfigMigrate { directory, dry_run } => {
+                handle_workspace_config_migrate(directory.as_ref(), dry_run)?;
             }
             WorkspaceAction::Profile { action } => {
                 handle_workspace_profile(action)?;
