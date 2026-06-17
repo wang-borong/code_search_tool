@@ -247,7 +247,7 @@ fcs index shard-query parse_config . --kind symbols --limit 20
 # 查询缓存索引，不重新扫描项目
 fcs index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
 
-# 只检查主索引和 shard cache 健康状态，不做重建
+# 只检查主索引、sidecar/mmap 和 shard cache 健康状态，不做重建
 fcs index verify . --format json
 
 # 记录 status/stats/list/query/shard-query 各阶段延迟
@@ -271,7 +271,7 @@ fcs index daemon-status
 fcs index bench --limit 50 --query main
 ```
 
-索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。`index shards --write` 会把大仓库按目录 bucket 写成 shard cache 和 manifest，`shard-query` 在 manifest stale/missing 时自动回退主索引。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
+索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。workspace cache 会同时写入主索引 `code_index.toml`、轻量元数据、files TOML、symbols JSONL 和 symbols mmap sidecar；符号 list/query/TUI source 优先走 mmap，mmap 损坏时降级到 JSONL，JSONL 不可用时再降级主索引。`index refresh` 会在主索引新鲜时重建缺失、过期或损坏的 sidecar，不触发完整 symbol 重扫。`index shards --write` 会把大仓库按目录 bucket 写成 shard cache 和 manifest，`shard-query` 在 manifest stale/missing 时自动回退主索引。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
 
 ---
 

@@ -150,6 +150,26 @@ pub struct IndexStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSidecarStatus {
+    pub healthy: bool,
+    pub meta: IndexSidecarCheck,
+    pub files: IndexSidecarCheck,
+    pub symbols_jsonl: IndexSidecarCheck,
+    pub symbols_mmap: IndexSidecarCheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSidecarCheck {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub fresh: bool,
+    pub stale: bool,
+    pub corrupt: bool,
+    pub entries: Option<usize>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IndexSourceSnapshot {
     source_index: String,
     source_index_size_bytes: u64,
@@ -599,6 +619,24 @@ pub fn stats(root: &Path) -> Result<IndexStats> {
         built_at_unix: Some(index.built_at_unix),
         languages: count_values(index.files.iter().map(|file| file.language.as_str())),
         symbol_kinds: count_values(index.symbols.iter().map(|symbol| symbol.kind.as_str())),
+    })
+}
+
+pub fn sidecar_status(root: &Path) -> Result<IndexSidecarStatus> {
+    let root = normalize_root(root);
+    let path = index_path(&root)?;
+    let (meta, metadata) = check_index_meta_sidecar(&root, &path)?;
+    let files = check_index_files_sidecar(&root, &path, metadata.as_ref())?;
+    let symbols_jsonl = check_index_symbols_jsonl_sidecar(&root, &path, metadata.as_ref())?;
+    let symbols_mmap = check_index_symbols_mmap_sidecar(&root, &path, metadata.as_ref())?;
+    let healthy = meta.fresh && files.fresh && symbols_jsonl.fresh && symbols_mmap.fresh;
+
+    Ok(IndexSidecarStatus {
+        healthy,
+        meta,
+        files,
+        symbols_jsonl,
+        symbols_mmap,
     })
 }
 
@@ -1603,11 +1641,7 @@ fn write_index_sidecars(root: &Path, path: &Path, index: &CodeIndex) -> Result<(
 }
 
 fn ensure_index_sidecars(root: &Path, path: &Path) -> Result<bool> {
-    let metadata_ready = read_index_metadata_snapshot(root, path)?.is_some();
-    let files_ready = read_index_files_snapshot(root, path)?.is_some();
-    let symbols_ready = metadata_ready && index_symbols_path(root)?.exists();
-    let symbols_mmap_ready = metadata_ready && index_symbols_mmap_valid_path(root, path)?.is_some();
-    if metadata_ready && files_ready && symbols_ready && symbols_mmap_ready {
+    if sidecar_status(root)?.healthy {
         return Ok(false);
     }
     let Some(index) = load(root)? else {
@@ -1688,6 +1722,314 @@ fn write_index_contents(path: &Path, contents: &str) -> Result<()> {
     fs::write(&tmp_path, contents)?;
     fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn check_index_meta_sidecar(
+    root: &Path,
+    index_path: &Path,
+) -> Result<(IndexSidecarCheck, Option<IndexMetadataSnapshot>)> {
+    let path = index_meta_path(root)?;
+    if !index_path.exists() {
+        return Ok((sidecar_blocked_by_main_index(path), None));
+    }
+    if !path.exists() {
+        return Ok((sidecar_missing(path), None));
+    }
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            return Ok((
+                sidecar_corrupt(path, None, format!("cannot read metadata sidecar: {err}")),
+                None,
+            ))
+        }
+    };
+    let snapshot = match toml::from_str::<IndexMetadataSnapshot>(&contents) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return Ok((
+                sidecar_corrupt(path, None, format!("corrupt metadata sidecar: {err}")),
+                None,
+            ))
+        }
+    };
+    let entries = Some(snapshot.file_count + snapshot.symbol_count);
+    if !sidecar_matches_source(root, index_path, snapshot.version, &snapshot.root, &snapshot.source)? {
+        return Ok((
+            sidecar_stale(path, entries, "metadata sidecar does not match the current main index"),
+            None,
+        ));
+    }
+
+    Ok((sidecar_fresh(path, entries), Some(snapshot)))
+}
+
+fn check_index_files_sidecar(
+    root: &Path,
+    index_path: &Path,
+    metadata: Option<&IndexMetadataSnapshot>,
+) -> Result<IndexSidecarCheck> {
+    let path = index_files_path(root)?;
+    if !index_path.exists() {
+        return Ok(sidecar_blocked_by_main_index(path));
+    }
+    if !path.exists() {
+        return Ok(sidecar_missing(path));
+    }
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) => return Ok(sidecar_corrupt(path, None, format!("cannot read files sidecar: {err}"))),
+    };
+    let snapshot = match toml::from_str::<IndexFilesSnapshot>(&contents) {
+        Ok(snapshot) => snapshot,
+        Err(err) => return Ok(sidecar_corrupt(path, None, format!("corrupt files sidecar: {err}"))),
+    };
+    let entries = Some(snapshot.files.len());
+    if !sidecar_matches_source(root, index_path, snapshot.version, &snapshot.root, &snapshot.source)? {
+        return Ok(sidecar_stale(
+            path,
+            entries,
+            "files sidecar does not match the current main index",
+        ));
+    }
+    if snapshot.files.len() != snapshot.file_count {
+        return Ok(sidecar_corrupt(
+            path,
+            entries,
+            format!(
+                "files sidecar count mismatch: expected {} records, found {}",
+                snapshot.file_count,
+                snapshot.files.len()
+            ),
+        ));
+    }
+    if let Some(metadata) = metadata {
+        if snapshot.file_count != metadata.file_count || snapshot.symbol_count != metadata.symbol_count {
+            return Ok(sidecar_stale(
+                path,
+                entries,
+                "files sidecar counts do not match metadata sidecar",
+            ));
+        }
+    }
+
+    Ok(sidecar_fresh(path, entries))
+}
+
+fn check_index_symbols_jsonl_sidecar(
+    root: &Path,
+    index_path: &Path,
+    metadata: Option<&IndexMetadataSnapshot>,
+) -> Result<IndexSidecarCheck> {
+    let path = index_symbols_path(root)?;
+    if !index_path.exists() {
+        return Ok(sidecar_blocked_by_main_index(path));
+    }
+    if !path.exists() {
+        return Ok(sidecar_missing(path));
+    }
+    let Some(metadata) = metadata else {
+        return Ok(sidecar_stale(
+            path,
+            None,
+            "metadata sidecar is not fresh; symbols JSONL cannot be validated",
+        ));
+    };
+
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            return Ok(sidecar_corrupt(
+                path,
+                None,
+                format!("cannot read symbols JSONL sidecar: {err}"),
+            ))
+        }
+    };
+    let reader = BufReader::new(file);
+    let mut entries = 0;
+    for (index, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                return Ok(sidecar_corrupt(
+                    path,
+                    Some(entries),
+                    format!("cannot read symbols JSONL record {}: {err}", index + 1),
+                ));
+            }
+        };
+        if serde_json::from_str::<IndexedSymbol>(&line).is_err() {
+            return Ok(sidecar_corrupt(
+                path,
+                Some(entries),
+                format!("corrupt symbols JSONL record {}", index + 1),
+            ));
+        }
+        entries += 1;
+    }
+    if entries != metadata.symbol_count {
+        return Ok(sidecar_corrupt(
+            path,
+            Some(entries),
+            format!(
+                "symbols JSONL count mismatch: expected {} records, found {}",
+                metadata.symbol_count, entries
+            ),
+        ));
+    }
+
+    Ok(sidecar_fresh(path, Some(entries)))
+}
+
+fn check_index_symbols_mmap_sidecar(
+    root: &Path,
+    index_path: &Path,
+    metadata: Option<&IndexMetadataSnapshot>,
+) -> Result<IndexSidecarCheck> {
+    let path = index_symbols_mmap_path(root)?;
+    if !index_path.exists() {
+        return Ok(sidecar_blocked_by_main_index(path));
+    }
+    if !path.exists() {
+        return Ok(sidecar_missing(path));
+    }
+    let Some(metadata) = metadata else {
+        return Ok(sidecar_stale(
+            path,
+            None,
+            "metadata sidecar is not fresh; symbols mmap cannot be validated",
+        ));
+    };
+
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            return Ok(sidecar_corrupt(
+                path,
+                None,
+                format!("cannot read symbols mmap sidecar: {err}"),
+            ))
+        }
+    };
+    if file.metadata().ok().is_none_or(|metadata| metadata.len() == 0) {
+        return Ok(sidecar_corrupt(path, None, "symbols mmap sidecar is empty"));
+    }
+    // SAFETY: the mmap is read-only and the file is validated before any record
+    // is used. Writers replace this cache atomically, so readers either observe
+    // the old complete file or the new complete file.
+    let map = match unsafe { Mmap::map(&file) } {
+        Ok(map) => map,
+        Err(err) => {
+            return Ok(sidecar_corrupt(
+                path,
+                None,
+                format!("cannot mmap symbols sidecar: {err}"),
+            ))
+        }
+    };
+    let Some(header_end) = map.iter().position(|byte| *byte == b'\n') else {
+        return Ok(sidecar_corrupt(path, None, "symbols mmap header is missing"));
+    };
+    let header = match std::str::from_utf8(&map[..header_end]) {
+        Ok(header) => header,
+        Err(err) => {
+            return Ok(sidecar_corrupt(
+                path,
+                None,
+                format!("symbols mmap header is not UTF-8: {err}"),
+            ))
+        }
+    };
+    let Some(header) = parse_symbols_mmap_header(header) else {
+        return Ok(sidecar_corrupt(path, None, "symbols mmap header is invalid"));
+    };
+    let current = index_source_snapshot(index_path)?;
+    if header.source_size_bytes != current.source_index_size_bytes
+        || header.source_modified_unix != current.source_index_modified_unix
+        || header.symbol_count != metadata.symbol_count
+    {
+        return Ok(sidecar_stale(
+            path,
+            Some(header.symbol_count),
+            "symbols mmap header does not match the current main index",
+        ));
+    }
+
+    let mut entries = 0;
+    for (index, record) in mmap_record_lines(&map[header_end + 1..]).enumerate() {
+        if parse_mmap_symbol_record(record).is_none() {
+            return Ok(sidecar_corrupt(
+                path,
+                Some(entries),
+                format!("corrupt symbols mmap record {}", index + 1),
+            ));
+        }
+        entries += 1;
+    }
+    if entries != metadata.symbol_count {
+        return Ok(sidecar_corrupt(
+            path,
+            Some(entries),
+            format!(
+                "symbols mmap count mismatch: expected {} records, found {}",
+                metadata.symbol_count, entries
+            ),
+        ));
+    }
+
+    Ok(sidecar_fresh(path, Some(entries)))
+}
+
+fn sidecar_check(
+    path: PathBuf,
+    exists: bool,
+    fresh: bool,
+    stale: bool,
+    corrupt: bool,
+    entries: Option<usize>,
+    message: impl Into<String>,
+) -> IndexSidecarCheck {
+    IndexSidecarCheck {
+        path,
+        exists,
+        fresh,
+        stale,
+        corrupt,
+        entries,
+        message: message.into(),
+    }
+}
+
+fn sidecar_blocked_by_main_index(path: PathBuf) -> IndexSidecarCheck {
+    let exists = path.exists();
+    sidecar_check(
+        path,
+        exists,
+        false,
+        exists,
+        false,
+        None,
+        "main index missing; sidecar cannot be validated",
+    )
+}
+
+fn sidecar_missing(path: PathBuf) -> IndexSidecarCheck {
+    sidecar_check(path, false, false, false, false, None, "missing")
+}
+
+fn sidecar_fresh(path: PathBuf, entries: Option<usize>) -> IndexSidecarCheck {
+    sidecar_check(path, true, true, false, false, entries, "fresh")
+}
+
+fn sidecar_stale(path: PathBuf, entries: Option<usize>, message: impl Into<String>) -> IndexSidecarCheck {
+    sidecar_check(path, true, false, true, false, entries, message)
+}
+
+fn sidecar_corrupt(path: PathBuf, entries: Option<usize>, message: impl Into<String>) -> IndexSidecarCheck {
+    sidecar_check(path, true, false, false, true, entries, message)
 }
 
 fn read_index_metadata_snapshot(root: &Path, index_path: &Path) -> Result<Option<IndexMetadataSnapshot>> {
@@ -1907,20 +2249,41 @@ fn symbols_mmap_body<'a>(root: &Path, index_path: &Path, map: &'a [u8]) -> Resul
 }
 
 fn symbols_mmap_header_matches(root: &Path, index_path: &Path, header: &str) -> Result<bool> {
-    let mut parts = header.split('\t');
-    if parts.next() != Some(INDEX_SYMBOLS_MMAP_MAGIC) {
+    let Some(header) = parse_symbols_mmap_header(header) else {
         return Ok(false);
-    }
-    let source_size = parts.next().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
-    let source_mtime = parts.next().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
-    let symbol_count = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    };
     let current = index_source_snapshot(index_path)?;
     let Some(metadata) = read_index_metadata_snapshot(root, index_path)? else {
         return Ok(false);
     };
-    Ok(metadata.symbol_count == symbol_count
-        && source_size == current.source_index_size_bytes
-        && source_mtime == current.source_index_modified_unix)
+    Ok(metadata.symbol_count == header.symbol_count
+        && header.source_size_bytes == current.source_index_size_bytes
+        && header.source_modified_unix == current.source_index_modified_unix)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolsMmapHeader {
+    source_size_bytes: u64,
+    source_modified_unix: u64,
+    symbol_count: usize,
+}
+
+fn parse_symbols_mmap_header(header: &str) -> Option<SymbolsMmapHeader> {
+    let mut parts = header.split('\t');
+    if parts.next()? != INDEX_SYMBOLS_MMAP_MAGIC {
+        return None;
+    }
+    let source_size_bytes = parts.next()?.parse::<u64>().ok()?;
+    let source_modified_unix = parts.next()?.parse::<u64>().ok()?;
+    let symbol_count = parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(SymbolsMmapHeader {
+        source_size_bytes,
+        source_modified_unix,
+        symbol_count,
+    })
 }
 
 fn mmap_record_lines(body: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -2857,6 +3220,75 @@ mod tests {
         assert!(index_symbols_mmap_path(&temp_dir).unwrap().exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn corrupt_symbols_mmap_falls_back_to_jsonl_and_refresh_repairs_sidecars() {
+        let temp_dir = temp_workspace_dir("mmap_corrupt");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        let cache_dir = crate::workspace::cache_dir_for_root(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&cache_dir);
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("lib.rs"), "pub fn first() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+
+        build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        let mmap_path = index_symbols_mmap_path(&temp_dir).unwrap();
+        let header = fs::read_to_string(&mmap_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        fs::write(&mmap_path, format!("{header}\ninvalid\trecord\n")).unwrap();
+
+        let sidecars = sidecar_status(&temp_dir).unwrap();
+        let queried = query(&temp_dir, IndexListKind::Symbols, "first", 10).unwrap();
+        let report = refresh(&temp_dir, &[], &[], &ignore_file).unwrap();
+        let repaired = sidecar_status(&temp_dir).unwrap();
+
+        assert!(!sidecars.healthy);
+        assert!(sidecars.symbols_mmap.corrupt);
+        assert!(queried.iter().any(|symbol| symbol.contains("first [function]")));
+        assert!(!report.rebuilt);
+        assert_eq!(report.reason, "sidecars refreshed");
+        assert!(repaired.healthy);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn corrupt_symbols_jsonl_without_mmap_falls_back_to_main_index() {
+        let temp_dir = temp_workspace_dir("jsonl_corrupt");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        let cache_dir = crate::workspace::cache_dir_for_root(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&cache_dir);
+        fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"fixture\"\n").unwrap();
+        fs::write(temp_dir.join("src").join("lib.rs"), "pub fn second() {}\n").unwrap();
+        let ignore_file = temp_dir.join("missing.ignore");
+
+        build(&temp_dir, &[], &[], &ignore_file).unwrap();
+        fs::remove_file(index_symbols_mmap_path(&temp_dir).unwrap()).unwrap();
+        fs::write(index_symbols_path(&temp_dir).unwrap(), "not-json\n").unwrap();
+
+        let sidecars = sidecar_status(&temp_dir).unwrap();
+        let queried = query(&temp_dir, IndexListKind::Symbols, "second", 10).unwrap();
+        let report = refresh(&temp_dir, &[], &[], &ignore_file).unwrap();
+        let repaired = sidecar_status(&temp_dir).unwrap();
+
+        assert!(!sidecars.healthy);
+        assert!(sidecars.symbols_jsonl.corrupt);
+        assert!(!sidecars.symbols_mmap.exists);
+        assert!(queried.iter().any(|symbol| symbol.contains("second [function]")));
+        assert!(!report.rebuilt);
+        assert_eq!(report.reason, "sidecars refreshed");
+        assert!(repaired.healthy);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]

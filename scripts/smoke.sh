@@ -126,6 +126,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" targ
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" target/debug/fcs workspace profile current
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index status "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index build "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index verify "$SMOKE_ROOT" --format text >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index stats "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shards "$SMOKE_ROOT" --target-symbols 2 --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shards "$SMOKE_ROOT" --target-symbols 2 --format json --write >/dev/null
@@ -134,6 +135,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index shard-query main
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index compact "$SMOKE_ROOT" --dry-run
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index prewarm "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index refresh "$SMOKE_ROOT"
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index verify "$SMOKE_ROOT" --format json >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index daemon "$SMOKE_ROOT" --interval-ms 0 --max-cycles 1 --foreground
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index daemon-status "$SMOKE_ROOT"
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs index doctor "$SMOKE_ROOT"

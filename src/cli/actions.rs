@@ -942,6 +942,7 @@ struct IndexVerifyReport {
     root: PathBuf,
     healthy: bool,
     main: IndexVerifyMainStatus,
+    sidecars: fcs::index::IndexSidecarStatus,
     shards: IndexVerifyShardStatus,
     recommendations: Vec<String>,
 }
@@ -1075,6 +1076,7 @@ fn handle_index_profile(
 fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), AppError> {
     let root = fcs::workspace::resolve_root(directory)?;
     let status = fcs::index::status(&root)?;
+    let sidecar_status = fcs::index::sidecar_status(&root)?;
     let shard_status = fcs::index::shard_status(&root)?;
     let mut recommendations = Vec::new();
 
@@ -1084,6 +1086,9 @@ fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), A
         recommendations.push("run `fcs index repair` to rebuild corrupt index data".to_string());
     } else if status.is_stale {
         recommendations.push("run `fcs index refresh` or `fcs index repair` to refresh stale index data".to_string());
+    }
+    if status.exists && !status.is_stale && !status.is_corrupt && !sidecar_status.healthy {
+        recommendations.push("run `fcs index refresh` to recreate missing or corrupt sidecar cache files".to_string());
     }
     if shard_status.exists && shard_status.stale {
         recommendations.push("run `fcs index shards --write` to refresh stale shard cache files".to_string());
@@ -1095,8 +1100,11 @@ fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), A
         recommendations.push("index cache is healthy".to_string());
     }
 
-    let healthy =
-        status.exists && !status.is_stale && !status.is_corrupt && (!shard_status.exists || !shard_status.stale);
+    let healthy = status.exists
+        && !status.is_stale
+        && !status.is_corrupt
+        && sidecar_status.healthy
+        && (!shard_status.exists || !shard_status.stale);
     let report = IndexVerifyReport {
         root,
         healthy,
@@ -1112,6 +1120,7 @@ fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), A
             missing_tracked_files: status.missing_tracked_files,
             message: status.message,
         },
+        sidecars: sidecar_status,
         shards: IndexVerifyShardStatus {
             manifest_path: shard_status.manifest_path,
             exists: shard_status.exists,
@@ -1186,6 +1195,18 @@ fn format_index_verify(report: &IndexVerifyReport, format: &str) -> Result<Strin
                 output.push_str(&format!("  main_message: {message}\n"));
             }
             output.push_str(&format!(
+                "  sidecars: healthy={} meta={} files={} symbols_jsonl={} symbols_mmap={}\n",
+                report.sidecars.healthy,
+                index_sidecar_state_label(&report.sidecars.meta),
+                index_sidecar_state_label(&report.sidecars.files),
+                index_sidecar_state_label(&report.sidecars.symbols_jsonl),
+                index_sidecar_state_label(&report.sidecars.symbols_mmap)
+            ));
+            push_sidecar_detail(&mut output, "meta", &report.sidecars.meta);
+            push_sidecar_detail(&mut output, "files", &report.sidecars.files);
+            push_sidecar_detail(&mut output, "symbols_jsonl", &report.sidecars.symbols_jsonl);
+            push_sidecar_detail(&mut output, "symbols_mmap", &report.sidecars.symbols_mmap);
+            output.push_str(&format!(
                 "  shards: exists={} stale={} count={} reason={}\n",
                 report.shards.exists, report.shards.stale, report.shards.shard_count, report.shards.reason
             ));
@@ -1205,6 +1226,36 @@ fn format_index_verify(report: &IndexVerifyReport, format: &str) -> Result<Strin
             "Unsupported index verify format: {other}. Use text or json"
         ))),
     }
+}
+
+fn index_sidecar_state_label(check: &fcs::index::IndexSidecarCheck) -> &'static str {
+    if check.fresh {
+        return "fresh";
+    }
+    if !check.exists {
+        return "missing";
+    }
+    if check.corrupt {
+        return "corrupt";
+    }
+    if check.stale {
+        return "stale";
+    }
+    "unavailable"
+}
+
+fn push_sidecar_detail(output: &mut String, name: &str, check: &fcs::index::IndexSidecarCheck) {
+    if check.fresh {
+        return;
+    }
+    let entries = check
+        .entries
+        .map(|entries| entries.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    output.push_str(&format!(
+        "  sidecar_{name}: exists={} stale={} corrupt={} entries={} message={}\n",
+        check.exists, check.stale, check.corrupt, entries, check.message
+    ));
 }
 
 fn refresh_reason_label(status: &fcs::index::IndexStatus) -> String {
