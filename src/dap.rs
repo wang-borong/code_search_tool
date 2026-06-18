@@ -84,8 +84,37 @@ pub struct DapAdapterProcessSpec {
 
 impl DapAdapterProcessSpec {
     pub fn new(command: impl Into<PathBuf>) -> Self {
+        let command = command.into();
         Self {
-            command: command.into(),
+            args: default_adapter_process_args(&command),
+            command,
+            cwd: None,
+            env: Vec::new(),
+        }
+    }
+
+    pub fn with_cwd(command: impl Into<PathBuf>, cwd: Option<PathBuf>) -> Self {
+        let command = command.into();
+        Self {
+            args: default_adapter_process_args(&command),
+            command,
+            cwd,
+            env: Vec::new(),
+        }
+    }
+}
+
+pub fn default_adapter_process_args(command: &Path) -> Vec<String> {
+    match command.file_name().and_then(|name| name.to_str()).unwrap_or_default() {
+        "lldb-dap" => vec![LLDB_DAP_NO_INIT_ARG.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+impl Default for DapAdapterProcessSpec {
+    fn default() -> Self {
+        Self {
+            command: PathBuf::new(),
             args: Vec::new(),
             cwd: None,
             env: Vec::new(),
@@ -130,6 +159,8 @@ pub struct DapLaunchArguments {
     #[serde(rename = "processId", skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -137,6 +168,14 @@ pub struct DapLaunchArguments {
     pub env: BTreeMap<String, String>,
     #[serde(rename = "stopOnEntry", skip_serializing_if = "Option::is_none")]
     pub stop_on_entry: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdio: Option<Vec<String>>,
+    #[serde(rename = "disableSTDIO", skip_serializing_if = "Option::is_none")]
+    pub disable_stdio: Option<bool>,
+    #[serde(rename = "runInTerminal", skip_serializing_if = "Option::is_none")]
+    pub run_in_terminal: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +491,18 @@ pub struct DapEvent {
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DapRunInTerminalArguments {
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, Value>,
+    #[serde(rename = "argsCanBeInterpretedByShell", default)]
+    args_can_be_interpreted_by_shell: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -940,7 +991,7 @@ impl<T: DapTransport> DapClient<T> {
     }
 
     pub fn configuration_done(&mut self) -> Result<DapResponse> {
-        self.send_request("configurationDone", None)
+        self.send_request("configurationDone", Some(json!({})))
     }
 
     pub fn continue_thread(&mut self, thread_id: u64) -> Result<DapResponse> {
@@ -1086,7 +1137,7 @@ impl<T: DapTransport> DapClient<T> {
                         return Ok(event);
                     }
                 }
-                DapInboundMessage::Request(request) => return Err(unsupported_reverse_request_error(&request)),
+                DapInboundMessage::Request(request) => self.handle_reverse_request(request)?,
             }
         }
 
@@ -1143,7 +1194,7 @@ impl<T: DapTransport> DapClient<T> {
                     self.pending_responses.insert(response.request_seq, response);
                 }
                 DapInboundMessage::Event(event) => self.events.push(event),
-                DapInboundMessage::Request(request) => return Err(unsupported_reverse_request_error(&request)),
+                DapInboundMessage::Request(request) => self.handle_reverse_request(request)?,
             }
         }
 
@@ -1172,10 +1223,17 @@ impl<T: DapTransport> DapClient<T> {
             return Ok(response);
         }
 
+        self.received_responses.push(response.clone());
+        let body = response
+            .body
+            .as_ref()
+            .map(|body| format!(" body={body}"))
+            .unwrap_or_default();
         Err(AppError::General(format!(
-            "DAP request {} failed: {}",
+            "DAP request {} failed: {}{}",
             response.command,
-            response.message.unwrap_or_else(|| "unknown error".to_string())
+            response.message.unwrap_or_else(|| "unknown error".to_string()),
+            body
         )))
     }
 
@@ -1184,6 +1242,88 @@ impl<T: DapTransport> DapClient<T> {
             "Timed out waiting for DAP {wait_kind} {target} after {:?}",
             timeout
         ))
+    }
+
+    fn handle_reverse_request(&mut self, request: DapClientRequest) -> Result<()> {
+        match request.command.as_str() {
+            "runInTerminal" => self.handle_run_in_terminal_request(request),
+            _ => Err(unsupported_reverse_request_error(&request)),
+        }
+    }
+
+    fn handle_run_in_terminal_request(&mut self, request: DapClientRequest) -> Result<()> {
+        let arguments = request
+            .arguments
+            .clone()
+            .ok_or_else(|| AppError::General("DAP runInTerminal request did not include arguments".to_string()))?;
+        let arguments: DapRunInTerminalArguments = serde_json::from_value(arguments)
+            .map_err(|err| AppError::General(format!("Invalid DAP runInTerminal arguments: {err}")))?;
+
+        if arguments.args_can_be_interpreted_by_shell {
+            return Err(AppError::General(
+                "DAP runInTerminal shell-interpreted args are not supported".to_string(),
+            ));
+        }
+
+        let (command, args) = arguments
+            .args
+            .split_first()
+            .ok_or_else(|| AppError::General("DAP runInTerminal request did not include a command".to_string()))?;
+        let mut process = Command::new(command);
+        process.args(args);
+        process.stdin(Stdio::inherit());
+        process.stdout(Stdio::piped());
+        process.stderr(Stdio::piped());
+        if let Some(cwd) = arguments.cwd {
+            process.current_dir(cwd);
+        }
+        for (name, value) in arguments.env {
+            if value.is_null() {
+                process.env_remove(name);
+            } else if let Some(value) = value.as_str() {
+                process.env(name, value);
+            }
+        }
+
+        let mut child = process
+            .spawn()
+            .map_err(|err| AppError::General(format!("Failed to start DAP runInTerminal command {command}: {err}")))?;
+        let process_id = child.id();
+        thread::sleep(Duration::from_millis(50));
+        if let Some(status) = child.try_wait()? {
+            let stdout = read_optional_child_pipe(child.stdout.take());
+            let stderr = read_optional_child_pipe(child.stderr.take());
+            let message = format!(
+                "DAP runInTerminal command {command} exited early with status {status}; stdout={stdout}; stderr={stderr}"
+            );
+            self.send_reverse_response(&request, false, Some(message.clone()), None)?;
+            return Err(AppError::General(message));
+        }
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+        self.send_reverse_response(&request, true, None, Some(json!({ "processId": process_id })))
+    }
+
+    fn send_reverse_response(
+        &mut self,
+        request: &DapClientRequest,
+        success: bool,
+        message: Option<String>,
+        body: Option<Value>,
+    ) -> Result<()> {
+        let response = DapResponse {
+            seq: self.next_seq,
+            message_type: "response".to_string(),
+            request_seq: request.seq,
+            success,
+            command: request.command.clone(),
+            message,
+            body,
+        };
+        self.next_seq += 1;
+        let frame = encode_frame(&response)?;
+        self.transport.write_frame(&frame)
     }
 }
 
@@ -1368,8 +1508,15 @@ pub fn run_launch_session<T: DapTransport>(
     let breakpoint_responses = client.set_profile_breakpoints(profile)?;
     let breakpoint_response_count = breakpoint_responses.len();
     let breakpoint_results = breakpoint_results_from_responses(&breakpoint_responses);
+    let mut last_error = None;
     if supports_configuration_done {
-        client.configuration_done()?;
+        if let Err(err) = client.configuration_done() {
+            if is_recoverable_configuration_done_error(&err) {
+                last_error = Some(err.to_string());
+            } else {
+                return Err(err);
+            }
+        }
     }
     client.wait_for_response_seq(launch_seq)?;
 
@@ -1391,7 +1538,7 @@ pub fn run_launch_session<T: DapTransport>(
         capabilities,
         state,
         last_request: commands.last().cloned(),
-        last_error: None,
+        last_error,
         initialized: events.iter().any(|event| event == "initialized"),
         launch_completed: true,
         commands,
@@ -1669,7 +1816,7 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
         DapAdapterTemplate {
             adapter: "lldb-dap".to_string(),
             command: "lldb-dap".to_string(),
-            args: Vec::new(),
+            args: vec![LLDB_DAP_NO_INIT_ARG.to_string()],
             request: "launch".to_string(),
             detail: "LLVM LLDB DAP launch/attach template".to_string(),
             capabilities: vec![
@@ -1679,10 +1826,10 @@ pub fn adapter_templates() -> Vec<DapAdapterTemplate> {
                 "attach".to_string(),
             ],
             launch_fields: common_launch_fields(),
-            attach_fields: common_attach_fields(),
+            attach_fields: vec!["name".to_string(), "pid".to_string(), "breakpoints".to_string()],
             notes: vec![
-                "LLDB DAP accepts the generic launch/attach profile used by fcs".to_string(),
-                "Attach uses `processId`; launch uses `program`, `cwd`, `args`, and `env`".to_string(),
+                "fcs maps generic `processId` profiles to LLDB DAP `pid` attach arguments".to_string(),
+                "Launch uses `program`, `cwd`, `args`, and `env`; fcs starts lldb-dap with `--no-lldbinit`".to_string(),
             ],
             arguments_preview: native_arguments_preview("lldb-dap"),
         },
@@ -1860,25 +2007,59 @@ fn env_map(env: &[DapEnvVar]) -> BTreeMap<String, String> {
 
 fn launch_arguments(profile: &DapLaunchProfile) -> DapLaunchArguments {
     if profile.request == "attach" {
+        let (process_id, pid) = if profile.adapter == "lldb-dap" {
+            (None, profile.process_id)
+        } else {
+            (profile.process_id, None)
+        };
         return DapLaunchArguments {
             name: profile.name.clone(),
             program: None,
-            process_id: profile.process_id,
+            process_id,
+            pid,
             cwd: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             stop_on_entry: None,
+            console: None,
+            stdio: None,
+            disable_stdio: None,
+            run_in_terminal: None,
         };
     }
 
+    let io_options = lldb_dap_launch_io_options(&profile.adapter);
     DapLaunchArguments {
         name: profile.name.clone(),
         program: Some(profile.program.clone()),
         process_id: profile.process_id,
+        pid: None,
         cwd: profile.cwd.clone(),
         args: profile.args.clone(),
         env: env_map(&profile.env),
         stop_on_entry: Some(profile.stop_on_entry),
+        console: io_options.console,
+        stdio: io_options.stdio,
+        disable_stdio: io_options.disable_stdio,
+        run_in_terminal: io_options.run_in_terminal,
+    }
+}
+
+#[derive(Debug, Default)]
+struct DapLaunchIoOptions {
+    console: Option<String>,
+    stdio: Option<Vec<String>>,
+    disable_stdio: Option<bool>,
+    run_in_terminal: Option<bool>,
+}
+
+fn lldb_dap_launch_io_options(adapter: &str) -> DapLaunchIoOptions {
+    match adapter {
+        "lldb-vscode" => DapLaunchIoOptions {
+            disable_stdio: Some(true),
+            ..DapLaunchIoOptions::default()
+        },
+        _ => DapLaunchIoOptions::default(),
     }
 }
 
@@ -1953,6 +2134,7 @@ const DEFAULT_DAP_REQUEST_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_DAP_EVENT_TIMEOUT_SECS: u64 = 5;
 const DAP_MAX_READ_FRAMES: usize = 128;
 const DAP_READ_BUFFER_SIZE: usize = 8192;
+const LLDB_DAP_NO_INIT_ARG: &str = "--no-lldbinit";
 
 fn frame_payload(frame: &[u8]) -> Result<&[u8]> {
     let header_end =
@@ -1992,6 +2174,17 @@ fn parse_content_length(headers: &str) -> Result<usize> {
     }
 
     Err(AppError::General("DAP frame missing Content-Length header".to_string()))
+}
+
+fn read_optional_child_pipe<T: Read>(pipe: Option<T>) -> String {
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut output = String::new();
+    match pipe.read_to_string(&mut output) {
+        Ok(_) => output.trim().to_string(),
+        Err(err) => format!("<read failed: {err}>"),
+    }
 }
 
 fn read_adapter_stdout(mut stdout: std::process::ChildStdout, tx: mpsc::Sender<std::result::Result<Vec<u8>, String>>) {
@@ -2048,6 +2241,16 @@ fn unsupported_reverse_request_error(request: &DapClientRequest) -> AppError {
         "DAP adapter sent unsupported reverse request: {}",
         request.command
     ))
+}
+
+fn is_recoverable_configuration_done_error(error: &AppError) -> bool {
+    let AppError::General(message) = error else {
+        return false;
+    };
+
+    message.contains("configurationDone")
+        && ((message.contains("resume request failed") && message.contains("process already running"))
+            || message.contains("Expected process to be stopped"))
 }
 
 fn mock_breakpoints(arguments: Option<&Value>) -> Vec<Value> {
@@ -2218,45 +2421,51 @@ fn format_stack_frame(frame: &DapStackFrame) -> String {
 
 fn adapter_candidates() -> Vec<DapAdapterDiscovery> {
     let mut candidates = Vec::new();
-    for (adapter, command, detail, capabilities) in [
+    for (adapter, command, detail, capabilities, args) in [
         (
             "codelldb",
             "codelldb",
             "CodeLLDB adapter",
             &["conditional-breakpoints", "hit-conditions", "logpoints", "evaluate"][..],
+            &[][..],
         ),
         (
             "lldb-dap",
             "lldb-dap",
             "LLVM lldb-dap adapter",
             &["conditional-breakpoints", "hit-conditions", "logpoints", "attach"][..],
+            &[LLDB_DAP_NO_INIT_ARG][..],
         ),
         (
             "lldb-vscode",
             "lldb-vscode",
             "legacy LLDB VS Code adapter",
             &["conditional-breakpoints", "hit-conditions"][..],
+            &[][..],
         ),
         (
             "cppdbg",
             "OpenDebugAD7",
             "cpptools OpenDebugAD7 adapter",
             &["conditional-breakpoints", "hit-conditions", "logpoints"][..],
+            &[][..],
         ),
         (
             "js-debug",
             "js-debug-adapter",
             "VS Code JavaScript debug adapter",
             &["conditional-breakpoints", "logpoints"][..],
+            &[][..],
         ),
         (
             "node",
             "node",
             "Node runtime; use with a JS DAP adapter when configured",
             &["runtime"][..],
+            &[][..],
         ),
     ] {
-        candidates.push(discovery_for_command(adapter, command, &[], detail, capabilities));
+        candidates.push(discovery_for_command(adapter, command, args, detail, capabilities));
     }
 
     if let Some(python) = command_on_path("python3").or_else(|| command_on_path("python")) {
@@ -2499,6 +2708,36 @@ mod tests {
     }
 
     #[test]
+    fn lldb_dap_launch_request_stays_headless() {
+        let mut profile = profile("lldb");
+        profile.adapter = "lldb-dap".to_string();
+        let value = serde_json::to_value(launch_request(&profile, 1)).unwrap();
+        let arguments = value.get("arguments").unwrap();
+
+        assert!(arguments.get("console").is_none());
+        assert!(arguments.get("disableSTDIO").is_none());
+        assert!(arguments.get("runInTerminal").is_none());
+        assert!(arguments.get("stdio").is_none());
+    }
+
+    #[test]
+    fn lldb_dap_process_spec_disables_user_lldbinit() {
+        let spec = DapAdapterProcessSpec::with_cwd(PathBuf::from("lldb-dap"), Some(PathBuf::from(".")));
+
+        assert_eq!(spec.args, vec![LLDB_DAP_NO_INIT_ARG.to_string()]);
+        assert_eq!(spec.cwd, Some(PathBuf::from(".")));
+    }
+
+    #[test]
+    fn lldb_dap_initialize_stays_headless() {
+        let lldb = DapInitializeArguments::new("lldb-dap");
+        let mock = DapInitializeArguments::new("mock");
+
+        assert!(!lldb.supports_run_in_terminal_request);
+        assert!(!mock.supports_run_in_terminal_request);
+    }
+
+    #[test]
     fn builds_attach_request_json_with_process_id() {
         let mut profile = profile("attach");
         profile.request = "attach".to_string();
@@ -2510,6 +2749,19 @@ mod tests {
         assert!(!json.contains("\"program\""));
         assert!(!json.contains("\"stopOnEntry\""));
         assert!(!json.contains("\"args\""));
+    }
+
+    #[test]
+    fn lldb_dap_attach_request_uses_pid() {
+        let mut profile = profile("attach");
+        profile.adapter = "lldb-dap".to_string();
+        profile.request = "attach".to_string();
+        profile.process_id = Some(4242);
+        let json = launch_request_json(&profile).unwrap();
+
+        assert!(json.contains("\"command\": \"attach\""));
+        assert!(json.contains("\"pid\": 4242"));
+        assert!(!json.contains("\"processId\""));
     }
 
     #[test]

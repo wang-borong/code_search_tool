@@ -283,7 +283,8 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke targ
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs -b src/main.rs:1 --break-condition "argc > 0" --break-hit 1 --break-log "hit main" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap session-smoke target/debug/fcs --request attach --process-id $$ --cwd . --env FCS_SMOKE=1
 if [[ "${FCS_REAL_DAP_SMOKE:-0}" == "1" ]]; then
-	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapter-session auto target/debug/fcs --cwd . --format json --request-timeout-ms 10000 --event-timeout-ms 5000 -- --help >/dev/null
+	echo "running real DAP smoke; this requires an adapter on PATH and ptrace/debug permission" >&2
+	rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap adapter-session auto target/debug/fcs --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --help >/dev/null
 fi
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap from-trace "$TRACE_SESSION_NAME" target/debug/fcs --name "${DAP_PROFILE_NAME}-trace" --directory "$SMOKE_ROOT" --cwd . --env FCS_SMOKE=1 -- --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs dap save-profile "$DAP_PROFILE_NAME" target/debug/fcs -b src/main.rs:1 --directory "$SMOKE_ROOT" -- --help

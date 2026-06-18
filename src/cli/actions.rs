@@ -3781,12 +3781,7 @@ fn handle_dap_adapter_session(
             .ok_or_else(|| AppError::General("No available DAP adapter was discovered".to_string()))?
             .spec(profile.cwd.clone())
     } else {
-        fcs::dap::DapAdapterProcessSpec {
-            command: PathBuf::from(adapter_command),
-            args: Vec::new(),
-            cwd: profile.cwd.clone(),
-            env: Vec::new(),
-        }
+        fcs::dap::DapAdapterProcessSpec::with_cwd(PathBuf::from(adapter_command), profile.cwd.clone())
     };
     spec.env = adapter_env;
     let transport = fcs::dap::DapProcessTransport::spawn(&spec)?;

@@ -567,10 +567,12 @@ fcs dap templates
 
 # 使用真实 DAP adapter 进程做 initialize/launch/configurationDone 会话
 fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
-fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . --format json --request-timeout-ms 10000 --event-timeout-ms 5000 -- --config dev.toml
+fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --config dev.toml
 ```
 
-`dap launch/save-profile/session-smoke/adapter-session` 支持 `--break-condition`、`--break-hit` 和 `--break-log`，一个值会套用到全部断点，多个值会按断点序号对应。`dap launch/save-profile/request-profile/transcript` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并可用 `--format json`、`--request-timeout-ms`、`--event-timeout-ms` 和 `--max-read-frames` 固化 CI 诊断输出。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
+Arch Linux 上官方 `lldb` 包通常已经提供 `/usr/bin/lldb-dap`，不需要单独的 `lldb-dap` 包；AUR `codelldb` 只是可选 adapter。`fcs dap adapters` 会展示发现到的 adapter，`auto` 会优先使用可用候选。为了避免用户级 `.lldbinit` 干扰自动化 DAP 会话，fcs 启动 `lldb-dap` 时会默认追加 `--no-lldbinit`。真实 DAP 会话需要本机允许调试/ptrace 的普通 shell 环境；容器或受限 sandbox 中的 LLDB handshake/launch 失败通常是环境限制，不代表 mock DAP 或请求生成链路失败。
+
+`dap launch/save-profile/session-smoke/adapter-session` 支持 `--break-condition`、`--break-hit` 和 `--break-log`，一个值会套用到全部断点，多个值会按断点序号对应。`dap launch/save-profile/request-profile/transcript` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求，面向 `lldb-dap` 执行 attach 时会自动映射为 adapter 需要的 `pid` 字段。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并可用 `--format json`、`--request-timeout-ms`、`--event-timeout-ms` 和 `--max-read-frames` 固化 CI 诊断输出。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
 ---
 
@@ -883,6 +885,8 @@ rtk scripts/release-check.sh full
 ```
 
 发布流程的逐项核查见 `RELEASE_CHECKLIST.md`，用户可见变更记录见 `CHANGELOG.md`。
+
+真实 DAP adapter smoke 是显式 opt-in：设置 `FCS_REAL_DAP_SMOKE=1` 后脚本会运行 `dap adapter-session auto`。该检查需要 adapter 已在 `PATH` 中，并且当前环境允许 LLDB/GDB 对子进程执行 ptrace；受限 sandbox 或容器内失败时，优先在普通本机 shell 中复测。
 
 ### 手工 smoke
 
