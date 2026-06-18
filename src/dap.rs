@@ -2250,7 +2250,8 @@ fn is_recoverable_configuration_done_error(error: &AppError) -> bool {
 
     message.contains("configurationDone")
         && ((message.contains("resume request failed") && message.contains("process already running"))
-            || message.contains("Expected process to be stopped"))
+            || message.contains("Expected process to be stopped")
+            || message.contains("Trying to resume but the async thread is dead"))
 }
 
 fn mock_breakpoints(arguments: Option<&Value>) -> Vec<Value> {
@@ -2735,6 +2736,16 @@ mod tests {
 
         assert!(!lldb.supports_run_in_terminal_request);
         assert!(!mock.supports_run_in_terminal_request);
+    }
+
+    #[test]
+    fn lldb_dap_attach_configuration_done_async_thread_error_is_recoverable() {
+        let error = AppError::General(
+            "DAP request configurationDone failed: unknown error body={\"error\":{\"format\":\"Trying to resume but the async thread is dead.\"}}"
+                .to_string(),
+        );
+
+        assert!(is_recoverable_configuration_done_error(&error));
     }
 
     #[test]
