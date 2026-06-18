@@ -74,6 +74,8 @@ fcs --version
 
 `fcs` 提供了多个子命令，以下是主要的用法说明。
 
+完整操作手册见 [docs/USER_MANUAL.md](docs/USER_MANUAL.md)，其中按工作流详细说明了 TUI、CLI、LSP、trace、debug/DAP、配置、插件、大仓库性能和排障步骤。
+
 ### 1. Ratatui 工作台 (`tui`)
 
 `fcs tui` 是新的主工作流入口。它不是一次性 picker，而是一个常驻代码追踪工作台：左侧切换 source，中间查看结果，右侧用语法高亮预览代码，下方显示带状态配色的 trace 和 debug 命令。
