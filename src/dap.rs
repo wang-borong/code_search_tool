@@ -531,7 +531,7 @@ pub struct DapSessionSmokeReport {
     pub events: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DapLaunchSessionReport {
     pub request_count: usize,
     pub response_count: usize,

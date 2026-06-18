@@ -597,17 +597,39 @@ fn slow_index_query_hint(report: &BenchReport) -> String {
     let Some(root) = &report.root else {
         return "build index shards for large symbol tables".to_string();
     };
-    let Ok(status) = crate::index::shard_status(root) else {
-        return "build index shards for large symbol tables".to_string();
+    let sidecar_hint = index_sidecar_query_hint(root);
+    let shard_hint = match crate::index::shard_status(root) {
+        Ok(status) if status.exists && !status.stale => {
+            "use index shard-query with a top-level path hint for large symbol tables"
+        }
+        Ok(status) if status.exists && status.stale => "refresh stale index shards with `fcs index shards --write`",
+        _ => "build index shards for large symbol tables",
     };
 
-    if status.exists && !status.stale {
-        return "use index shard-query with a top-level path hint for large symbol tables".to_string();
+    match sidecar_hint {
+        Some(hint) => format!("{shard_hint}; {hint}"),
+        None => shard_hint.to_string(),
     }
-    if status.exists && status.stale {
-        return "refresh stale index shards with `fcs index shards --write`".to_string();
+}
+
+fn index_sidecar_query_hint(root: &Path) -> Option<&'static str> {
+    let Ok(status) = crate::index::sidecar_status(root) else {
+        return None;
+    };
+
+    if status.healthy {
+        return Some("run `fcs index profile` to confirm mmap/jsonl sidecar path and row-level latency");
     }
-    "build index shards for large symbol tables".to_string()
+    if status.symbols_mmap.corrupt || status.symbols_jsonl.corrupt {
+        return Some("repair corrupt symbol sidecars with `fcs index refresh` before profiling");
+    }
+    if status.symbols_mmap.stale || status.symbols_jsonl.stale {
+        return Some("refresh stale symbol sidecars with `fcs index refresh` before profiling");
+    }
+    if !status.symbols_mmap.exists || !status.symbols_jsonl.exists {
+        return Some("create missing symbol sidecars with `fcs index refresh` before profiling");
+    }
+    Some("run `fcs index verify` and `fcs index profile` to inspect sidecar health")
 }
 
 #[cfg(test)]

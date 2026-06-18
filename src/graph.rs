@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{CodeItem, Location};
 use crate::errors::{AppError, Result};
 
-const SEMANTIC_GRAPH_CACHE_VERSION: u32 = 1;
+const SEMANTIC_GRAPH_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEdge {
@@ -283,11 +283,11 @@ fn dedupe_edges(mut edges: Vec<GraphEdge>) -> Vec<GraphEdge> {
 fn normalize_relation_label(relation: &str) -> String {
     match relation.trim() {
         "ref" | "refs" | "reference" | "references" => "references",
-        "def" | "definition" | "definitions" => "definition",
-        "type" | "type-def" | "type-definition" | "type_def" => "type",
-        "impl" | "implementation" | "implementations" => "implementation",
-        "incoming" | "incoming-call" | "incoming-calls" => "incoming",
-        "outgoing" | "outgoing-call" | "outgoing-calls" => "outgoing",
+        "def" | "definition" | "definitions" => "defines",
+        "type" | "type-def" | "type-definition" | "type_def" => "type-defines",
+        "impl" | "implementation" | "implementations" => "implements",
+        "incoming" | "incoming-call" | "incoming-calls" | "called-by" => "called-by",
+        "outgoing" | "outgoing-call" | "outgoing-calls" | "calls" => "calls",
         "" => "semantic",
         other => other,
     }
@@ -877,6 +877,16 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_ne!(filtered[0].kind, "call");
+    }
+
+    #[test]
+    fn semantic_relation_labels_are_human_readable() {
+        assert_eq!(normalize_relation_label("refs"), "references");
+        assert_eq!(normalize_relation_label("def"), "defines");
+        assert_eq!(normalize_relation_label("type-definition"), "type-defines");
+        assert_eq!(normalize_relation_label("impl"), "implements");
+        assert_eq!(normalize_relation_label("incoming"), "called-by");
+        assert_eq!(normalize_relation_label("outgoing"), "calls");
     }
 
     #[test]

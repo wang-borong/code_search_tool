@@ -1467,6 +1467,22 @@ pub enum DapAction {
         #[arg(long = "adapter-env")]
         adapter_env: Vec<String>,
 
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// DAP request timeout in milliseconds
+        #[arg(long, default_value_t = 10000)]
+        request_timeout_ms: u64,
+
+        /// DAP event timeout in milliseconds
+        #[arg(long, default_value_t = 5000)]
+        event_timeout_ms: u64,
+
+        /// Maximum inbound frames to read while waiting for a response or event
+        #[arg(long, default_value_t = 128)]
+        max_read_frames: usize,
+
         /// Debuggee environment assignment, repeatable: KEY=VALUE
         #[arg(long = "env")]
         env: Vec<String>,
@@ -3027,6 +3043,14 @@ mod tests {
                 ".",
                 "--adapter-env",
                 "FCS_ADAPTER=1",
+                "--format",
+                "json",
+                "--request-timeout-ms",
+                "1000",
+                "--event-timeout-ms",
+                "500",
+                "--max-read-frames",
+                "16",
                 "--env",
                 "FCS_SMOKE=1",
                 "--",

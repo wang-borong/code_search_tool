@@ -22,6 +22,17 @@ use fcs::errors::AppError;
 use fcs::ignore::IgnoreFile;
 use fcs::search;
 
+#[derive(Debug, Serialize)]
+struct DapAdapterSessionCliReport {
+    adapter_command: String,
+    adapter_args: Vec<String>,
+    adapter_cwd: Option<PathBuf>,
+    request_timeout_ms: u64,
+    event_timeout_ms: u64,
+    max_read_frames: usize,
+    session: fcs::dap::DapLaunchSessionReport,
+}
+
 fn handle_search(
     pattern: &str,
     paths: &[String],
@@ -3739,7 +3750,27 @@ fn handle_dap_adapter_session(
     adapter_command: &str,
     adapter_env: &[String],
     input: DapProfileInput<'_>,
+    format: &str,
+    request_timeout_ms: u64,
+    event_timeout_ms: u64,
+    max_read_frames: usize,
 ) -> Result<(), AppError> {
+    if !matches!(format, "text" | "json") {
+        return Err(AppError::General(format!(
+            "Unsupported DAP adapter-session format: {format}. Use text or json"
+        )));
+    }
+    if request_timeout_ms == 0 || event_timeout_ms == 0 {
+        return Err(AppError::General(
+            "DAP adapter-session timeouts must be greater than 0ms".to_string(),
+        ));
+    }
+    if max_read_frames == 0 {
+        return Err(AppError::General(
+            "DAP adapter-session max-read-frames must be greater than 0".to_string(),
+        ));
+    }
+
     let profile = build_dap_profile(input)?;
     let adapter_env = adapter_env
         .iter()
@@ -3759,36 +3790,83 @@ fn handle_dap_adapter_session(
     };
     spec.env = adapter_env;
     let transport = fcs::dap::DapProcessTransport::spawn(&spec)?;
-    let mut client = fcs::dap::DapClient::new(transport);
-    let report = fcs::dap::run_launch_session(&mut client, &profile)?;
+    let options = fcs::dap::DapClientOptions {
+        request_timeout: Duration::from_millis(request_timeout_ms),
+        event_timeout: Duration::from_millis(event_timeout_ms),
+        max_read_frames,
+    };
+    let mut client = fcs::dap::DapClient::with_options(transport, options);
+    let session = fcs::dap::run_launch_session(&mut client, &profile)?;
+    let report = DapAdapterSessionCliReport {
+        adapter_command: spec.command.display().to_string(),
+        adapter_args: spec.args,
+        adapter_cwd: spec.cwd,
+        request_timeout_ms,
+        event_timeout_ms,
+        max_read_frames,
+        session,
+    };
 
-    println!("DAP adapter session completed");
-    println!("adapter_command: {}", spec.command.display());
-    println!("requests: {}", report.request_count);
-    println!("responses: {}", report.response_count);
-    println!("breakpoint_responses: {}", report.breakpoint_response_count);
-    if report.breakpoint_results.is_empty() {
-        println!("breakpoints: none");
-    } else {
-        for (index, breakpoint) in report.breakpoint_results.iter().enumerate() {
-            let state = if breakpoint.verified { "verified" } else { "unverified" };
-            let line = breakpoint
-                .line
-                .map(|line| line.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let message = breakpoint.message.as_deref().unwrap_or("-");
-            println!("breakpoint {}: {} line={} {}", index + 1, state, line, message);
+    print_dap_adapter_session_report(&report, format)
+}
+
+fn print_dap_adapter_session_report(report: &DapAdapterSessionCliReport, format: &str) -> Result<(), AppError> {
+    match format {
+        "text" => {
+            println!("DAP adapter session completed");
+            println!("adapter_command: {}", report.adapter_command);
+            if !report.adapter_args.is_empty() {
+                println!("adapter_args: {}", report.adapter_args.join(" "));
+            }
+            if let Some(cwd) = &report.adapter_cwd {
+                println!("adapter_cwd: {}", cwd.display());
+            }
+            println!("request_timeout_ms: {}", report.request_timeout_ms);
+            println!("event_timeout_ms: {}", report.event_timeout_ms);
+            println!("max_read_frames: {}", report.max_read_frames);
+            println!("state: {:?}", report.session.state);
+            println!("requests: {}", report.session.request_count);
+            println!("responses: {}", report.session.response_count);
+            println!("breakpoint_responses: {}", report.session.breakpoint_response_count);
+            if report.session.breakpoint_results.is_empty() {
+                println!("breakpoints: none");
+            } else {
+                for (index, breakpoint) in report.session.breakpoint_results.iter().enumerate() {
+                    let state = if breakpoint.verified { "verified" } else { "unverified" };
+                    let line = breakpoint
+                        .line
+                        .map(|line| line.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let message = breakpoint.message.as_deref().unwrap_or("-");
+                    println!("breakpoint {}: {} line={} {}", index + 1, state, line, message);
+                }
+            }
+            println!("initialized: {}", report.session.initialized);
+            println!("launch_completed: {}", report.session.launch_completed);
+            println!(
+                "last_request: {}",
+                report.session.last_request.as_deref().unwrap_or("-")
+            );
+            println!("last_error: {}", report.session.last_error.as_deref().unwrap_or("-"));
+            println!("commands: {}", report.session.commands.join(", "));
+            if report.session.events.is_empty() {
+                println!("events: none");
+            } else {
+                println!("events: {}", report.session.events.join(", "));
+            }
+            Ok(())
         }
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report).map_err(|err| AppError::General(err.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(AppError::General(format!(
+            "Unsupported DAP adapter-session format: {other}. Use text or json"
+        ))),
     }
-    println!("initialized: {}", report.initialized);
-    println!("launch_completed: {}", report.launch_completed);
-    println!("commands: {}", report.commands.join(", "));
-    if report.events.is_empty() {
-        println!("events: none");
-    } else {
-        println!("events: {}", report.events.join(", "));
-    }
-    Ok(())
 }
 
 fn build_dap_profile(input: DapProfileInput<'_>) -> Result<fcs::dap::DapLaunchProfile, AppError> {
@@ -5439,6 +5517,10 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 break_logs,
                 cwd,
                 adapter_env,
+                format,
+                request_timeout_ms,
+                event_timeout_ms,
+                max_read_frames,
                 env,
                 stop_on_entry,
                 args,
@@ -5461,6 +5543,10 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         stop_on_entry,
                         args: &args,
                     },
+                    &format,
+                    request_timeout_ms,
+                    event_timeout_ms,
+                    max_read_frames,
                 )?;
             }
         },
