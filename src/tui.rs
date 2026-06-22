@@ -264,6 +264,7 @@ struct AppState {
     should_quit: bool,
     pending_g: bool,
     pending_debug_run: bool,
+    pending_editor_open: Option<CodeItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -466,6 +467,7 @@ impl AppState {
             should_quit: false,
             pending_g: false,
             pending_debug_run: false,
+            pending_editor_open: None,
         };
         state.query_cursor = state.query.chars().count();
         state.refresh_trace_items();
@@ -1070,10 +1072,14 @@ impl AppState {
             metadata,
         )?;
         self.push_navigation(item.clone());
-        crate::editor::open_location(&item.location, self.config.editor.command.as_deref())?;
         self.refresh_trace_items();
-        self.status = format!("Opened {}", item.display_text());
+        self.status = format!("Opening {}", item.display_text());
+        self.pending_editor_open = Some(item);
         Ok(())
+    }
+
+    fn take_editor_open_request(&mut self) -> Option<CodeItem> {
+        self.pending_editor_open.take()
     }
 
     fn add_trace(&mut self) -> Result<()> {
@@ -2825,6 +2831,9 @@ fn wait_for_script_idle(app: &mut AppState, timeout: Duration) -> bool {
         if app.take_debug_run_request() {
             app.set_warning("Debugger terminal launch is not available in tui-script");
         }
+        if app.take_editor_open_request().is_some() {
+            app.set_warning("Editor launch is not available in tui-script");
+        }
 
         if script_pending(app).is_empty() {
             return true;
@@ -2898,6 +2907,9 @@ fn script_pending(app: &AppState) -> Vec<String> {
     }
     if app.pending_dap.is_some() {
         pending.push("dap".to_string());
+    }
+    if app.pending_editor_open.is_some() {
+        pending.push("editor".to_string());
     }
     pending
 }
@@ -2999,6 +3011,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 }
             }
         }
+        if let Some(item) = app.take_editor_open_request() {
+            run_editor_in_terminal(terminal, app, item)?;
+        }
         if app.take_debug_run_request() {
             run_debug_session_in_terminal(terminal, app)?;
         }
@@ -3011,18 +3026,70 @@ fn run_debug_session_in_terminal(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
 ) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    let result = app.debug_session().run();
-
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-    enable_raw_mode()?;
+    let result = run_with_terminal_suspended(terminal, || app.debug_session().run())?;
     app.status = match result {
         Ok(()) => "Debugger exited successfully".to_string(),
         Err(err) => format!("Debugger failed: {err}"),
     };
+    Ok(())
+}
+
+fn run_editor_in_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut AppState,
+    item: CodeItem,
+) -> Result<()> {
+    let display = item.display_text().to_string();
+    let editor_command = app.config.editor.command.clone();
+    let result = run_with_terminal_suspended(terminal, || {
+        crate::editor::open_location(&item.location, editor_command.as_deref())
+    })?;
+
+    match result {
+        Ok(()) => app.set_status(format!("Opened {display}")),
+        Err(err) => app.set_error(format!("Editor failed: {err}")),
+    }
+    Ok(())
+}
+
+fn run_with_terminal_suspended<F>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    action: F,
+) -> Result<Result<()>>
+where
+    F: FnOnce() -> Result<()>,
+{
+    suspend_tui_terminal(terminal)?;
+    let action_result = action();
+    match resume_tui_terminal(terminal) {
+        Ok(()) => Ok(action_result),
+        Err(restore_err) => match action_result {
+            Ok(()) => Err(restore_err),
+            Err(action_err) => Err(AppError::General(format!(
+                "{action_err}; failed to restore TUI after external command: {restore_err}"
+            ))),
+        },
+    }
+}
+
+fn suspend_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    let raw_result = disable_raw_mode();
+    let screen_result = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let cursor_result = terminal.show_cursor();
+
+    raw_result?;
+    screen_result?;
+    cursor_result?;
+    Ok(())
+}
+
+fn resume_tui_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    if let Err(err) = enable_raw_mode() {
+        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+        return Err(err.into());
+    }
+    terminal.clear()?;
     Ok(())
 }
 
