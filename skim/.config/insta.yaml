@@ -1,5 +1,0 @@
-behavior:
-  output: minimal
-
-test:
-  runner: nextest

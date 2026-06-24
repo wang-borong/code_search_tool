@@ -1,8 +1,0 @@
-target/
-.github/
-bin/
-plugin/
-man/
-shell/
-*.md
-install
