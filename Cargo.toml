@@ -1,6 +1,6 @@
 [package]
 name = "fcs"
-version = "0.9.5"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Jason Wang <wang_borong@163.com>"]
@@ -17,7 +17,7 @@ clap = { version = "4.6", features = ["derive"] }
 clap_complete = "4.6"
 regex = "1"
 ignore = "0.4"
-skim = { git = "https://github.com/wang-borong/skim.git", rev = "403fc3d03ef67d22d4cb20686685c29d51e56c56" }
+skim = "4.9"
 ratatui = "0.30"
 crossterm = "0.29"
 thiserror = "2"
