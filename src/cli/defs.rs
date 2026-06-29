@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "fcs", author, version, about = "Fuzzy code search tool", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Box<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2494,7 +2494,7 @@ mod tests {
     fn search_accepts_multiple_paths() {
         let cli = Cli::try_parse_from(["fcs", "search", "main", "install.sh", "README.md"]).unwrap();
 
-        match cli.command {
+        match *cli.command {
             Commands::Search { pattern, paths, .. } => {
                 assert_eq!(pattern, "main");
                 assert_eq!(paths, vec!["install.sh".to_string(), "README.md".to_string()]);
