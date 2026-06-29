@@ -3034,7 +3034,13 @@ mod tests {
     use super::*;
 
     fn temp_workspace_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fcs_index_{name}_{}", std::process::id()))
+        // Canonicalize so the path matches what normalize_root/resolve_root produce
+        // inside production code. On macOS /var → /private/var, on Windows short 8.3
+        // names expand and get the \\?\ prefix.
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        base.join(format!("fcs_index_{name}_{}", std::process::id()))
     }
 
     #[test]
