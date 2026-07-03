@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
 
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 
 use crate::core::CodeItem;
 use crate::errors::{AppError, Result};
@@ -47,22 +48,36 @@ pub fn find_files(
         add_default_ignore(&mut builder, &root, default_ignore)?;
     }
 
-    let mut items = Vec::new();
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+    let root = Arc::new(root);
+    let (sender, receiver) = mpsc::channel();
+    builder.build_parallel().run(|| {
+        let sender = sender.clone();
+        let root = Arc::clone(&root);
 
-        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-            continue;
-        }
+        Box::new(move |entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return WalkState::Continue,
+            };
 
-        let display_path = path_to_relative(entry.path(), &root)
-            .to_string_lossy()
-            .replace('\\', "/");
-        items.push(CodeItem::file_with_display(entry.path().to_path_buf(), display_path));
-    }
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+                return WalkState::Continue;
+            }
+
+            let display_path = path_to_relative(entry.path(), root.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            let item = CodeItem::file_with_display(entry.path().to_path_buf(), display_path);
+            if sender.send(item).is_err() {
+                return WalkState::Quit;
+            }
+
+            WalkState::Continue
+        })
+    });
+    drop(sender);
+
+    let mut items = receiver.into_iter().collect::<Vec<CodeItem>>();
 
     items.sort_by(|left, right| left.label.cmp(&right.label));
     Ok(items)

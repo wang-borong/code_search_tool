@@ -122,6 +122,16 @@ impl SourceProvider for TextSearchSource {
 
 impl SourceProvider for FilesSource {
     fn load(&self, request: &SourceRequest) -> Result<Vec<CodeItem>> {
+        if let Some(items) = crate::index::query_code_items_with_cancel(
+            &request.root,
+            crate::index::IndexListKind::Files,
+            &request.query,
+            MAX_TUI_SOURCE_ITEMS,
+            Some(&request.cancel),
+        )? {
+            return Ok(items);
+        }
+
         let dir = request.root.to_string_lossy().to_string();
         let items = crate::files::find_files(Some(&dir), &[], &request.config.search.ignore, &request.ignore_path)?;
         Ok(filter_items(items, &request.query))
