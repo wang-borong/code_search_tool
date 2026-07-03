@@ -7,6 +7,8 @@ use crate::config::TuiThemeConfig;
 
 use super::preview_cache::PreviewWindow;
 
+const PREVIEW_GUTTER_WIDTH: usize = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Syntax {
     CLike,
@@ -39,10 +41,11 @@ pub(super) fn selection_style(theme: &TuiThemeConfig, fg: Color, bg: Color) -> S
     theme_style(theme, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
 }
 
-pub(super) fn preview_lines_with_matches(
+pub(super) fn preview_lines_with_matches_wrapped(
     window: &PreviewWindow,
     theme: &TuiThemeConfig,
     match_terms: &[String],
+    inner_width: u16,
 ) -> Vec<Line<'static>> {
     if let Some(message) = &window.message {
         return vec![Line::from(Span::styled(
@@ -51,35 +54,103 @@ pub(super) fn preview_lines_with_matches(
         ))];
     }
 
+    let content_width = preview_content_width(inner_width);
     window
         .lines
         .iter()
-        .map(|line| {
-            let line_style = if line.is_target {
-                theme_style(theme, Style::default().bg(Color::Rgb(36, 42, 54)))
-            } else {
-                Style::default()
-            };
-            let marker_style = if line.is_target {
-                theme_style(theme, line_style.fg(Color::Yellow).add_modifier(Modifier::BOLD))
-            } else {
-                theme_style(theme, line_style.fg(Color::DarkGray))
-            };
-            let number_style = if line.is_target {
-                theme_style(theme, line_style.fg(Color::LightYellow).add_modifier(Modifier::BOLD))
-            } else {
-                theme_style(theme, line_style.fg(Color::DarkGray))
-            };
-            let mut spans = vec![
-                Span::styled(if line.is_target { ">" } else { " " }.to_string(), marker_style),
-                Span::styled(format!(" {:>5} ", line.number), number_style),
-                Span::styled("| ".to_string(), theme_style(theme, line_style.fg(Color::DarkGray))),
-            ];
-            let code_spans = highlight_code(&window.path, &line.text, line_style, theme);
-            spans.extend(highlight_matches_in_spans(code_spans, match_terms, theme));
-            Line::from(spans)
+        .flat_map(|line| {
+            wrap_preview_text(&line.text, content_width)
+                .into_iter()
+                .enumerate()
+                .map(move |(segment_index, segment)| {
+                    let line_style = if line.is_target {
+                        theme_style(theme, Style::default().bg(Color::Rgb(36, 42, 54)))
+                    } else {
+                        Style::default()
+                    };
+                    let mut spans =
+                        preview_gutter_spans(line.number, line.is_target, segment_index > 0, theme, line_style);
+                    let code_spans = highlight_code(&window.path, &segment, line_style, theme);
+                    spans.extend(highlight_matches_in_spans(code_spans, match_terms, theme));
+                    Line::from(spans)
+                })
         })
         .collect()
+}
+
+fn preview_content_width(inner_width: u16) -> usize {
+    (inner_width as usize).saturating_sub(PREVIEW_GUTTER_WIDTH).max(1)
+}
+
+fn preview_gutter_spans(
+    number: usize,
+    is_target: bool,
+    continued: bool,
+    theme: &TuiThemeConfig,
+    line_style: Style,
+) -> Vec<Span<'static>> {
+    let marker_style = if is_target {
+        theme_style(theme, line_style.fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else {
+        theme_style(theme, line_style.fg(Color::DarkGray))
+    };
+    let number_style = if is_target {
+        theme_style(theme, line_style.fg(Color::LightYellow).add_modifier(Modifier::BOLD))
+    } else {
+        theme_style(theme, line_style.fg(Color::DarkGray))
+    };
+    let marker = if is_target && !continued { ">" } else { " " };
+    let number = if continued {
+        format!(" {:>5} ", "..")
+    } else {
+        format!(" {number:>5} ")
+    };
+
+    vec![
+        Span::styled(marker.to_string(), marker_style),
+        Span::styled(number, number_style),
+        Span::styled("| ".to_string(), theme_style(theme, line_style.fg(Color::DarkGray))),
+    ]
+}
+
+fn wrap_preview_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let chars = text.chars().collect::<Vec<char>>();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let remaining = chars.len() - start;
+        if remaining <= width {
+            lines.push(chars[start..].iter().collect());
+            break;
+        }
+
+        let end = start + width;
+        let split = preferred_preview_wrap(&chars[start..end], width)
+            .map(|offset| start + offset)
+            .unwrap_or(end);
+        let segment_end = split.max(start + 1);
+        lines.push(chars[start..segment_end].iter().collect::<String>());
+        start = segment_end;
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
+    }
+
+    lines
+}
+
+fn preferred_preview_wrap(chars: &[char], width: usize) -> Option<usize> {
+    let minimum = width.saturating_mul(3).saturating_div(5).max(1);
+    chars
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, ch)| *index >= minimum && ch.is_whitespace())
+        .map(|(index, _)| index)
 }
 
 pub(super) fn highlight_code(path: &Path, text: &str, base_style: Style, theme: &TuiThemeConfig) -> Vec<Span<'static>> {
@@ -666,10 +737,37 @@ mod tests {
         };
 
         let theme = TuiThemeConfig::default();
-        let lines = preview_lines_with_matches(&window, &theme, &[]);
+        let lines = preview_lines_with_matches_wrapped(&window, &theme, &[], 120);
 
         assert_eq!(lines.len(), 2);
         assert!(lines[1].spans.iter().any(|span| span.content.contains("pub")));
+    }
+
+    #[test]
+    fn wrapped_preview_lines_keep_continuation_gutter() {
+        let window = PreviewWindow {
+            path: Path::new("CHANGELOG.md").to_path_buf(),
+            target_line: 7,
+            target_column: None,
+            lines: vec![super::super::preview_cache::PreviewLine {
+                number: 7,
+                text: "Added TUI layout presets, trace session views, result filtering commands".to_string(),
+                is_target: true,
+            }],
+            message: None,
+        };
+
+        let theme = TuiThemeConfig::default();
+        let lines = preview_lines_with_matches_wrapped(&window, &theme, &["health".to_string()], 42);
+        let rendered = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<String>>();
+
+        assert!(rendered.len() > 1);
+        assert!(rendered[0].contains(">     7 | Added TUI layout"));
+        assert!(rendered[1].contains(".. |"));
+        assert!(!rendered[1].starts_with("trace session"));
     }
 
     #[test]
@@ -687,7 +785,7 @@ mod tests {
         };
 
         let theme = TuiThemeConfig::default();
-        let lines = preview_lines_with_matches(&window, &theme, &["main".to_string()]);
+        let lines = preview_lines_with_matches_wrapped(&window, &theme, &["main".to_string()], 120);
 
         assert!(lines[0]
             .spans

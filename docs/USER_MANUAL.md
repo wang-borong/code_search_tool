@@ -212,10 +212,10 @@ TUI 主要由这些区域组成：
 
 - Header 状态条：显示 workspace、source、layout、trace projection，并压缩展示 semantic 状态、后台 pending worker 和当前 status。
 - 默认搜索布局：宽屏左侧 Results、右侧 Preview；窄终端自动上下堆叠，底部保留 query/status 和 source tabs。
-- Source 列表：在 balanced 布局中展示当前数据源和分组；在 trace/debug/semantic 高级布局中，左侧栏会保留 source 切换并显示对应任务引导。
-- Results 面板：展示搜索、文件、符号、语义、trace 或 debug 结果；标题显示 source、loading、选中位置、可见范围、filter/group/trace projection；为空时会区分 loading、空 query、无匹配、filter/group 影响并给出下一步操作。
-- Preview 面板：展示当前位置附近代码，并高亮匹配命中；没有选中项时会提示如何产生可预览结果。
-- Trace / Debug 面板：在 `layout trace` 或 `layout debug` 中显示当前调查路径、断点和 profile；为空时会提示 bookmark、semantic trace、DAP start/sync/watch 等下一步操作。
+- Source 列表：在 balanced 布局中展示当前数据源和分组；在 trace/debug/semantic 高级布局中，左侧栏会保留 source 切换并显示对应任务引导；每个 source 会显示 loading、结果数、trace/pins 数量或 debug profile/breakpoint 摘要。
+- Results 面板：展示搜索、文件、符号、语义、trace 或 debug 结果；标题显示 source、loading、选中位置、可见范围、filter/group/trace projection；选中项下方显示 kind/location/path 元信息和当前 source 的常用动作提示；为空时会区分 loading、空 query、无匹配、filter/group 影响并给出下一步操作。
+- Preview 面板：展示当前位置附近代码，并高亮匹配命中；标题会显示当前目标文件、行列号、锁定/滚动状态以及当前窗口内的匹配命中数；长行会按代码 gutter 显式续行，续行使用 `.. |` 标记；没有选中项时会提示如何产生可预览结果。
+- Trace / Debug 面板：在 `layout trace` 或 `layout debug` 中显示当前调查路径、断点和 profile；Trace 记录会显示 status/kind badge，Debug Session 会显示 profile、TUI/DAP 断点、watch 摘要和下一步提示；为空时会提示 bookmark、semantic trace、DAP start/sync/watch 等下一步操作。
 - Activity / Status 区域：在非默认布局中用 `work` / `next` / `preview` / `status` / `saved` / `health` 汇总当前任务、下一步动作、后台请求和保存状态；底部 query bar 的快捷提示会随 search/debug/trace/semantic 工作流切换。
 
 当结果很多时，优先使用 `query`、`filter`、`group` 缩小范围，而不是只依赖滚动。
@@ -266,7 +266,7 @@ DAP worker 快捷键：
 
 ### 3.6 命令面板
 
-按 `:` 打开命令面板。支持 `Tab` 补全和 `Up` / `Down` 历史。
+按 `:` 打开命令面板。候选命令会按当前 layout/source 做上下文排序，并按 `Debug`、`Trace`、`View`、`Semantic`、`Navigate` 等类别分组；空输入时会显示最近命令。支持 `Tab` 补全和 `Up` / `Down` 历史。
 
 Source 与查询：
 

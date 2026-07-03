@@ -78,7 +78,7 @@ fcs --version
 
 ### 1. Ratatui 工作台 (`tui`)
 
-`fcs tui` 是新的主工作流入口。默认采用搜索优先界面：宽屏左侧显示结果、右侧显示语法高亮预览，窄终端自动上下堆叠；输入 query 时会实时刷新，空结果、空预览和空 Trace/Debug 面板会提示下一步操作，trace/debug/semantic 等高级 layout 会把左侧栏切成对应任务引导，底部快捷提示会随当前工作流切换。
+`fcs tui` 是新的主工作流入口。默认采用搜索优先界面：宽屏左侧显示结果、右侧显示语法高亮预览，窄终端自动上下堆叠；输入 query 时会实时刷新，空结果、空预览和空 Trace/Debug 面板会提示下一步操作，trace/debug/semantic 等高级 layout 会把左侧栏切成对应任务引导，Sources 会显示各 source 的数据量或 loading 状态，底部快捷提示会随当前工作流切换。Results 会在选中项下方显示 kind/location/path 元信息和可执行动作提示，Preview 标题显示目标位置和窗口命中数，长行会用 `.. |` gutter 显式续行，Trace 列表会标出记录状态和类型，Debug Session 会显示 profile/断点/watch 摘要和下一步提示；命令面板会按上下文和命令类别组织候选项。
 
 ```bash
 # 默认进入 files source，首屏可直接浏览文件
@@ -121,7 +121,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `x`：在 Debug source 中删除当前 profile 或断点。
 - `F5` / `F6` / `F10` / `F11` / `Shift-F11` / `Ctrl-F5`：对 TUI DAP worker 执行 continue、pause、next、step in、step out、stop。
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
-- `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`status copy/health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`var page/next/prev`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
+- `:`：打开按上下文分组的命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`status copy/health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`var page/next/prev`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：打开当前布局的上下文帮助。
 

@@ -130,7 +130,7 @@ fn render_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(5), Constraint::Length(6)])
+        .constraints([Constraint::Length(10), Constraint::Min(5), Constraint::Length(6)])
         .split(area);
 
     render_sources(frame, chunks[0], app);
@@ -141,7 +141,7 @@ fn render_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
 fn render_task_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(7), Constraint::Length(6)])
+        .constraints([Constraint::Length(10), Constraint::Min(7), Constraint::Length(6)])
         .split(area);
 
     render_sources(frame, chunks[0], app);
@@ -206,15 +206,55 @@ fn render_sources(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
             } else {
                 Style::default()
             };
+            let (badge, badge_color) = source_mode_badge(app, *mode);
             ListItem::new(Line::from(vec![
                 Span::styled(mode.short_label(), style),
                 Span::raw(" "),
                 Span::styled(mode.label(), themed(app, Style::default().fg(Color::DarkGray))),
+                Span::raw(" "),
+                Span::styled(
+                    badge,
+                    themed(app, Style::default().fg(badge_color).add_modifier(Modifier::BOLD)),
+                ),
             ]))
         })
         .collect::<Vec<ListItem>>();
     let list = List::new(items).block(Block::default().title("Sources").borders(Borders::ALL));
     frame.render_widget(list, area);
+}
+
+fn source_mode_badge(app: &AppState, mode: SourceMode) -> (String, Color) {
+    if source_mode_pending(app, mode) {
+        return ("loading".to_string(), Color::LightYellow);
+    }
+
+    match mode {
+        SourceMode::Trace => count_badge(app.trace_items.len()),
+        SourceMode::Pinned => count_badge(app.pinned_items.len()),
+        SourceMode::Debug => {
+            let value = format!("{}p/{}b", app.debug_profiles.len(), app.breakpoints.len());
+            let color = if app.debug_profiles.is_empty() && app.breakpoints.is_empty() {
+                Color::DarkGray
+            } else {
+                Color::LightGreen
+            };
+            (value, color)
+        }
+        _ if mode == app.mode => count_badge(app.results.len()),
+        _ => ("-".to_string(), Color::DarkGray),
+    }
+}
+
+fn source_mode_pending(app: &AppState, mode: SourceMode) -> bool {
+    app.pending_source
+        .as_ref()
+        .is_some_and(|(_, pending_mode, _)| *pending_mode == mode)
+        || (mode == app.mode && app.pending_lsp.is_some())
+}
+
+fn count_badge(count: usize) -> (String, Color) {
+    let color = if count == 0 { Color::DarkGray } else { Color::LightGreen };
+    (count.to_string(), color)
 }
 
 fn render_pins(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -260,8 +300,13 @@ fn render_navigation(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState)
 
 fn render_results(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let visible_height = area.height.saturating_sub(2).max(1) as usize;
-    let start = app.selected.saturating_sub(visible_height / 2);
-    let end = (start + visible_height).min(app.results.len());
+    let result_budget = if app.results.is_empty() {
+        visible_height
+    } else {
+        visible_height.saturating_sub(2).max(1)
+    };
+    let start = app.selected.saturating_sub(result_budget / 2);
+    let end = (start + result_budget).min(app.results.len());
     let selected = if app.results.is_empty() {
         0
     } else {
@@ -339,7 +384,11 @@ fn result_list_items(app: &AppState, start: usize, end: usize) -> Vec<ListItem<'
         let group = result_group_label(app.result_group, item);
         if app.result_group != super::TuiResultGroup::None && current_group.as_deref() != Some(group.as_str()) {
             current_group = Some(group.clone());
-            items.push(ListItem::new(result_group_header(app, &group)));
+            items.push(ListItem::new(result_group_header(
+                app,
+                &group,
+                result_group_count(app, &group),
+            )));
         }
 
         let pin = if app.is_pinned(item) { "P " } else { "  " };
@@ -349,6 +398,10 @@ fn result_list_items(app: &AppState, start: usize, end: usize) -> Vec<ListItem<'
             absolute_index == app.selected,
             Some(pin),
         )));
+        if absolute_index == app.selected {
+            items.push(ListItem::new(result_metadata_line(app, item)));
+            items.push(ListItem::new(result_action_line(app, item)));
+        }
     }
     items
 }
@@ -370,7 +423,14 @@ fn result_group_label(group: super::TuiResultGroup, item: &CodeItem) -> String {
     }
 }
 
-fn result_group_header(app: &AppState, group: &str) -> Line<'static> {
+fn result_group_count(app: &AppState, group: &str) -> usize {
+    app.results
+        .iter()
+        .filter(|item| result_group_label(app.result_group, item) == group)
+        .count()
+}
+
+fn result_group_header(app: &AppState, group: &str, count: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled("== ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
         Span::styled(
@@ -380,6 +440,7 @@ fn result_group_header(app: &AppState, group: &str) -> Line<'static> {
                 Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
             ),
         ),
+        Span::styled(format!(" ({count})"), themed(app, Style::default().fg(Color::DarkGray))),
         Span::styled(" ==".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
     ])
 }
@@ -395,12 +456,18 @@ fn code_item_line(app: &AppState, item: &CodeItem, selected: bool, prefix: Optio
 
     match item.kind {
         CodeItemKind::File => {
-            spans.push(Span::styled(
-                item.display_text().to_string(),
-                highlight::code_item_kind_style(&item.kind, theme(app)),
-            ));
+            spans.extend(path_spans(app, item.display_text()));
         }
         CodeItemKind::Symbol | CodeItemKind::TextMatch => {
+            let kind = match item.kind {
+                CodeItemKind::Symbol => "sym",
+                CodeItemKind::TextMatch => "txt",
+                CodeItemKind::File => "file",
+            };
+            spans.push(Span::styled(
+                format!("{kind:<4}"),
+                highlight::code_item_kind_style(&item.kind, theme(app)).add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(
                 item.label.clone(),
                 themed(app, Style::default().fg(Color::LightBlue)),
@@ -441,6 +508,142 @@ fn code_item_line(app: &AppState, item: &CodeItem, selected: bool, prefix: Optio
     }
 }
 
+fn path_spans(app: &AppState, path: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let parts = path.split('/').collect::<Vec<&str>>();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                "/".to_string(),
+                themed(app, Style::default().fg(Color::DarkGray)),
+            ));
+        }
+        let is_leaf = index + 1 == parts.len();
+        let style = if is_leaf {
+            highlight::code_item_kind_style(&CodeItemKind::File, theme(app)).add_modifier(Modifier::BOLD)
+        } else {
+            themed(app, Style::default().fg(Color::Gray))
+        };
+        spans.push(Span::styled((*part).to_string(), style));
+    }
+    spans
+}
+
+fn result_metadata_line(app: &AppState, item: &CodeItem) -> Line<'static> {
+    let kind = match item.kind {
+        CodeItemKind::File => "file",
+        CodeItemKind::Symbol => "symbol",
+        CodeItemKind::TextMatch => "text",
+    };
+    let location = match (item.location.line, item.location.column) {
+        (Some(line), Some(column)) => format!("{line}:{column}"),
+        (Some(line), None) => line.to_string(),
+        (None, _) => "-".to_string(),
+    };
+    let path = item.location.path.to_string_lossy().replace('\\', "/");
+    Line::from(vec![
+        Span::styled("   ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled("kind=", themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(kind.to_string(), themed(app, Style::default().fg(Color::LightCyan))),
+        Span::styled(" loc=", themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(location, themed(app, Style::default().fg(Color::LightGreen))),
+        Span::styled(" path=", themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(path, themed(app, Style::default().fg(Color::Gray))),
+    ])
+}
+
+fn result_action_line(app: &AppState, item: &CodeItem) -> Line<'static> {
+    let actions = result_action_hints(app, item);
+    Line::from(vec![
+        Span::styled("   ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled("actions=", themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(
+            actions.join(" | "),
+            themed(app, Style::default().fg(Color::LightYellow)),
+        ),
+    ])
+}
+
+fn result_action_hints(app: &AppState, item: &CodeItem) -> Vec<&'static str> {
+    match app.mode {
+        SourceMode::Pinned => vec!["Enter open", "u unpin", "x delete", "P preview"],
+        SourceMode::Trace => vec!["Enter open", "B to breakpoints", "trace view", "P preview"],
+        SourceMode::Debug => vec!["Enter open", "x delete", ":dap start/sync", "b break"],
+        SourceMode::References | SourceMode::Diagnostics | SourceMode::Symbols => {
+            vec!["Enter open", "p pin", "a trace", "gd/gr next"]
+        }
+        SourceMode::Files | SourceMode::Search => {
+            if app.is_pinned(item) {
+                vec!["Enter open", "u unpin", "a trace", ":filter path"]
+            } else {
+                vec!["Enter open", "p pin", "a trace", ":filter path"]
+            }
+        }
+    }
+}
+
+fn trace_item_line(app: &AppState, item: &CodeItem) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "T ".to_string(),
+        themed(
+            app,
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        ),
+    )];
+
+    for badge in trace_item_badges(item).into_iter().take(2) {
+        spans.push(Span::styled(format!("[{badge}] "), trace_badge_style(app, &badge)));
+    }
+
+    spans.extend(code_item_line(app, item, false, None).spans);
+    Line::from(spans)
+}
+
+fn trace_item_badges(item: &CodeItem) -> Vec<String> {
+    let mut badges = Vec::new();
+    if let Some(status) = trace_metadata_value(&item.detail, "status") {
+        badges.push(compact_middle(&status, 14));
+    }
+    if let Some(kind) = trace_detail_kind(&item.detail) {
+        if !badges.iter().any(|badge| badge == &kind) {
+            badges.push(compact_middle(&kind, 18));
+        }
+    }
+    badges
+}
+
+fn trace_metadata_value(text: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let start = text.find(&needle)? + needle.len();
+    let value = text[start..]
+        .chars()
+        .take_while(|ch| !matches!(*ch, ' ' | '}' | ']'))
+        .collect::<String>();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn trace_detail_kind(detail: &str) -> Option<String> {
+    let (_, kind) = detail.rsplit_once('[')?;
+    let kind = kind.strip_suffix(']')?.trim();
+    if let Some(rest) = kind.strip_prefix("trace-timeline:") {
+        return Some(format!("timeline:{rest}"));
+    }
+    if let Some(rest) = kind.strip_prefix("trace-graph-") {
+        return Some(format!("graph:{rest}"));
+    }
+    (!kind.is_empty()).then_some(kind.to_string())
+}
+
+fn trace_badge_style(app: &AppState, badge: &str) -> Style {
+    let color = match badge {
+        "observed" | "ok" | "done" => Color::LightGreen,
+        "pending" | "running" | "active" => Color::LightYellow,
+        "failed" | "error" | "errored" => Color::LightRed,
+        _ => Color::LightCyan,
+    };
+    themed(app, Style::default().fg(color).add_modifier(Modifier::BOLD))
+}
+
 fn apply_line_style(line: Line<'static>, style: Style) -> Line<'static> {
     Line::from(
         line.spans
@@ -453,20 +656,30 @@ fn apply_line_style(line: Line<'static>, style: Style) -> Line<'static> {
 fn render_preview(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     if app.current_item().is_none() {
         let paragraph = Paragraph::new(preview_empty_lines(app))
-            .block(Block::default().title(app.preview_title()).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(preview_block_title(app, None, &[], area.width))
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
         return;
     }
 
     let window = app.preview_window_for_current(area.height);
-    let paragraph = Paragraph::new(highlight::preview_lines_with_matches(
+    let match_terms = preview_match_terms(app);
+    let inner_width = area.width.saturating_sub(2);
+    let paragraph = Paragraph::new(highlight::preview_lines_with_matches_wrapped(
         &window,
         theme(app),
-        &preview_match_terms(app),
+        &match_terms,
+        inner_width,
     ))
-    .block(Block::default().title(app.preview_title()).borders(Borders::ALL))
-    .wrap(Wrap { trim: false });
+    .block(
+        Block::default()
+            .title(preview_block_title(app, Some(&window), &match_terms, area.width))
+            .borders(Borders::ALL),
+    );
     frame.render_widget(paragraph, area);
 }
 
@@ -498,6 +711,67 @@ fn preview_match_terms(app: &AppState) -> Vec<String> {
     terms
 }
 
+fn preview_block_title(
+    app: &AppState,
+    window: Option<&super::preview_cache::PreviewWindow>,
+    match_terms: &[String],
+    width: u16,
+) -> String {
+    let mut title = app.preview_title();
+    if let Some(window) = window {
+        let hits = preview_match_hit_count(window, match_terms);
+        if hits > 0 {
+            title.push_str(&format!(" hits={hits}"));
+        }
+    }
+    compact_middle(&title, width.saturating_sub(2) as usize)
+}
+
+fn preview_match_hit_count(window: &super::preview_cache::PreviewWindow, match_terms: &[String]) -> usize {
+    let terms = normalized_preview_match_terms(match_terms);
+    if terms.is_empty() {
+        return 0;
+    }
+
+    window
+        .lines
+        .iter()
+        .map(|line| preview_line_hit_count(&line.text, &terms))
+        .sum()
+}
+
+fn normalized_preview_match_terms(match_terms: &[String]) -> Vec<String> {
+    let mut terms = match_terms
+        .iter()
+        .flat_map(|term| term.split_whitespace())
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+                .to_ascii_lowercase()
+        })
+        .filter(|term| term.len() >= 2)
+        .collect::<Vec<String>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn preview_line_hit_count(text: &str, terms: &[String]) -> usize {
+    if !text.is_ascii() {
+        return 0;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let mut count = 0;
+    for term in terms {
+        let mut offset = 0;
+        while let Some(index) = lower[offset..].find(term) {
+            count += 1;
+            offset += index + term.len();
+        }
+    }
+    count
+}
+
 fn status_style(level: StatusLevel, theme: &TuiThemeConfig) -> Style {
     match level {
         StatusLevel::Info => highlight::theme_style(theme, Style::default().fg(Color::Yellow)),
@@ -526,7 +800,7 @@ fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         app.trace_items
             .iter()
             .take(visible_trace_height)
-            .map(|item| ListItem::new(code_item_line(app, item, false, None)))
+            .map(|item| ListItem::new(trace_item_line(app, item)))
             .collect::<Vec<ListItem>>()
     };
     let trace = List::new(trace_lines).block(
@@ -566,7 +840,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         .split(area);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(3)])
+        .constraints([Constraint::Length(8), Constraint::Min(3)])
         .split(columns[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -576,6 +850,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
     let snapshot = &app.dap_snapshot;
     let mut session = vec![
         highlight::debug_line(&snapshot.status, theme(app)),
+        debug_overview_line(app),
         Line::from(vec![
             Span::styled(
                 "adapter: ",
@@ -598,6 +873,7 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
             ),
             theme(app),
         ),
+        highlight::debug_line(&format!("next: {}", debug_next_step_text(app)), theme(app)),
     ];
     if let Some(reason) = &snapshot.stop_reason {
         session.push(highlight::debug_line(&format!("stop: {reason}"), theme(app)));
@@ -618,7 +894,11 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         ));
     }
     let session = Paragraph::new(session)
-        .block(Block::default().title("Session").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(format!("Session {}", snapshot.state.as_str()))
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(session, left[0]);
 
@@ -673,6 +953,62 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         theme(app),
     );
     frame.render_widget(events, right[1]);
+}
+
+fn debug_overview_line(app: &AppState) -> Line<'static> {
+    let snapshot = &app.dap_snapshot;
+    Line::from(vec![
+        Span::styled(
+            "profiles: ",
+            themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        ),
+        Span::styled(
+            app.debug_profiles.len().to_string(),
+            themed(app, Style::default().fg(Color::LightGreen)),
+        ),
+        Span::styled(
+            " tui-bps: ",
+            themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        ),
+        Span::styled(
+            app.breakpoints.len().to_string(),
+            themed(app, Style::default().fg(Color::LightGreen)),
+        ),
+        Span::styled(
+            " dap-bps: ",
+            themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        ),
+        Span::styled(
+            snapshot.breakpoints.len().to_string(),
+            themed(app, Style::default().fg(Color::LightGreen)),
+        ),
+        Span::styled(
+            " watches: ",
+            themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        ),
+        Span::styled(
+            snapshot.watches.len().to_string(),
+            themed(app, Style::default().fg(Color::LightGreen)),
+        ),
+    ])
+}
+
+fn debug_next_step_text(app: &AppState) -> &'static str {
+    match app.dap_snapshot.state {
+        crate::dap::DapSessionState::Idle if app.debug_profiles.is_empty() && app.breakpoints.is_empty() => {
+            "add b or create a debug profile, then run :dap start"
+        }
+        crate::dap::DapSessionState::Idle => "run :dap start, or :dap sync before launching",
+        crate::dap::DapSessionState::Starting | crate::dap::DapSessionState::Initialized => {
+            "wait for launch, then use F5/F10/F11"
+        }
+        crate::dap::DapSessionState::Running => "wait for a stop, or press F6 to pause",
+        crate::dap::DapSessionState::Stopped => "inspect variables, :eval/:watch, F10/F11 step",
+        crate::dap::DapSessionState::Terminated | crate::dap::DapSessionState::Disconnected => {
+            "run :dap start to relaunch"
+        }
+        crate::dap::DapSessionState::Errored => "check Events, :dap adapters, then retry",
+    }
 }
 
 fn list_from_strings<'a>(
@@ -817,44 +1153,123 @@ fn source_tab_spans(app: &AppState, width: u16) -> Vec<Span<'static>> {
 }
 
 fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
-    let popup = anchored_popup(area, 76, 11);
+    let popup = anchored_popup(area, 78, 14);
     frame.render_widget(Clear, popup);
 
     let matches = app.command_matches();
     let show_descriptions = command_palette_show_descriptions(popup.width);
-    let items = matches
-        .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            let style = if index == 0 {
-                selected_style(app, Color::Black, Color::Cyan)
-            } else {
-                Style::default()
-            };
-            let category = command_category(command);
-            let mut spans = vec![
-                Span::styled(
-                    format!("{:>2}. ", index + 1),
-                    themed(app, Style::default().fg(Color::DarkGray)),
-                ),
-                Span::styled(
-                    format!("{category:<8} "),
-                    themed(app, Style::default().fg(command_category_color(category))),
-                ),
-                Span::styled(*command, style),
-            ];
-            if show_descriptions {
-                spans.push(Span::styled(
-                    format!("  {}", command_description(command)),
-                    themed(app, Style::default().fg(Color::DarkGray)),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect::<Vec<ListItem>>();
+    let show_recent = app.command.trim().is_empty() && popup.width >= 64;
+    let items = command_palette_items(app, &matches, show_descriptions, show_recent);
     let title = command_palette_title(&app.command, popup.width);
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(list, popup);
+}
+
+fn command_palette_items(
+    app: &AppState,
+    matches: &[&'static str],
+    show_descriptions: bool,
+    show_recent: bool,
+) -> Vec<ListItem<'static>> {
+    let mut items = Vec::new();
+    if show_recent {
+        let recent = recent_command_summary(&app.command_history, 3);
+        if !recent.is_empty() {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    "recent ".to_string(),
+                    themed(app, Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                ),
+                Span::styled(recent, themed(app, Style::default().fg(Color::Gray))),
+            ])));
+        }
+    }
+
+    for (category, commands) in grouped_palette_commands(matches) {
+        items.push(command_category_header(app, category));
+        for (command_index, command) in commands {
+            items.push(command_palette_command_item(
+                app,
+                command,
+                command_index,
+                show_descriptions,
+            ));
+        }
+    }
+    items
+}
+
+fn grouped_palette_commands(matches: &[&'static str]) -> Vec<(&'static str, Vec<(usize, &'static str)>)> {
+    let mut groups = Vec::<(&'static str, Vec<(usize, &'static str)>)>::new();
+    for (index, command) in matches.iter().enumerate() {
+        let category = command_category(command);
+        if let Some((_, commands)) = groups
+            .iter_mut()
+            .find(|(existing_category, _)| *existing_category == category)
+        {
+            commands.push((index, *command));
+        } else {
+            groups.push((category, vec![(index, *command)]));
+        }
+    }
+    groups
+}
+
+fn recent_command_summary(history: &[String], limit: usize) -> String {
+    let mut recent = Vec::new();
+    for command in history.iter().rev() {
+        let trimmed = command.trim();
+        if trimmed.is_empty() || recent.iter().any(|value| value == trimmed) {
+            continue;
+        }
+        recent.push(trimmed.to_string());
+        if recent.len() >= limit {
+            break;
+        }
+    }
+    recent.join("  |  ")
+}
+
+fn command_category_header(app: &AppState, category: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::styled(" ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(
+            command_category_label(category).to_string(),
+            themed(
+                app,
+                Style::default()
+                    .fg(command_category_color(category))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ),
+    ]))
+}
+
+fn command_palette_command_item(
+    app: &AppState,
+    command: &'static str,
+    index: usize,
+    show_descriptions: bool,
+) -> ListItem<'static> {
+    let style = if index == 0 {
+        selected_style(app, Color::Black, Color::Cyan)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:>2}. ", index + 1),
+            themed(app, Style::default().fg(Color::DarkGray)),
+        ),
+        Span::styled(command.to_string(), style),
+    ];
+    if show_descriptions {
+        spans.push(Span::styled(
+            format!("  {}", command_description(command)),
+            themed(app, Style::default().fg(Color::DarkGray)),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn shortcut_hint_spans(app: &AppState, width: u16, layout: TuiLayoutPreset, mode: SourceMode) -> Vec<Span<'static>> {
@@ -895,6 +1310,17 @@ fn command_category(command: &str) -> &'static str {
         "def" | "refs" | "type" | "impl" | "symbols" | "diag" | "incoming" | "outgoing" | "hover" => "semantic",
         "pin" | "unpin" | "pins" | "back" | "forward" | "cycle" | "open" | "refresh" | "delete" => "nav",
         _ => "core",
+    }
+}
+
+fn command_category_label(category: &str) -> &'static str {
+    match category {
+        "debug" => "Debug",
+        "trace" => "Trace",
+        "view" => "View",
+        "semantic" => "Semantic",
+        "nav" => "Navigate",
+        _ => "Core",
     }
 }
 
@@ -1039,6 +1465,7 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::config::Config;
+    use crate::core::CodeItem;
 
     use super::*;
 
@@ -1098,9 +1525,186 @@ mod tests {
         let screen = render_to_text(&app, 104, 34);
 
         assert!(screen.contains("Debug Task"));
-        assert!(screen.contains("Session"));
+        assert!(screen.contains("Session idle"));
+        assert!(screen.contains("profiles:"));
+        assert!(screen.contains("next:"));
         assert!(screen.contains("Stack"));
         assert!(screen.contains("Variables"));
         assert!(screen.contains("Activity"));
+    }
+
+    #[test]
+    fn render_smoke_covers_result_metadata() {
+        let root = temp_workspace("metadata");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Files),
+            None,
+            None,
+        )
+        .expect("create app state");
+        app.results = vec![CodeItem::file_with_display(root.join("main.rs"), "main.rs")];
+        app.selected = 0;
+        app.pending_source = None;
+
+        let screen = render_to_text(&app, 100, 32);
+
+        assert!(screen.contains("kind=file"));
+        assert!(screen.contains("loc=1"));
+        assert!(screen.contains("path="));
+        assert!(screen.contains("actions="));
+        assert!(screen.contains("p pin"));
+    }
+
+    #[test]
+    fn render_smoke_covers_source_badges_in_sidebar() {
+        let root = temp_workspace("source-badges");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Files),
+            None,
+            None,
+        )
+        .expect("create app state");
+        app.layout_preset = TuiLayoutPreset::Balanced;
+        let item = CodeItem::file_with_display(root.join("main.rs"), "main.rs");
+        app.results = vec![item.clone()];
+        app.pinned_items = vec![item.clone()];
+        app.trace_items = vec![item.clone()];
+        app.breakpoints
+            .push(crate::dap::DapBreakpoint::from_location(&item.location));
+        app.selected = 0;
+        app.pending_source = None;
+
+        let screen = render_to_text(&app, 120, 36);
+
+        assert!(screen.contains("Diagnostics"));
+        assert!(screen.contains("debug"));
+        assert!(screen.contains("0p/1b"));
+        assert!(screen.contains("actions="));
+    }
+
+    #[test]
+    fn render_smoke_covers_preview_target_and_hits() {
+        let root = temp_workspace("preview");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Files),
+            Some("main".to_string()),
+            None,
+        )
+        .expect("create app state");
+        app.results = vec![CodeItem::file_with_display(root.join("main.rs"), "main.rs")];
+        app.selected = 0;
+        app.pending_source = None;
+
+        let screen = render_to_text(&app, 112, 34);
+
+        assert!(screen.contains("main.rs:1"));
+        assert!(screen.contains("hits=1"));
+    }
+
+    #[test]
+    fn render_smoke_wraps_preview_with_continuation_gutter() {
+        let root = temp_workspace("preview-wrap");
+        fs::write(
+            root.join("main.rs"),
+            "fn main() { let long_name = \"alpha beta gamma delta epsilon zeta eta theta\"; }\n",
+        )
+        .expect("write long preview source");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Files),
+            Some("alpha".to_string()),
+            None,
+        )
+        .expect("create app state");
+        app.results = vec![CodeItem::file_with_display(root.join("main.rs"), "main.rs")];
+        app.selected = 0;
+        app.pending_source = None;
+
+        let screen = render_to_text(&app, 76, 28);
+
+        assert!(screen.contains(".. |"));
+        assert!(!screen.contains("\ngamma delta"));
+    }
+
+    #[test]
+    fn render_smoke_covers_trace_badges() {
+        let root = temp_workspace("trace-badges");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Trace),
+            None,
+            None,
+        )
+        .expect("create app state");
+        app.layout_preset = TuiLayoutPreset::Trace;
+        app.trace_items = vec![CodeItem::symbol(
+            root.join("src/main.rs"),
+            "src/main.rs",
+            1,
+            None,
+            "breakpoint observed {status=observed}",
+            "debug-stop",
+        )];
+
+        let screen = render_to_text(&app, 120, 36);
+
+        assert!(screen.contains("[observed]"));
+        assert!(screen.contains("[debug-stop]"));
+    }
+
+    #[test]
+    fn render_smoke_covers_grouped_command_palette() {
+        let root = temp_workspace("palette");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("create app state");
+        app.command_active = true;
+        app.command_history = vec!["trace semantic refs".to_string(), "layout debug".to_string()];
+
+        let screen = render_to_text(&app, 112, 36);
+
+        assert!(screen.contains("recent"));
+        assert!(screen.contains("trace semantic refs"));
+        assert!(screen.contains("Navigate"));
+        assert!(screen.contains("View"));
+    }
+
+    #[test]
+    fn command_palette_recent_summary_deduplicates_history() {
+        let history = vec![
+            "layout debug".to_string(),
+            "trace semantic refs".to_string(),
+            "layout debug".to_string(),
+            "dap start".to_string(),
+        ];
+
+        assert_eq!(
+            recent_command_summary(&history, 3),
+            "dap start  |  layout debug  |  trace semantic refs"
+        );
+    }
+
+    #[test]
+    fn command_palette_grouping_preserves_match_indices() {
+        let groups = grouped_palette_commands(&["dap start", "trace semantic refs", "layout debug", "pin"]);
+
+        assert_eq!(groups[0].0, "debug");
+        assert_eq!(groups[0].1[0], (0, "dap start"));
+        assert_eq!(groups[1].0, "trace");
+        assert_eq!(groups[2].0, "view");
+        assert_eq!(groups[3].0, "nav");
     }
 }

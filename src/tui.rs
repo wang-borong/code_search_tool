@@ -1872,7 +1872,15 @@ impl AppState {
         } else {
             format!(" scroll={}", self.preview_scroll)
         };
-        format!("Preview{lock}{scroll}")
+        let Some(location) = self.preview_location() else {
+            return format!("Preview{lock}{scroll}");
+        };
+
+        let path = location.path.to_string_lossy().replace('\\', "/");
+        let path = render_model::compact_middle(&path, 48);
+        let line = location.line.unwrap_or(1);
+        let column = location.column.map(|column| format!(":{column}")).unwrap_or_default();
+        format!("Preview{lock} {path}:{line}{column}{scroll}")
     }
 
     fn scroll_preview(&mut self, delta: isize) {
