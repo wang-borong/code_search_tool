@@ -193,6 +193,8 @@ fcs tui . --mode symbols --query handle
 fcs tui . --debug-binary target/debug/app
 ```
 
+未显式指定 `--mode` 时，TUI 默认进入 `files` source，让首屏可以直接浏览和打开文件；如果上一轮保存了非空 search 查询，则会恢复对应搜索上下文。
+
 `--mode` 可指定初始 source，常用值包括：
 
 - `search`：全文搜索 source。
@@ -208,24 +210,26 @@ fcs tui . --debug-binary target/debug/app
 
 TUI 主要由这些区域组成：
 
-- Source 列表：展示当前数据源和分组。
-- Results 面板：展示搜索、文件、符号、语义、trace 或 debug 结果。
-- Preview 面板：展示当前位置附近代码，并高亮匹配命中。
-- Trace / Debug 面板：显示当前调查路径、断点和 profile。
-- Activity / Status 区域：显示后台 worker、LSP、DAP、错误和快捷键提示。
+- Header 状态条：显示 workspace、source、layout、trace projection，并压缩展示 semantic 状态、后台 pending worker 和当前 status。
+- 默认搜索布局：宽屏左侧 Results、右侧 Preview；窄终端自动上下堆叠，底部保留 query/status 和 source tabs。
+- Source 列表：在 balanced 布局中展示当前数据源和分组；在 trace/debug/semantic 高级布局中，左侧栏会保留 source 切换并显示对应任务引导。
+- Results 面板：展示搜索、文件、符号、语义、trace 或 debug 结果；标题显示 source、loading、选中位置、可见范围、filter/group/trace projection；为空时会区分 loading、空 query、无匹配、filter/group 影响并给出下一步操作。
+- Preview 面板：展示当前位置附近代码，并高亮匹配命中；没有选中项时会提示如何产生可预览结果。
+- Trace / Debug 面板：在 `layout trace` 或 `layout debug` 中显示当前调查路径、断点和 profile；为空时会提示 bookmark、semantic trace、DAP start/sync/watch 等下一步操作。
+- Activity / Status 区域：在非默认布局中用 `work` / `next` / `preview` / `status` / `saved` / `health` 汇总当前任务、下一步动作、后台请求和保存状态；底部 query bar 的快捷提示会随 search/debug/trace/semantic 工作流切换。
 
 当结果很多时，优先使用 `query`、`filter`、`group` 缩小范围，而不是只依赖滚动。
 
 ### 3.3 基础快捷键
 
 - `q` / `Esc` / `Ctrl-C`：退出并恢复终端。
-- `/`：进入 query 输入模式。
+- `/`：进入 query 输入模式；默认实时刷新 search/files/symbols 结果。
 - `Enter`：在输入模式提交 query；在结果模式打开当前结果。
 - `Tab` / `Shift-Tab`：切换 source。
 - `j` / `k` / 方向键：移动结果选择。
-- `o`：打开当前结果并写入 trace。
+- `o`：打开当前结果；如需写入 trace，使用 `a` bookmark。
 - `[` / `]`：在 TUI 导航栈后退/前进。
-- `?`：显示或刷新状态栏快捷键提示。
+- `?`：显示当前布局的上下文帮助。
 - `P`：锁定或解锁 preview。
 - `PageUp` / `PageDown`：滚动 preview。
 
@@ -398,8 +402,13 @@ fcs tui-script trace-loop.fcs . --step-timeout-ms 3000 --persist
 常用断言：
 
 ```text
+assert source files
+assert query empty
 assert results >= 1
 assert status contains traced
+assert status-level info
+assert preview-title contains Preview
+assert preview-message contains No selection
 assert trace-session bug-42
 assert trace-view graph
 assert layout debug
@@ -1015,6 +1024,10 @@ command = "nvim"
 [lsp]
 clangd_command = "clangd"
 request_timeout_ms = 3000
+
+[tui]
+live_query = true
+trace_on_open = false
 
 [tui.keymap]
 command_palette = ":"

@@ -78,13 +78,13 @@ fcs --version
 
 ### 1. Ratatui 工作台 (`tui`)
 
-`fcs tui` 是新的主工作流入口。它不是一次性 picker，而是一个常驻代码追踪工作台：左侧切换 source，中间查看结果，右侧用语法高亮预览代码，下方显示带状态配色的 trace 和 debug 命令。
+`fcs tui` 是新的主工作流入口。默认采用搜索优先界面：宽屏左侧显示结果、右侧显示语法高亮预览，窄终端自动上下堆叠；输入 query 时会实时刷新，空结果、空预览和空 Trace/Debug 面板会提示下一步操作，trace/debug/semantic 等高级 layout 会把左侧栏切成对应任务引导，底部快捷提示会随当前工作流切换。
 
 ```bash
-# 默认进入 search mode
+# 默认进入 files source，首屏可直接浏览文件
 fcs tui
 
-# 进入文件查找模式并设置初始查询
+# 指定初始查询
 fcs tui --mode files --query main
 
 # 进入符号模式
@@ -97,15 +97,15 @@ fcs tui --debug-binary target/debug/app
 fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 ```
 
-`tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>`、`wait <ms>` 和 `assert ...` 断言。常用断言包括 `assert results >= 1`、`assert status contains traced`、`assert trace-session bug-42`、`assert trace-view graph`、`assert layout debug`、`assert filter none`、`assert group path`、`assert pending none`；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation/session/layout/filter/group 时加 `--persist`。
+`tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>`、`wait <ms>` 和 `assert ...` 断言。常用断言包括 `assert source files`、`assert query empty`、`assert results >= 1`、`assert status contains traced`、`assert status-level info`、`assert preview-title contains Preview`、`assert trace-session bug-42`、`assert trace-view graph`、`assert layout debug`、`assert filter none`、`assert group path`、`assert pending none`；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation/session/layout/filter/group 时加 `--persist`。
 
 #### TUI 快捷键
 
 - `q` / `Esc` / `Ctrl-C`：退出并恢复终端。
-- `/`：进入输入模式，修改 query；`Enter` 刷新结果。
+- `/`：进入输入模式，修改 query；默认实时刷新结果，`Enter` 立即提交。
 - `Tab` / `Shift-Tab`：切换 source。
 - `j` / `k` 或方向键：移动结果选择。
-- `Enter` / `o`：打开当前结果并写入 trace。
+- `Enter` / `o`：打开当前结果；如需写入 trace，使用 `a` bookmark。
 - `gd`：对当前选中位置执行 LSP definition。
 - `gr`：对当前选中位置执行 LSP references。
 - `t` / `gt`：执行 LSP type definition。
@@ -123,7 +123,7 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `P`：锁定/解锁 preview；`PageUp` / `PageDown` 滚动 preview。
 - `:`：打开命令面板，支持 `Tab` 补全和 `Up/Down` 历史；可输入 `source <mode>`、`query <text>`、`layout search/debug/trace/semantic/balanced`、`filter kind/path/text <value>`、`filter clear`、`group kind/path/none`、`status copy/health`、`preview lock/up/down/reset`、`def`、`refs`、`type`、`impl`、`symbols`、`diag`、`incoming`、`outgoing`、`hover`、`trace session <name>`、`trace view session/timeline/graph`、`trace current`、`trace sessions`、`trace semantic [relation]`、`trace breakpoint`、`trace dap-profile <name>`、`break sync`、`debug`、`run`、`open`、`refresh`、`delete`、`watch add/del/clear/refresh`、`var page/next/prev`、`eval <expr>`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap restart/terminate/disconnect`、`dap adapters`、`dap jump/open`、`quit`。
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
-- `?`：在状态栏显示快捷键提示。
+- `?`：打开当前布局的上下文帮助。
 
 > `fcs search/files/symbol` 等旧命令仍保留，适合脚本化或一次性选择；`fcs tui` 适合连续搜索、语义追踪、诊断和调试准备。
 
@@ -814,6 +814,13 @@ clangd_command = "clangd"
 
 # LSP 请求超时时间。
 request_timeout_ms = 3000
+
+[tui]
+# 输入 query 时是否自动刷新 search/files/symbols 结果。
+live_query = true
+
+# 打开文件时是否自动写入 trace；默认关闭，避免普通文件跳转污染调查记录。
+trace_on_open = false
 
 [tui.keymap]
 # TUI 中少数高频入口可以改键；复杂语义动作仍保留内置快捷键和命令面板。

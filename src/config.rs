@@ -56,12 +56,16 @@ pub struct LspConfig {
     pub request_timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     #[serde(default)]
     pub keymap: TuiKeymapConfig,
     #[serde(default)]
     pub theme: TuiThemeConfig,
+    #[serde(default = "default_true")]
+    pub live_query: bool,
+    #[serde(default)]
+    pub trace_on_open: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +156,17 @@ impl Default for TuiThemeConfig {
     }
 }
 
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            keymap: TuiKeymapConfig::default(),
+            theme: TuiThemeConfig::default(),
+            live_query: true,
+            trace_on_open: false,
+        }
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -168,6 +183,10 @@ fn default_tab_width() -> usize {
 
 fn current_config_schema_version() -> u32 {
     CONFIG_SCHEMA_VERSION
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -353,6 +372,44 @@ preview_window = "right:50%"
     fn default_config_serializes_schema_version() {
         let contents = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(contents.contains("schema_version = 1"));
+    }
+
+    #[test]
+    fn tui_defaults_enable_live_query_without_trace_on_open() {
+        let tui = TuiConfig::default();
+        assert!(tui.live_query);
+        assert!(!tui.trace_on_open);
+    }
+
+    #[test]
+    fn missing_tui_behavior_fields_load_with_defaults() {
+        let contents = r#"
+[search]
+rg_options = []
+ignore = []
+
+[skim]
+binds = []
+height = "100%"
+min_height = "20"
+color = "fg:-1"
+exact = true
+tac = true
+cycle = true
+preview_window = "right:50%"
+
+[tui.keymap]
+command_palette = ":"
+query = "/"
+open = "o"
+refresh = "r"
+trace = "a"
+breakpoint = "b"
+debug = "D"
+"#;
+        let config: Config = toml::from_str(contents).unwrap();
+        assert!(config.tui.live_query);
+        assert!(!config.tui.trace_on_open);
     }
 
     #[test]

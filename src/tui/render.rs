@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use crate::config::TuiThemeConfig;
 use crate::core::{CodeItem, CodeItemKind};
 
-use super::{highlight, query_with_cursor, AppState, SourceMode, StatusLevel, TuiLayoutPreset, HELP_OVERLAY_TEXT};
+use super::render_model::*;
+use super::{highlight, AppState, SourceMode, StatusLevel, TuiLayoutPreset, HELP_OVERLAY_TEXT};
 
 pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     let area = frame.area();
@@ -23,7 +24,9 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
 
     render_header(frame, outer[0], app);
     render_main(frame, outer[1], app);
-    render_bottom(frame, outer[2], app);
+    if bottom_height > 0 {
+        render_bottom(frame, outer[2], app);
+    }
     render_query(frame, outer[3], app);
 
     if app.command_active {
@@ -31,7 +34,7 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     }
 
     if app.help_visible {
-        render_help_overlay(frame, area);
+        render_help_overlay(frame, area, app);
     }
 }
 
@@ -53,29 +56,58 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_else(|| app.root.to_str().unwrap_or("workspace"));
-    let title = format!(
-        " fcs | {} | {} | {} | trace {}:{} ",
+    let title = header_title(
         workspace,
-        app.mode.label(),
-        app.layout_preset.label(),
-        app.active_trace_session,
-        app.trace_view.label()
+        app.mode,
+        app.layout_preset,
+        &app.active_trace_session,
+        app.trace_view.label(),
+        area.width,
     );
+    let pending = header_pending_labels(app);
+    let status = header_status_for(&app.semantic_status, &app.status, &pending, area.width);
     let paragraph = Paragraph::new(Line::from(vec![
         Span::styled(
             title,
             themed(app, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         ),
         Span::raw(" "),
-        Span::styled(&app.semantic_status, themed(app, Style::default().fg(Color::Green))),
-        Span::raw(" | "),
-        Span::styled(&app.status, status_style(app.status_level, theme(app))),
+        Span::styled(status, status_style(app.status_level, theme(app))),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 
+fn header_pending_labels(app: &AppState) -> Vec<&'static str> {
+    let mut pending = Vec::new();
+    if app.pending_source.is_some() {
+        pending.push("source");
+    }
+    if app.pending_lsp.is_some() {
+        pending.push("lsp");
+    }
+    if app.pending_dap.is_some() {
+        pending.push("dap");
+    }
+    if app.pending_editor_open.is_some() {
+        pending.push("editor");
+    }
+    pending
+}
+
 fn render_main(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if app.layout_preset == TuiLayoutPreset::Search {
+        let direction = search_main_direction(area);
+        let chunks = Layout::default()
+            .direction(direction)
+            .constraints(search_main_constraints(direction))
+            .split(area);
+
+        render_results(frame, chunks[0], app);
+        render_preview(frame, chunks[1], app);
+        return;
+    }
+
     let constraints = main_constraints(app.layout_preset);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -88,6 +120,14 @@ fn render_main(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if matches!(
+        app.layout_preset,
+        TuiLayoutPreset::Debug | TuiLayoutPreset::Trace | TuiLayoutPreset::Semantic
+    ) {
+        render_task_sidebar(frame, area, app);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(9), Constraint::Min(5), Constraint::Length(6)])
@@ -96,6 +136,65 @@ fn render_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     render_sources(frame, chunks[0], app);
     render_pins(frame, chunks[1], app);
     render_navigation(frame, chunks[2], app);
+}
+
+fn render_task_sidebar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(7), Constraint::Length(6)])
+        .split(area);
+
+    render_sources(frame, chunks[0], app);
+    render_task_panel(frame, chunks[1], app);
+    render_navigation(frame, chunks[2], app);
+}
+
+fn render_task_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let lines = task_sidebar_lines(app)
+        .into_iter()
+        .take(area.height.saturating_sub(2).max(1) as usize)
+        .map(|line| task_sidebar_line(app, &line))
+        .collect::<Vec<Line<'static>>>();
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(task_sidebar_title(app.layout_preset))
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn task_sidebar_line(app: &AppState, line: &str) -> Line<'static> {
+    if let Some((label, value)) = line.split_once(':') {
+        Line::from(vec![
+            Span::styled(
+                format!("{label}:"),
+                themed(app, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+            ),
+            Span::styled(value.to_string(), themed(app, Style::default().fg(Color::Gray))),
+        ])
+    } else {
+        Line::from(Span::styled(
+            line.to_string(),
+            themed(app, Style::default().fg(Color::Gray)),
+        ))
+    }
+}
+
+fn task_sidebar_lines(app: &AppState) -> Vec<String> {
+    task_sidebar_lines_for(TaskSidebarContext {
+        layout: app.layout_preset,
+        mode: app.mode,
+        trace_view: app.trace_view.label(),
+        trace_count: app.trace_items.len(),
+        breakpoints: app.breakpoints.len(),
+        pins: app.pinned_items.len(),
+        dap_state: app.dap_snapshot.state.as_str(),
+        dap_profile: &app.dap_snapshot.profile,
+        selected_label: app.current_item().map(|item| item.display_text()),
+        pending: app.pending_source.is_some(),
+    })
 }
 
 fn render_sources(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -168,21 +267,64 @@ fn render_results(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     } else {
         app.selected.saturating_add(1)
     };
-    let suffix = result_projection_suffix(app);
-    let title = if app.mode == SourceMode::Trace {
-        format!(
-            "Results {selected}/{} trace:{}:{}{}",
-            app.results.len(),
-            app.active_trace_session,
-            app.trace_view.label(),
-            suffix
-        )
+    let title = result_title(app, selected, start, end, area.width);
+    let items = if app.results.is_empty() {
+        result_empty_items(app, visible_height)
     } else {
-        format!("Results {selected}/{}{}", app.results.len(), suffix)
+        result_list_items(app, start, end)
     };
-    let items = result_list_items(app, start, end);
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(list, area);
+}
+
+fn result_title(app: &AppState, selected: usize, start: usize, end: usize, width: u16) -> String {
+    let title = result_title_for(ResultTitleContext {
+        mode: app.mode,
+        selected,
+        total: app.results.len(),
+        visible_start: start,
+        visible_end: end,
+        pending: result_source_pending(app),
+        filter: app.result_filter_label(),
+        group: app.result_group.label().to_string(),
+        trace_session: app.active_trace_session.clone(),
+        trace_view: app.trace_view.label().to_string(),
+    });
+    compact_middle(&title, width.saturating_sub(2) as usize)
+}
+
+fn result_empty_items(app: &AppState, visible_height: usize) -> Vec<ListItem<'static>> {
+    result_empty_messages(app)
+        .into_iter()
+        .take(visible_height)
+        .map(|message| ListItem::new(empty_state_line(app, &message)))
+        .collect()
+}
+
+fn empty_state_line(app: &AppState, message: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
+        Span::styled(message.to_string(), themed(app, Style::default().fg(Color::Gray))),
+    ])
+}
+
+fn result_empty_messages(app: &AppState) -> Vec<String> {
+    result_empty_messages_for(ResultEmptyContext {
+        mode: app.mode,
+        query: &app.query,
+        pending: result_source_pending(app),
+        filter: app.result_filter.as_ref().map(TuiFilterSummary::from),
+        group: app.result_group.label(),
+        trace_count: app.trace_items.len(),
+        pinned_count: app.pinned_items.len(),
+        breakpoint_count: app.breakpoints.len(),
+    })
+}
+
+fn result_source_pending(app: &AppState) -> bool {
+    app.pending_source
+        .as_ref()
+        .is_some_and(|(_, mode, _)| *mode == app.mode)
 }
 
 fn result_list_items(app: &AppState, start: usize, end: usize) -> Vec<ListItem<'static>> {
@@ -309,6 +451,14 @@ fn apply_line_style(line: Line<'static>, style: Style) -> Line<'static> {
 }
 
 fn render_preview(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    if app.current_item().is_none() {
+        let paragraph = Paragraph::new(preview_empty_lines(app))
+            .block(Block::default().title(app.preview_title()).borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let window = app.preview_window_for_current(area.height);
     let paragraph = Paragraph::new(highlight::preview_lines_with_matches(
         &window,
@@ -318,6 +468,18 @@ fn render_preview(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     .block(Block::default().title(app.preview_title()).borders(Borders::ALL))
     .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn preview_empty_lines(app: &AppState) -> Vec<Line<'static>> {
+    preview_empty_messages_for(app.mode, &app.query, result_source_pending(app))
+        .into_iter()
+        .map(|message| {
+            Line::from(vec![
+                Span::styled("  ".to_string(), themed(app, Style::default().fg(Color::DarkGray))),
+                Span::styled(message, themed(app, Style::default().fg(Color::Gray))),
+            ])
+        })
+        .collect()
 }
 
 fn preview_match_terms(app: &AppState) -> Vec<String> {
@@ -353,12 +515,20 @@ fn render_bottom(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
         .constraints(constraints)
         .split(area);
 
-    let trace_lines = app
-        .trace_items
-        .iter()
-        .take(area.height.saturating_sub(2).max(1) as usize)
-        .map(|item| ListItem::new(code_item_line(app, item, false, None)))
-        .collect::<Vec<ListItem>>();
+    let visible_trace_height = chunks[0].height.saturating_sub(2).max(1) as usize;
+    let trace_lines = if app.trace_items.is_empty() {
+        trace_empty_messages()
+            .into_iter()
+            .take(visible_trace_height)
+            .map(|message| ListItem::new(empty_state_line(app, &message)))
+            .collect::<Vec<ListItem>>()
+    } else {
+        app.trace_items
+            .iter()
+            .take(visible_trace_height)
+            .map(|item| ListItem::new(code_item_line(app, item, false, None)))
+            .collect::<Vec<ListItem>>()
+    };
     let trace = List::new(trace_lines).block(
         Block::default()
             .title(format!(
@@ -452,7 +622,13 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         .wrap(Wrap { trim: false });
     frame.render_widget(session, left[0]);
 
-    let stack = list_from_strings(&snapshot.stack, left[1].height, "Stack", theme(app));
+    let stack = list_from_strings(
+        &snapshot.stack,
+        left[1].height,
+        "Stack",
+        debug_empty_messages(DebugEmptyPanel::Stack),
+        theme(app),
+    );
     frame.render_widget(stack, left[1]);
 
     let mut variable_lines = snapshot.variables.clone();
@@ -466,7 +642,13 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
     if let Some(error) = &snapshot.error {
         variable_lines.push(format!("error: {error}"));
     }
-    let variables = list_from_strings(&variable_lines, right[0].height, "Variables", theme(app));
+    let variables = list_from_strings(
+        &variable_lines,
+        right[0].height,
+        "Variables",
+        debug_empty_messages(DebugEmptyPanel::Variables),
+        theme(app),
+    );
     frame.render_widget(variables, right[0]);
 
     let mut event_lines = snapshot.events.clone();
@@ -483,60 +665,67 @@ fn render_debug_panel(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
             column
         ));
     }
-    let events = list_from_strings(&event_lines, right[1].height, "Events", theme(app));
+    let events = list_from_strings(
+        &event_lines,
+        right[1].height,
+        "Events",
+        debug_empty_messages(DebugEmptyPanel::Events),
+        theme(app),
+    );
     frame.render_widget(events, right[1]);
 }
 
-fn list_from_strings<'a>(values: &[String], area_height: u16, title: &'a str, theme: &TuiThemeConfig) -> List<'a> {
+fn list_from_strings<'a>(
+    values: &[String],
+    area_height: u16,
+    title: &'a str,
+    empty_messages: Vec<String>,
+    theme: &TuiThemeConfig,
+) -> List<'a> {
     let visible_height = area_height.saturating_sub(2).max(1) as usize;
-    let items = values
-        .iter()
-        .take(visible_height)
-        .map(|value| ListItem::new(highlight::debug_line(value, theme)))
-        .collect::<Vec<ListItem>>();
+    let items = if values.is_empty() {
+        empty_messages
+            .into_iter()
+            .take(visible_height)
+            .map(|message| ListItem::new(highlight::debug_line(&message, theme)))
+            .collect::<Vec<ListItem>>()
+    } else {
+        values
+            .iter()
+            .take(visible_height)
+            .map(|value| ListItem::new(highlight::debug_line(value, theme)))
+            .collect::<Vec<ListItem>>()
+    };
     List::new(items).block(Block::default().title(title).borders(Borders::ALL))
 }
 
 fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
-    let source = app
+    let pending_source = app
         .pending_source
         .as_ref()
-        .map(|(_, mode, query)| format!("{} '{}'", mode.short_label(), query))
-        .unwrap_or_else(|| "idle".to_string());
-    let lsp = app
-        .pending_lsp
-        .as_ref()
-        .map(|(_, label)| (*label).to_string())
-        .unwrap_or_else(|| "idle".to_string());
-    let dap = app
-        .pending_dap
-        .as_ref()
-        .map(|(_, label)| (*label).to_string())
-        .unwrap_or_else(|| "idle".to_string());
+        .map(|(_, mode, query)| activity_source_pending_label(*mode, query));
     let preview = app.preview_title();
-    let counts = format!(
-        "pins: {}  jumps: {}  trace: {}:{}  breakpoints: {}",
-        app.pinned_items.len(),
-        app.navigation.len(),
-        app.active_trace_session,
-        app.trace_view.label(),
-        app.breakpoints.len()
-    );
-    let mut text = vec![
-        highlight::activity_line("source", &source, Color::LightGreen, theme(app)),
-        highlight::activity_line("lsp", &lsp, Color::LightBlue, theme(app)),
-        highlight::activity_line("dap", &dap, Color::LightMagenta, theme(app)),
-        highlight::activity_line("preview", &preview, Color::LightCyan, theme(app)),
-        highlight::activity_line("status", &app.status, status_color(app.status_level), theme(app)),
-        highlight::activity_line("health", &app.health_summary(), Color::LightYellow, theme(app)),
-        Line::from(vec![
-            Span::styled(
-                "counts: ",
-                themed(app, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ),
-            Span::styled(counts, themed(app, Style::default().fg(Color::Gray))),
-        ]),
-    ];
+    let health = app.health_summary();
+    let ctx = ActivityContext {
+        layout: app.layout_preset,
+        mode: app.mode,
+        pending_source: pending_source.as_deref(),
+        pending_lsp: app.pending_lsp.as_ref().map(|(_, label)| *label),
+        pending_dap: app.pending_dap.as_ref().map(|(_, label)| *label),
+        pending_editor: app.pending_editor_open.is_some(),
+        preview: &preview,
+        status: &app.status,
+        health: &health,
+        pins: app.pinned_items.len(),
+        navigation: app.navigation.len(),
+        trace_session: &app.active_trace_session,
+        trace_view: app.trace_view.label(),
+        breakpoints: app.breakpoints.len(),
+    };
+    let mut text = activity_lines_for(ctx)
+        .into_iter()
+        .map(|line| activity_summary_line(app, &line))
+        .collect::<Vec<Line<'static>>>();
     if let Some(plan) = &app.startup_plan {
         let available = area.height.saturating_sub(2).saturating_sub(text.len() as u16) as usize;
         for line in crate::workspace::startup_plan_lines(plan).into_iter().take(available) {
@@ -549,71 +738,29 @@ fn render_activity(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-fn bottom_panel_height(preset: TuiLayoutPreset) -> u16 {
-    match preset {
-        TuiLayoutPreset::Balanced | TuiLayoutPreset::Search | TuiLayoutPreset::Semantic => 8,
-        TuiLayoutPreset::Debug => 12,
-        TuiLayoutPreset::Trace => 10,
+fn activity_summary_line(app: &AppState, line: &str) -> Line<'static> {
+    if let Some((label, value)) = line.split_once(':') {
+        return highlight::activity_line(
+            label,
+            value.trim_start(),
+            activity_label_color(label, app.status_level),
+            theme(app),
+        );
     }
+
+    highlight::debug_line(line, theme(app))
 }
 
-fn main_constraints(preset: TuiLayoutPreset) -> [Constraint; 3] {
-    match preset {
-        TuiLayoutPreset::Balanced => [
-            Constraint::Length(28),
-            Constraint::Percentage(42),
-            Constraint::Percentage(58),
-        ],
-        TuiLayoutPreset::Search => [
-            Constraint::Length(24),
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ],
-        TuiLayoutPreset::Debug => [
-            Constraint::Length(22),
-            Constraint::Percentage(34),
-            Constraint::Percentage(66),
-        ],
-        TuiLayoutPreset::Trace => [
-            Constraint::Length(26),
-            Constraint::Percentage(38),
-            Constraint::Percentage(62),
-        ],
-        TuiLayoutPreset::Semantic => [
-            Constraint::Length(24),
-            Constraint::Percentage(46),
-            Constraint::Percentage(54),
-        ],
+fn activity_label_color(label: &str, status_level: StatusLevel) -> Color {
+    match label {
+        "work" => Color::LightGreen,
+        "next" => Color::LightCyan,
+        "preview" => Color::LightMagenta,
+        "status" => status_color(status_level),
+        "saved" => Color::LightBlue,
+        "health" => Color::LightYellow,
+        _ => Color::Gray,
     }
-}
-
-fn bottom_constraints(preset: TuiLayoutPreset) -> [Constraint; 3] {
-    match preset {
-        TuiLayoutPreset::Balanced | TuiLayoutPreset::Search | TuiLayoutPreset::Semantic => [
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ],
-        TuiLayoutPreset::Debug => [
-            Constraint::Percentage(24),
-            Constraint::Percentage(52),
-            Constraint::Percentage(24),
-        ],
-        TuiLayoutPreset::Trace => [
-            Constraint::Percentage(48),
-            Constraint::Percentage(28),
-            Constraint::Percentage(24),
-        ],
-    }
-}
-
-fn result_projection_suffix(app: &AppState) -> String {
-    let filter = app.result_filter_label();
-    let group = app.result_group.label();
-    if filter == "none" && group == "none" {
-        return String::new();
-    }
-    format!(" filter={filter} group={group}")
 }
 
 fn render_query(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -629,16 +776,44 @@ fn render_query(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     } else {
         app.query_cursor
     };
-    let query = query_with_cursor(input, cursor, active);
+    let query_width = query_input_width(area.width, prompt, app.layout_preset, app.mode);
+    let query = query_with_cursor_for_width(input, cursor, active, query_width);
     let mut spans = vec![
         Span::styled(format!("{prompt}: "), themed(app, Style::default().fg(Color::Yellow))),
         Span::raw(query),
         Span::raw("    "),
     ];
-    spans.extend(shortcut_hint_spans(app));
+    spans.extend(source_tab_spans(app, area.width));
+    spans.push(Span::raw("    "));
+    spans.extend(shortcut_hint_spans(app, area.width, app.layout_preset, app.mode));
     let text = Line::from(spans);
     let paragraph = Paragraph::new(text).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
+}
+
+fn source_tab_spans(app: &AppState, width: u16) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, mode) in source_tab_modes(width, app.mode).iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                " ".to_string(),
+                themed(app, Style::default().fg(Color::DarkGray)),
+            ));
+        }
+        let label = mode.short_label();
+        if *mode == app.mode {
+            spans.push(Span::styled(
+                format!("[{label}]"),
+                selected_style(app, Color::Black, Color::Cyan),
+            ));
+        } else {
+            spans.push(Span::styled(
+                label.to_string(),
+                themed(app, Style::default().fg(Color::DarkGray)),
+            ));
+        }
+    }
+    spans
 }
 
 fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
@@ -646,6 +821,7 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppS
     frame.render_widget(Clear, popup);
 
     let matches = app.command_matches();
+    let show_descriptions = command_palette_show_descriptions(popup.width);
     let items = matches
         .iter()
         .enumerate()
@@ -656,7 +832,7 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppS
                 Style::default()
             };
             let category = command_category(command);
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("{:>2}. ", index + 1),
                     themed(app, Style::default().fg(Color::DarkGray)),
@@ -666,24 +842,23 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppS
                     themed(app, Style::default().fg(command_category_color(category))),
                 ),
                 Span::styled(*command, style),
-            ]))
+            ];
+            if show_descriptions {
+                spans.push(Span::styled(
+                    format!("  {}", command_description(command)),
+                    themed(app, Style::default().fg(Color::DarkGray)),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<ListItem>>();
-    let title = format!("Command Palette '{}'", app.command);
+    let title = command_palette_title(&app.command, popup.width);
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(list, popup);
 }
 
-fn shortcut_hint_spans(app: &AppState) -> Vec<Span<'static>> {
-    let hints = [
-        ("?", "help"),
-        ("/", "query"),
-        (":", "cmd"),
-        ("Tab", "source"),
-        ("gd/gr", "nav"),
-        ("F5/F10/F11", "dap"),
-        ("P", "preview"),
-    ];
+fn shortcut_hint_spans(app: &AppState, width: u16, layout: TuiLayoutPreset, mode: SourceMode) -> Vec<Span<'static>> {
+    let hints = shortcut_hints_for_context(width, layout, mode);
     let mut spans = Vec::new();
     for (index, (key, label)) in hints.iter().enumerate() {
         if index > 0 {
@@ -734,13 +909,92 @@ fn command_category_color(category: &str) -> Color {
     }
 }
 
-fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     let popup = centered_rect(area, 78, 72);
     frame.render_widget(Clear, popup);
-    let paragraph = Paragraph::new(HELP_OVERLAY_TEXT)
+    let paragraph = Paragraph::new(help_text(app))
         .block(Block::default().title("Help").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, popup);
+}
+
+fn help_text(app: &AppState) -> String {
+    let common = "\
+Common
+  /                 live query
+  enter or o        open selected location
+  tab / shift-tab   change source
+  j/k or arrows     move selection
+  :                 command palette
+  q / esc           close or quit
+";
+
+    let body = match app.layout_preset {
+        TuiLayoutPreset::Search => {
+            "\
+Find
+  source files/search/symbols  switch result source
+  gd / gr / gt / gi            definition / refs / type / impl
+  p / u                        pin / unpin
+  a                            bookmark selected location
+  layout trace/debug/balanced   show advanced panels
+"
+        }
+        TuiLayoutPreset::Debug => {
+            "\
+Debug
+  D / X                 debug source / run profile
+  F5/F6/F10/F11         continue / pause / next / step-in
+  shift-F11 / ctrl-F5   step-out / stop
+  break sync            sync TUI breakpoints to DAP
+  watch add <expr>      add watch expression
+"
+        }
+        TuiLayoutPreset::Trace => {
+            "\
+Trace
+  trace session <name>       switch trace session
+  trace view session/timeline/graph
+  trace semantic refs/def/incoming/outgoing
+  B                          add trace locations as breakpoints
+"
+        }
+        TuiLayoutPreset::Semantic => {
+            "\
+Semantic
+  gd / gr / gt / gi      definition / refs / type / impl
+  W / s / e              workspace symbols / document symbols / diagnostics
+  c / C / h              incoming / outgoing / hover
+  trace semantic <kind>  record semantic edges
+"
+        }
+        TuiLayoutPreset::Balanced => HELP_OVERLAY_TEXT,
+    };
+
+    if app.layout_preset == TuiLayoutPreset::Balanced {
+        body.to_string()
+    } else {
+        format!("fcs workbench\n\n{common}\n{body}")
+    }
+}
+
+fn command_description(command: &str) -> &'static str {
+    match command.split_whitespace().next().unwrap_or(command) {
+        "source" | "files" | "search" | "symbols" | "debug" => "switch source or view",
+        "query" => "set query text",
+        "layout" => "change panel layout",
+        "filter" => "narrow current results",
+        "group" => "group current results",
+        "preview" | "preview-lock" | "preview-up" | "preview-down" => "control preview",
+        "def" | "refs" | "type" | "impl" | "diag" | "incoming" | "outgoing" | "hover" => "semantic navigation",
+        "trace" => "record or inspect trace",
+        "dap" | "dap-smoke" | "dap-sync" | "watch" | "var" | "eval" | "break" => "debug action",
+        "pin" | "unpin" | "pins" => "manage pinned locations",
+        "open" => "open selected location",
+        "refresh" => "refresh current source",
+        "quit" => "exit TUI",
+        _ => "run action",
+    }
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -772,5 +1026,81 @@ fn anchored_popup(area: Rect, percent_x: u16, height: u16) -> Rect {
         y,
         width: width.min(area.width),
         height: height.min(area.height),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::config::Config;
+
+    use super::*;
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("fcs-render-{name}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&root).expect("create render smoke workspace");
+        fs::write(root.join("main.rs"), "fn main() {}\n").expect("write render smoke source");
+        root
+    }
+
+    fn render_to_text(app: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        terminal.draw(|frame| render(frame, app)).expect("render TUI");
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn render_smoke_covers_default_search_layout() {
+        let root = temp_workspace("search");
+        let app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("create app state");
+
+        let screen = render_to_text(&app, 100, 32);
+
+        assert!(screen.contains("fcs"));
+        assert!(screen.contains("Results files"));
+        assert!(screen.contains("Preview"));
+        assert!(screen.contains("QUERY"));
+        assert!(screen.contains("[files]"));
+    }
+
+    #[test]
+    fn render_smoke_covers_debug_layout_panels() {
+        let root = temp_workspace("debug");
+        let mut app = AppState::new(
+            Config::default(),
+            Some(root.to_string_lossy().to_string()),
+            Some(SourceMode::Debug),
+            None,
+            None,
+        )
+        .expect("create app state");
+        app.layout_preset = TuiLayoutPreset::Debug;
+        app.refresh().expect("refresh debug source");
+
+        let screen = render_to_text(&app, 104, 34);
+
+        assert!(screen.contains("Debug Task"));
+        assert!(screen.contains("Session"));
+        assert!(screen.contains("Stack"));
+        assert!(screen.contains("Variables"));
+        assert!(screen.contains("Activity"));
     }
 }

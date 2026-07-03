@@ -4,6 +4,7 @@ mod highlight;
 mod lsp_worker;
 mod preview_cache;
 mod render;
+mod render_model;
 mod sources;
 mod state;
 
@@ -33,6 +34,8 @@ use sources::{
 #[cfg(test)]
 use sources::{SourceRequest, SourceResponse};
 use state::{TuiPersistentState, TuiSavedBreakpoint, TuiSavedItem, TuiSavedLocation};
+
+const LIVE_QUERY_DEBOUNCE: Duration = Duration::from_millis(180);
 
 const HELP_OVERLAY_TEXT: &str = "\
 fcs workbench
@@ -230,6 +233,7 @@ struct AppState {
     mode: SourceMode,
     query: String,
     query_cursor: usize,
+    query_dirty_at: Option<Instant>,
     query_history: Vec<String>,
     query_history_index: Option<usize>,
     input_active: bool,
@@ -344,8 +348,8 @@ impl AppState {
     ) -> Result<Self> {
         let root = crate::workspace::resolve_root(directory.as_ref())?;
         let persisted_state = state::load(&root).unwrap_or_default().unwrap_or_default();
-        let mode = mode.or_else(|| persisted_state.mode()).unwrap_or(SourceMode::Search);
         let query = query.unwrap_or_else(|| persisted_state.query.clone());
+        let mode = initial_source_mode(mode, persisted_state.mode(), &query);
         let pinned_items = saved_items_to_code_items(persisted_state.pinned_items.clone());
         let navigation = saved_items_to_code_items(persisted_state.navigation.clone());
         let navigation_index = persisted_state
@@ -379,7 +383,7 @@ impl AppState {
             .layout_preset
             .as_deref()
             .and_then(TuiLayoutPreset::parse)
-            .unwrap_or(TuiLayoutPreset::Balanced);
+            .unwrap_or(TuiLayoutPreset::Search);
         let trace_view = persisted_state
             .trace_view
             .as_deref()
@@ -424,6 +428,7 @@ impl AppState {
             mode,
             query,
             query_cursor: 0,
+            query_dirty_at: None,
             query_history: crate::history::list()
                 .map(|entries| entries.into_iter().map(|entry| entry.query).collect())
                 .unwrap_or_default(),
@@ -477,6 +482,7 @@ impl AppState {
     }
 
     fn refresh(&mut self) -> Result<()> {
+        self.query_dirty_at = None;
         let selected_location = self.current_location();
         self.selected = 0;
         let results = match self.mode {
@@ -1055,24 +1061,26 @@ impl AppState {
             return Ok(());
         };
 
-        let metadata = crate::trace::TraceMetadata {
-            session: Some(self.active_trace_session.clone()),
-            parent: None,
-            branch: Some("tui".to_string()),
-            tags: vec!["tui".to_string(), "open".to_string()],
-            note: None,
-            status: None,
-            priority: None,
-        };
-        crate::trace::record_location_for_workspace_with_metadata(
-            &self.root,
-            &item.location,
-            item.display_text(),
-            "tui-open",
-            metadata,
-        )?;
+        if self.config.tui.trace_on_open {
+            let metadata = crate::trace::TraceMetadata {
+                session: Some(self.active_trace_session.clone()),
+                parent: None,
+                branch: Some("tui".to_string()),
+                tags: vec!["tui".to_string(), "open".to_string()],
+                note: None,
+                status: None,
+                priority: None,
+            };
+            crate::trace::record_location_for_workspace_with_metadata(
+                &self.root,
+                &item.location,
+                item.display_text(),
+                "tui-open",
+                metadata,
+            )?;
+            self.refresh_trace_items();
+        }
         self.push_navigation(item.clone());
-        self.refresh_trace_items();
         self.status = format!("Opening {}", item.display_text());
         self.pending_editor_open = Some(item);
         Ok(())
@@ -2455,7 +2463,7 @@ impl AppState {
     }
 
     fn complete_command(&mut self) {
-        let matches = palette_command_matches(&self.command);
+        let matches = self.command_matches();
         match matches.as_slice() {
             [] => self.set_warning(format!("No command match for '{}'", self.command)),
             [only] => {
@@ -2472,7 +2480,7 @@ impl AppState {
     }
 
     fn command_matches(&self) -> Vec<&'static str> {
-        palette_command_matches(&self.command)
+        palette_command_matches_for_context(&self.command, self)
     }
 
     fn is_pinned(&self, item: &CodeItem) -> bool {
@@ -2491,7 +2499,10 @@ impl AppState {
 
     fn handle_input_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Esc => self.input_active = false,
+            KeyCode::Esc => {
+                self.input_active = false;
+                self.query_dirty_at = None;
+            }
             KeyCode::Enter => {
                 self.input_active = false;
                 self.query_history_index = None;
@@ -2499,9 +2510,11 @@ impl AppState {
             }
             KeyCode::Backspace => {
                 self.delete_query_char_before_cursor();
+                self.schedule_live_query();
             }
             KeyCode::Delete => {
                 self.delete_query_char_at_cursor();
+                self.schedule_live_query();
             }
             KeyCode::Left => {
                 self.query_cursor = self.query_cursor.saturating_sub(1);
@@ -2517,23 +2530,54 @@ impl AppState {
             }
             KeyCode::Up => {
                 self.recall_query_history(1);
+                self.schedule_live_query();
             }
             KeyCode::Down => {
                 self.recall_query_history(-1);
+                self.schedule_live_query();
             }
             KeyCode::Char(ch) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'u' {
                     self.query.clear();
                     self.query_cursor = 0;
+                    self.schedule_live_query();
                 } else if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'w' {
                     self.delete_query_word_before_cursor();
+                    self.schedule_live_query();
                 } else {
                     self.insert_query_char(ch);
+                    self.schedule_live_query();
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn schedule_live_query(&mut self) {
+        if !self.config.tui.live_query {
+            return;
+        }
+        if matches!(self.mode, SourceMode::Search | SourceMode::Files | SourceMode::Symbols) {
+            self.query_dirty_at = Some(Instant::now());
+        }
+    }
+
+    fn refresh_live_query_if_due(&mut self) -> Result<()> {
+        if !self.input_active {
+            self.query_dirty_at = None;
+            return Ok(());
+        }
+        let Some(dirty_at) = self.query_dirty_at else {
+            return Ok(());
+        };
+        if dirty_at.elapsed() < LIVE_QUERY_DEBOUNCE {
+            return Ok(());
+        }
+
+        self.query_dirty_at = None;
+        self.query_history_index = None;
+        self.refresh()
     }
 
     fn insert_query_char(&mut self, ch: char) {
@@ -2702,6 +2746,28 @@ fn execute_script_assertion(app: &AppState, assertion: &str) -> Result<()> {
     if let Some(expected) = assertion.strip_prefix("status contains ") {
         return assert_contains("status", &app.status, expected.trim());
     }
+    if let Some(expected) = assertion.strip_prefix("status-level ") {
+        return assert_equal("status-level", status_level_label(app.status_level), expected.trim());
+    }
+    if assertion == "query empty" {
+        return assert_equal("query", &app.query, "");
+    }
+    if let Some(expected) = assertion.strip_prefix("query contains ") {
+        return assert_contains("query", &app.query, expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("query ") {
+        return assert_equal("query", &app.query, expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("preview-title contains ") {
+        return assert_contains("preview-title", &app.preview_title(), expected.trim());
+    }
+    if let Some(expected) = assertion.strip_prefix("preview-message contains ") {
+        let message = app
+            .preview_window_for_current(16)
+            .message
+            .unwrap_or_else(|| "none".to_string());
+        return assert_contains("preview-message", &message, expected.trim());
+    }
     if let Some(expected) = assertion.strip_prefix("selected contains ") {
         let selected = app
             .current_item()
@@ -2712,6 +2778,10 @@ fn execute_script_assertion(app: &AppState, assertion: &str) -> Result<()> {
     if let Some(expected) = assertion.strip_prefix("mode ") {
         let expected = parse_mode(Some(expected.trim()))?;
         return assert_equal("mode", app.mode.short_label(), expected.short_label());
+    }
+    if let Some(expected) = assertion.strip_prefix("source ") {
+        let expected = parse_mode(Some(expected.trim()))?;
+        return assert_equal("source", app.mode.short_label(), expected.short_label());
     }
     if let Some(expected) = assertion.strip_prefix("layout ") {
         let expected = TuiLayoutPreset::parse(expected.trim())
@@ -3000,6 +3070,7 @@ fn display_script_values(values: &[String]) -> String {
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut AppState) -> Result<()> {
     while !app.should_quit {
+        app.refresh_live_query_if_due()?;
         app.poll_source_worker();
         app.poll_lsp_worker();
         app.poll_dap_worker();
@@ -3758,6 +3829,131 @@ fn palette_command_matches(command: &str) -> Vec<&'static str> {
     scored.into_iter().take(8).map(|(_, name)| name).collect()
 }
 
+fn palette_command_matches_for_context(command: &str, app: &AppState) -> Vec<&'static str> {
+    let command = command.trim();
+    if command.is_empty() {
+        return contextual_palette_defaults(app);
+    }
+
+    let mut scored = palette_command_names()
+        .iter()
+        .filter_map(|name| {
+            fuzzy_score(name, command).map(|score| {
+                let boost = palette_context_boost(name, app);
+                (score.saturating_sub(boost), *name)
+            })
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by_key(|(score, name)| (*score, *name));
+    scored.into_iter().take(8).map(|(_, name)| name).collect()
+}
+
+fn contextual_palette_defaults(app: &AppState) -> Vec<&'static str> {
+    contextual_palette_defaults_for(app.layout_preset, app.mode)
+}
+
+fn contextual_palette_defaults_for(layout: TuiLayoutPreset, mode: SourceMode) -> Vec<&'static str> {
+    let defaults: &[&str] = match layout {
+        TuiLayoutPreset::Debug => &[
+            "run",
+            "dap start",
+            "dap continue",
+            "dap next",
+            "dap sync",
+            "watch add ",
+            "break sync",
+            "layout search",
+        ],
+        TuiLayoutPreset::Trace => &[
+            "trace current",
+            "trace view timeline",
+            "trace view graph",
+            "trace semantic refs",
+            "trace breakpoint",
+            "source symbols",
+            "layout search",
+            "status health",
+        ],
+        TuiLayoutPreset::Semantic => &[
+            "def",
+            "refs",
+            "type",
+            "impl",
+            "symbols",
+            "diag",
+            "trace semantic refs",
+            "layout search",
+        ],
+        TuiLayoutPreset::Balanced => &[
+            "open",
+            "query ",
+            "source files",
+            "source symbols",
+            "layout search",
+            "trace",
+            "debug",
+            "status health",
+        ],
+        TuiLayoutPreset::Search => match mode {
+            SourceMode::Files => &[
+                "open",
+                "query ",
+                "source symbols",
+                "source search",
+                "pin",
+                "trace",
+                "layout trace",
+                "layout debug",
+            ],
+            SourceMode::Symbols | SourceMode::References | SourceMode::Diagnostics => &[
+                "open",
+                "refs",
+                "def",
+                "diag",
+                "pin",
+                "trace semantic refs",
+                "source files",
+                "layout semantic",
+            ],
+            _ => &[
+                "open",
+                "query ",
+                "source files",
+                "source symbols",
+                "refs",
+                "def",
+                "pin",
+                "trace",
+            ],
+        },
+    };
+    defaults.to_vec()
+}
+
+fn palette_context_boost(command: &str, app: &AppState) -> usize {
+    let category = command.split_whitespace().next().unwrap_or(command);
+    match app.layout_preset {
+        TuiLayoutPreset::Debug if matches!(category, "dap" | "watch" | "var" | "eval" | "break" | "run") => 24,
+        TuiLayoutPreset::Trace if category == "trace" => 24,
+        TuiLayoutPreset::Semantic
+            if matches!(
+                category,
+                "def" | "refs" | "type" | "impl" | "symbols" | "diag" | "incoming" | "outgoing" | "hover"
+            ) =>
+        {
+            24
+        }
+        TuiLayoutPreset::Search if matches!(category, "open" | "query" | "source" | "pin" | "trace") => 20,
+        _ => match app.mode {
+            SourceMode::Debug if matches!(category, "dap" | "watch" | "var" | "eval" | "break" | "run") => 16,
+            SourceMode::Trace if category == "trace" => 16,
+            SourceMode::Files if matches!(category, "open" | "source" | "query") => 12,
+            SourceMode::Symbols | SourceMode::References if matches!(category, "def" | "refs" | "trace") => 12,
+            _ => 0,
+        },
+    }
+}
+
 fn command_hint_text(command: &str) -> String {
     let matches = palette_command_matches(command);
     if matches.is_empty() {
@@ -3782,6 +3978,22 @@ fn compact_status(text: &str) -> String {
     value
 }
 
+fn initial_source_mode(
+    explicit_mode: Option<SourceMode>,
+    persisted_mode: Option<SourceMode>,
+    query: &str,
+) -> SourceMode {
+    if let Some(mode) = explicit_mode {
+        return mode;
+    }
+
+    match persisted_mode {
+        Some(SourceMode::Search) if query.trim().is_empty() => SourceMode::Files,
+        Some(mode) => mode,
+        None => SourceMode::Files,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3796,6 +4008,27 @@ mod tests {
     fn parse_mode_accepts_aliases() {
         assert_eq!(parse_mode(Some("symbol")).unwrap(), SourceMode::Symbols);
         assert_eq!(parse_mode(Some("refs")).unwrap(), SourceMode::References);
+    }
+
+    #[test]
+    fn initial_mode_prefers_useful_file_browsing() {
+        assert_eq!(initial_source_mode(None, None, ""), SourceMode::Files);
+        assert_eq!(
+            initial_source_mode(None, Some(SourceMode::Search), ""),
+            SourceMode::Files
+        );
+        assert_eq!(
+            initial_source_mode(None, Some(SourceMode::Search), "TODO"),
+            SourceMode::Search
+        );
+        assert_eq!(
+            initial_source_mode(Some(SourceMode::Search), Some(SourceMode::Files), ""),
+            SourceMode::Search
+        );
+        assert_eq!(
+            initial_source_mode(None, Some(SourceMode::Symbols), ""),
+            SourceMode::Symbols
+        );
     }
 
     #[test]
@@ -3865,6 +4098,22 @@ mod tests {
         assert!(command_help_text().contains("watch add/del/clear/refresh"));
         assert!(command_help_text().contains("layout search/debug/trace/semantic"));
         assert!(command_help_text().contains("trace view/session/current/sessions/semantic"));
+    }
+
+    #[test]
+    fn contextual_palette_defaults_follow_workspace_focus() {
+        let search_defaults = contextual_palette_defaults_for(TuiLayoutPreset::Search, SourceMode::Files);
+        assert_eq!(search_defaults.first(), Some(&"open"));
+        assert!(search_defaults.contains(&"source symbols"));
+        assert!(search_defaults.contains(&"layout debug"));
+
+        let debug_defaults = contextual_palette_defaults_for(TuiLayoutPreset::Debug, SourceMode::Debug);
+        assert_eq!(debug_defaults.first(), Some(&"run"));
+        assert!(debug_defaults.contains(&"dap sync"));
+
+        let trace_defaults = contextual_palette_defaults_for(TuiLayoutPreset::Trace, SourceMode::Trace);
+        assert_eq!(trace_defaults.first(), Some(&"trace current"));
+        assert!(trace_defaults.contains(&"trace view graph"));
     }
 
     #[test]

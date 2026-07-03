@@ -84,6 +84,20 @@ assert results >= 1
 assert breakpoints >= 1
 assert pending none
 EOF
+rtk tee "$SMOKE_ROOT/tui-default.fcs" >/dev/null <<'EOF'
+assert source files
+assert layout search
+assert query empty
+assert status-level info
+assert pending none
+assert results >= 1
+assert preview-title contains Preview
+query __fcs_no_match__
+assert query __fcs_no_match__
+assert results = 0
+assert preview-message contains No selection
+assert pending none
+EOF
 rtk tee "$SMOKE_ROOT/semantic-targets.txt" >/dev/null <<EOF
 $SMOKE_ROOT/main.c:8:5
 $SMOKE_ROOT/main.c:4:2
@@ -102,6 +116,7 @@ rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs --help
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs complete bash >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs complete zsh >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs tui --help
+rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs tui-script "$SMOKE_ROOT/tui-default.fcs" "$SMOKE_ROOT" --format json --step-timeout-ms 10000 >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs tui-script "$SMOKE_ROOT/tui-script.fcs" "$SMOKE_ROOT" --mode symbols --query main --format json --step-timeout-ms 10000 >/dev/null
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace status
 rtk env XDG_CACHE_HOME="$XDG_CACHE_HOME" target/debug/fcs workspace plan
