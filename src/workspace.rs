@@ -401,15 +401,15 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
             goal: "Start from a crash location or suspicious trace entry, build evidence, then launch a DAP session"
                 .to_string(),
             commands: vec![
-                format!("fcs workspace plan {root_arg}"),
-                format!("fcs query 'source:trace tag:crash status:open' {root_arg} --source trace"),
+                format!("fcs project plan {root_arg}"),
+                format!("fcs find query 'source:trace tag:crash status:open' {root_arg} --source trace"),
                 format!("fcs trace insights default --directory {root_arg}"),
-                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
-                "fcs tui --mode debug".to_string(),
+                format!("fcs debug dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                "fcs ui open --mode debug".to_string(),
             ],
             notes: vec![
                 "Use trace status/priority to keep only active evidence in the loop".to_string(),
-                "Switch to `dap adapter-session auto` after a profile has stable breakpoints".to_string(),
+                "Switch to `debug dap adapter-session auto` after a profile has stable breakpoints".to_string(),
             ],
         },
         DiagnosticWorkflow {
@@ -417,15 +417,16 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
             goal: "Find a symbol quickly, inspect incoming/outgoing relationships, then pin relevant call sites"
                 .to_string(),
             commands: vec![
-                format!("fcs query 'name:<symbol> source:index' {root_arg} --source all"),
-                "fcs refs <path:line> --directory <workspace>".to_string(),
-                "fcs incoming <path:line> --directory <workspace>".to_string(),
-                "fcs outgoing <path:line> --directory <workspace>".to_string(),
-                "fcs graph semantic <path:line> incoming --depth 2 --fanout 20".to_string(),
+                format!("fcs find query 'name:<symbol> source:index' {root_arg} --source all"),
+                "fcs code refs <path:line> --directory <workspace>".to_string(),
+                "fcs code incoming <path:line> --directory <workspace>".to_string(),
+                "fcs code outgoing <path:line> --directory <workspace>".to_string(),
+                "fcs code graph semantic <path:line> --relation incoming --depth 2 --fanout 20".to_string(),
             ],
             notes: vec![
                 format!("Semantic calls use {provider}; index-backed query remains useful when LSP is unavailable"),
-                "Prefer `query source:index` for broad symbol discovery before opening semantic call trees".to_string(),
+                "Prefer `find query --source index` for broad symbol discovery before opening semantic call trees"
+                    .to_string(),
             ],
         },
         DiagnosticWorkflow {
@@ -433,9 +434,9 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
             goal: "Move from compiler/LSP diagnostics to surrounding symbols, references, and a focused trace report"
                 .to_string(),
             commands: vec![
-                format!("fcs lsp health {root_arg}"),
-                "fcs diag <file> --directory <workspace>".to_string(),
-                "fcs lsp code-actions <path:line> --directory <workspace>".to_string(),
+                format!("fcs code health {root_arg}"),
+                "fcs code diag <file> --directory <workspace>".to_string(),
+                "fcs code actions <path:line> --directory <workspace>".to_string(),
                 "fcs trace add <path:line> --kind evidence --tag diagnostic".to_string(),
                 "fcs trace structured default --directory <workspace>".to_string(),
             ],
@@ -450,9 +451,9 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
             commands: vec![
                 "fcs trace sessions".to_string(),
                 format!("fcs trace replay-plan default --directory {root_arg} --program {default_debug_binary}"),
-                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
-                "fcs dap adapters".to_string(),
-                format!("fcs dap adapter-session auto {default_debug_binary} --cwd {root_arg}"),
+                format!("fcs debug dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                "fcs debug dap adapters".to_string(),
+                format!("fcs debug dap adapter-session auto {default_debug_binary} --cwd {root_arg}"),
             ],
             notes: vec![
                 "Adapter discovery is best-effort and never installs tools automatically".to_string(),
@@ -464,16 +465,20 @@ pub fn diagnostic_workflows(root: &Path, config: &crate::config::Config) -> Resu
             goal: "Keep a tight loop from query results to trace evidence, DAP breakpoints, and the debug TUI"
                 .to_string(),
             commands: vec![
-                format!("fcs query '@functions name:<symbol>' {root_arg} --source auto --mode fuzzy --score-explain"),
+                format!(
+                    "fcs find query '@functions name:<symbol>' {root_arg} --source auto --mode fuzzy --score-explain"
+                ),
                 "fcs trace add <path:line> --kind hypothesis --tag debug --session default".to_string(),
-                format!("fcs graph semantic <path:line> outgoing --directory {root_arg} --fallback index"),
-                "fcs dap templates --format text".to_string(),
-                format!("fcs dap from-trace default {default_debug_binary} --directory {root_arg}"),
-                format!("fcs tui --mode debug --directory {root_arg}"),
+                format!(
+                    "fcs code graph semantic <path:line> --relation outgoing --directory {root_arg} --fallback index"
+                ),
+                "fcs debug dap templates --format text".to_string(),
+                format!("fcs debug dap from-trace default {default_debug_binary} --directory {root_arg}"),
+                format!("fcs ui open --mode debug --directory {root_arg}"),
             ],
             notes: vec![
                 "Repeat query with `--mode exact` or `--mode regex` when fuzzy results are too broad".to_string(),
-                "Use `graph semantic --fallback index` to keep moving when LSP is unavailable".to_string(),
+                "Use `code graph semantic --fallback index` to keep moving when LSP is unavailable".to_string(),
                 "The debug panel can refresh watches and variables without leaving the search loop".to_string(),
             ],
         },
@@ -570,7 +575,7 @@ pub fn advise_with_lsp_commands(
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Info,
             message: "Workspace cache has not been initialized".to_string(),
-            action: Some("Run: rtk cargo run -- workspace init".to_string()),
+            action: Some("Run: rtk cargo run -- project init".to_string()),
         });
     }
 
@@ -578,7 +583,7 @@ pub fn advise_with_lsp_commands(
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Info,
             message: "Workspace metadata cache is missing".to_string(),
-            action: Some("Run: rtk cargo run -- workspace init".to_string()),
+            action: Some("Run: rtk cargo run -- project init".to_string()),
         });
     }
 
@@ -586,21 +591,21 @@ pub fn advise_with_lsp_commands(
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Info,
             message: "Project-level fcs config is missing".to_string(),
-            action: Some("Run: rtk cargo run -- workspace config".to_string()),
+            action: Some("Run: rtk cargo run -- project config".to_string()),
         });
     } else if let Some(project_config) = project_config.as_ref() {
         if project_config.actions.is_empty() && !detection.suggested_actions.is_empty() {
             advice.push(WorkspaceAdvice {
                 level: AdviceLevel::Info,
                 message: "Project config has no actions for the detected project type".to_string(),
-                action: Some("Run: rtk cargo run -- workspace config --force".to_string()),
+                action: Some("Run: rtk cargo run -- project config --force".to_string()),
             });
         }
         if project_config.project_type == "generic" && detection.project_type != "generic" {
             advice.push(WorkspaceAdvice {
                 level: AdviceLevel::Info,
                 message: "Project config was generated before project auto-detection metadata".to_string(),
-                action: Some("Run: rtk cargo run -- workspace config --force".to_string()),
+                action: Some("Run: rtk cargo run -- project config --force".to_string()),
             });
         }
     }
@@ -609,7 +614,7 @@ pub fn advise_with_lsp_commands(
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Info,
             message: "Code index cache is missing".to_string(),
-            action: Some("Run: rtk cargo run -- index build".to_string()),
+            action: Some("Run: rtk cargo run -- project index build".to_string()),
         });
     }
 
@@ -704,13 +709,13 @@ fn push_index_shard_advice(advice: &mut Vec<WorkspaceAdvice>, root: &Path, symbo
                 "Large index has {} symbols without shard cache",
                 index_status.symbol_count
             ),
-            action: Some("Run: rtk cargo run -- index shards --write".to_string()),
+            action: Some("Run: rtk cargo run -- project index shards --write".to_string()),
         });
     } else if shard_status.stale {
         advice.push(WorkspaceAdvice {
             level: AdviceLevel::Warning,
             message: format!("Index shard cache is stale: {}", shard_status.reason),
-            action: Some("Run: rtk cargo run -- index shards --write".to_string()),
+            action: Some("Run: rtk cargo run -- project index shards --write".to_string()),
         });
     } else {
         advice.push(WorkspaceAdvice {
@@ -719,7 +724,7 @@ fn push_index_shard_advice(advice: &mut Vec<WorkspaceAdvice>, root: &Path, symbo
                 "Index shard cache is available: {} shard(s), {} symbol(s)",
                 shard_status.shard_count, shard_status.symbol_count
             ),
-            action: Some("Use: rtk cargo run -- index shard-query <query> --kind symbols".to_string()),
+            action: Some("Use: rtk cargo run -- project index shard-query <query> --kind symbols".to_string()),
         });
     }
 }
@@ -1324,7 +1329,7 @@ fn cache_write_check(cache_dir: &Path) -> WorkspaceHealthCheck {
 
 fn health_check_action(check: &WorkspaceHealthCheck) -> Option<String> {
     match check.name.as_str() {
-        "cache-dir" | "cache-write" => Some("Run: rtk cargo run -- workspace init".to_string()),
+        "cache-dir" | "cache-write" => Some("Run: rtk cargo run -- project init".to_string()),
         "log-dir" => Some("Run: rtk mkdir -p .fcs/logs".to_string()),
         "latency-smoke" => Some("Run: rtk scripts/smoke.sh".to_string()),
         _ => None,
@@ -1582,9 +1587,9 @@ mod tests {
         let mut advice = Vec::new();
         push_index_shard_advice(&mut advice, &temp_dir, 1);
 
-        assert!(advice.iter().any(
-            |item| item.action.as_deref() == Some("Use: rtk cargo run -- index shard-query <query> --kind symbols")
-        ));
+        assert!(advice.iter().any(|item| {
+            item.action.as_deref() == Some("Use: rtk cargo run -- project index shard-query <query> --kind symbols")
+        }));
 
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::remove_dir_all(&cache_dir);
@@ -1683,9 +1688,9 @@ mod tests {
             .iter()
             .any(|workflow| workflow.name == "trace-to-debug-profile"));
         assert!(workflows.iter().any(|workflow| workflow.name == "search-to-debug-loop"));
-        assert!(text.contains("fcs dap adapters"));
+        assert!(text.contains("fcs debug dap adapters"));
         assert!(text.contains("fcs trace replay-plan"));
-        assert!(text.contains("fcs graph semantic"));
+        assert!(text.contains("fcs code graph semantic"));
         assert!(text.contains("--fallback index"));
 
         let _ = fs::remove_dir_all(&temp_dir);

@@ -602,7 +602,9 @@ fn slow_index_query_hint(report: &BenchReport) -> String {
         Ok(status) if status.exists && !status.stale => {
             "use index shard-query with a top-level path hint for large symbol tables"
         }
-        Ok(status) if status.exists && status.stale => "refresh stale index shards with `fcs index shards --write`",
+        Ok(status) if status.exists && status.stale => {
+            "refresh stale index shards with `fcs project index shards --write`"
+        }
         _ => "build index shards for large symbol tables",
     };
 
@@ -618,18 +620,18 @@ fn index_sidecar_query_hint(root: &Path) -> Option<&'static str> {
     };
 
     if status.healthy {
-        return Some("run `fcs index profile` to confirm mmap/jsonl sidecar path and row-level latency");
+        return Some("run `fcs project index profile` to confirm mmap/jsonl sidecar path and row-level latency");
     }
     if status.symbols_mmap.corrupt || status.symbols_jsonl.corrupt {
-        return Some("repair corrupt symbol sidecars with `fcs index refresh` before profiling");
+        return Some("repair corrupt symbol sidecars with `fcs project index refresh` before profiling");
     }
     if status.symbols_mmap.stale || status.symbols_jsonl.stale {
-        return Some("refresh stale symbol sidecars with `fcs index refresh` before profiling");
+        return Some("refresh stale symbol sidecars with `fcs project index refresh` before profiling");
     }
     if !status.symbols_mmap.exists || !status.symbols_jsonl.exists {
-        return Some("create missing symbol sidecars with `fcs index refresh` before profiling");
+        return Some("create missing symbol sidecars with `fcs project index refresh` before profiling");
     }
-    Some("run `fcs index verify` and `fcs index profile` to inspect sidecar health")
+    Some("run `fcs project index verify` and `fcs project index profile` to inspect sidecar health")
 }
 
 #[cfg(test)]

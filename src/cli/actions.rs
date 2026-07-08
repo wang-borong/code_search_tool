@@ -13,8 +13,9 @@ use super::args::{
     resolve_path_for_root,
 };
 use super::defs::{
-    BenchAction, Cli, Commands, DapAction, DebugAction, GraphAction, HistoryAction, IgnoreAction, IndexAction,
-    LspAction, PluginAction, ProjectAction, ServiceAction, TraceAction, WorkspaceAction, WorkspaceProfileAction,
+    BenchAction, Cli, CodeAction, Commands, DapAction, DebugAction, DevAction, FindAction, GraphAction, HistoryAction,
+    IgnoreAction, IndexAction, PluginAction, ProjectAction, ProjectGroupAction, ServiceAction, TraceAction, UiAction,
+    WorkspaceProfileAction,
 };
 use super::picker::run_code_item_picker;
 use fcs::core::{CodeItem, Location};
@@ -163,7 +164,7 @@ fn handle_workspace_status(directory: Option<&String>, config: &fcs::config::Con
 fn handle_workspace_init(directory: Option<&String>, config: &fcs::config::Config) -> Result<(), AppError> {
     let status = fcs::workspace::init(directory, &config.lsp.clangd_command)?;
     print_workspace_status(&status);
-    println!("Initialized fcs workspace cache: {}", status.cache_dir.display());
+    println!("Initialized fcs project cache: {}", status.cache_dir.display());
     Ok(())
 }
 
@@ -617,7 +618,7 @@ fn handle_index_doctor(directory: Option<&String>) -> Result<(), AppError> {
         || status.changed_tracked_files > 0
         || status.missing_tracked_files > 0
     {
-        println!("action: fcs index build {}", root.display());
+        println!("action: fcs project index build {}", root.display());
     } else {
         println!("action: none");
     }
@@ -1092,20 +1093,23 @@ fn handle_index_verify(directory: Option<&String>, format: &str) -> Result<(), A
     let mut recommendations = Vec::new();
 
     if !status.exists {
-        recommendations.push("run `fcs index build` to create the main index".to_string());
+        recommendations.push("run `fcs project index build` to create the main index".to_string());
     } else if status.is_corrupt {
-        recommendations.push("run `fcs index repair` to rebuild corrupt index data".to_string());
+        recommendations.push("run `fcs project index repair` to rebuild corrupt index data".to_string());
     } else if status.is_stale {
-        recommendations.push("run `fcs index refresh` or `fcs index repair` to refresh stale index data".to_string());
+        recommendations.push(
+            "run `fcs project index refresh` or `fcs project index repair` to refresh stale index data".to_string(),
+        );
     }
     if status.exists && !status.is_stale && !status.is_corrupt && !sidecar_status.healthy {
-        recommendations.push("run `fcs index refresh` to recreate missing or corrupt sidecar cache files".to_string());
+        recommendations
+            .push("run `fcs project index refresh` to recreate missing or corrupt sidecar cache files".to_string());
     }
     if shard_status.exists && shard_status.stale {
-        recommendations.push("run `fcs index shards --write` to refresh stale shard cache files".to_string());
+        recommendations.push("run `fcs project index shards --write` to refresh stale shard cache files".to_string());
     } else if !shard_status.exists && status.symbol_count > 5000 {
         recommendations
-            .push("run `fcs index shards --write` to add shard cache files for this large index".to_string());
+            .push("run `fcs project index shards --write` to add shard cache files for this large index".to_string());
     }
     if recommendations.is_empty() {
         recommendations.push("index cache is healthy".to_string());
@@ -3466,7 +3470,8 @@ fn handle_dap_doctor(directory: Option<&String>, name: Option<&String>, format: 
         .collect::<Vec<DapProfileDiagnostic>>();
     let mut recommendations = Vec::new();
     if diagnostics.is_empty() {
-        recommendations.push("create a profile with `fcs dap save-profile` or `fcs dap from-trace`".to_string());
+        recommendations
+            .push("create a profile with `fcs debug dap save-profile` or `fcs debug dap from-trace`".to_string());
     }
     if available_adapters.is_empty() {
         recommendations
@@ -4361,141 +4366,57 @@ fn handle_plugin_plan(input: PluginRunInput<'_>) -> Result<(), AppError> {
 
 pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<(), AppError> {
     match command {
-        Commands::Ignore { action, directory } => {
-            let ignore_path = resolve_ignore_file(directory.as_ref());
-            let ignore_file = IgnoreFile::new(ignore_path.clone());
-            match action {
-                IgnoreAction::Init => {
-                    ignore_file.init(true)?;
-                    println!("Initialized ignore file at: {}", ignore_path.display());
-                }
-                IgnoreAction::Add { patterns } => {
-                    if patterns.is_empty() {
-                        return Err(AppError::General("No patterns specified to add".to_string()));
-                    }
-                    ignore_file.add(&patterns)?;
-                    println!("Added patterns to ignore file at: {}", ignore_path.display());
-                }
-                IgnoreAction::Remove { patterns } => {
-                    if patterns.is_empty() {
-                        return Err(AppError::General("No patterns specified to remove".to_string()));
-                    }
-                    ignore_file.remove(&patterns)?;
-                    println!("Removed patterns from ignore file at: {}", ignore_path.display());
-                }
-                IgnoreAction::List => {
-                    let patterns = ignore_file.list()?;
-                    if patterns.is_empty() {
-                        println!("No ignore patterns in: {}", ignore_path.display());
-                    } else {
-                        for p in &patterns {
-                            println!("{p}");
-                        }
-                    }
-                }
-            }
-        }
-        Commands::Preview { target } => {
-            let (path, line, height) = parse_preview_arg(&target)?;
-            let result = make_result(&path, line, "");
-            fcs::preview::preview(&result, height)?;
-        }
-        Commands::Tui {
-            directory,
-            mode,
-            query,
-            debug_binary,
-        } => {
-            fcs::tui::run(config, directory, mode, query, debug_binary)?;
-        }
-        Commands::TuiScript {
-            script,
-            directory,
-            mode,
-            query,
-            debug_binary,
-            format,
-            step_timeout_ms,
-            persist,
-        } => {
-            let summary = fcs::tui::run_script(fcs::tui::TuiScriptOptions {
-                config,
+        Commands::Ui { action } => match action {
+            UiAction::Open {
                 directory,
                 mode,
                 query,
                 debug_binary,
-                script: PathBuf::from(script),
-                step_timeout: Duration::from_millis(step_timeout_ms),
+            } => {
+                fcs::tui::run(config, directory, mode, query, debug_binary)?;
+            }
+            UiAction::Script {
+                script,
+                directory,
+                mode,
+                query,
+                debug_binary,
+                format,
+                step_timeout_ms,
                 persist,
-            })?;
-            print!("{}", fcs::tui::format_script_summary(&summary, &format)?);
-        }
-        Commands::Workspace { action } => match action {
-            WorkspaceAction::Status { directory } => {
-                handle_workspace_status(directory.as_ref(), &config)?;
-            }
-            WorkspaceAction::Init { directory } => {
-                handle_workspace_init(directory.as_ref(), &config)?;
-            }
-            WorkspaceAction::Config { directory, force } => {
-                let path = fcs::workspace::write_project_config(directory.as_ref(), force)?;
-                println!("Wrote project config: {}", path.display());
-            }
-            WorkspaceAction::ConfigMigrate { directory, dry_run } => {
-                handle_workspace_config_migrate(directory.as_ref(), dry_run)?;
-            }
-            WorkspaceAction::Profile { action } => {
-                handle_workspace_profile(action)?;
-            }
-            WorkspaceAction::ConfigDoctor { directory, strict } => {
-                handle_workspace_config_doctor(directory.as_ref(), strict, &config)?;
-            }
-            WorkspaceAction::ConfigSchema { format } => {
-                handle_workspace_config_schema(&format)?;
-            }
-            WorkspaceAction::Advise { directory } => {
-                handle_workspace_advise(directory.as_ref(), &config)?;
-            }
-            WorkspaceAction::Plan { directory } => {
-                handle_workspace_plan(directory.as_ref(), &config)?;
-            }
-            WorkspaceAction::Detect { directory } => {
-                handle_workspace_detect(directory.as_ref())?;
-            }
-            WorkspaceAction::Doctor { directory } => {
-                handle_workspace_advise(directory.as_ref(), &config)?;
-            }
-            WorkspaceAction::DoctorBundle { directory, format, out } => {
-                handle_workspace_doctor_bundle(directory.as_ref(), &format, out.as_ref(), &config)?;
-            }
-            WorkspaceAction::Workflows { directory, format } => {
-                handle_workspace_workflows(directory.as_ref(), &format, &config)?;
+            } => {
+                let summary = fcs::tui::run_script(fcs::tui::TuiScriptOptions {
+                    config,
+                    directory,
+                    mode,
+                    query,
+                    debug_binary,
+                    script: PathBuf::from(script),
+                    step_timeout: Duration::from_millis(step_timeout_ms),
+                    persist,
+                })?;
+                print!("{}", fcs::tui::format_script_summary(&summary, &format)?);
             }
         },
-        Commands::Service { action } => match action {
-            ServiceAction::Start {
+        Commands::Find { action } => match action {
+            FindAction::Text { pattern, paths, option } => {
+                handle_search(&pattern, &paths, &option, &config)?;
+            }
+            FindAction::Files {
                 directory,
-                interval_ms,
-                max_cycles,
-                foreground,
+                query,
                 option,
             } => {
-                handle_service_start(
-                    directory.as_ref(),
-                    interval_ms,
-                    max_cycles,
-                    foreground,
-                    &option,
-                    &config,
-                )?;
+                handle_files(directory.as_ref(), query.as_ref(), &option, &config)?;
             }
-            ServiceAction::Status { directory } => {
-                handle_service_status(directory.as_ref())?;
+            FindAction::Symbols {
+                directory,
+                query,
+                option,
+            } => {
+                handle_symbols(directory.as_ref(), query.as_ref(), &option, &config)?;
             }
-            ServiceAction::Snapshot { directory, format } => {
-                handle_service_snapshot(directory.as_ref(), &format, &config)?;
-            }
-            ServiceAction::Query {
+            FindAction::Query {
                 expression,
                 directory,
                 source,
@@ -4506,180 +4427,326 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 explain,
                 timing,
                 warn_ms,
+                save,
+                use_query,
+                list_saved,
+                delete_saved,
                 score_explain,
+                profile,
             } => {
                 handle_query(
                     QueryRequest {
-                        expression: Some(&expression),
+                        expression: expression.as_deref(),
                         directory: directory.as_ref(),
-                        source: Some(&source),
-                        mode: Some(&mode),
+                        source: source.as_ref(),
+                        mode: mode.as_ref(),
                         macros: &macros,
                         limit,
                         format: &format,
                         explain,
                         timing,
                         warn_ms,
-                        save: None,
-                        use_query: None,
-                        list_saved: false,
-                        delete_saved: None,
+                        save: save.as_ref(),
+                        use_query: use_query.as_ref(),
+                        list_saved,
+                        delete_saved: delete_saved.as_ref(),
                         score_explain,
-                        profile: false,
+                        profile,
                     },
                     &config,
                 )?;
             }
-            ServiceAction::Stop { directory } => {
-                handle_service_stop(directory.as_ref())?;
+            FindAction::Preview { target } => {
+                let (path, line, height) = parse_preview_arg(&target)?;
+                let result = make_result(&path, line, "");
+                fcs::preview::preview(&result, height)?;
             }
         },
-        Commands::Index { action } => match action {
-            IndexAction::Status { directory } => {
-                handle_index_status(directory.as_ref())?;
+        Commands::Project { action } => match action {
+            ProjectGroupAction::Status { directory } => {
+                handle_workspace_status(directory.as_ref(), &config)?;
             }
-            IndexAction::Stats { directory } => {
-                handle_index_stats(directory.as_ref())?;
+            ProjectGroupAction::Init { directory } => {
+                handle_workspace_init(directory.as_ref(), &config)?;
             }
-            IndexAction::Shards {
-                directory,
-                target_symbols,
-                format,
-                write,
-            } => {
-                handle_index_shards(directory.as_ref(), target_symbols, &format, write)?;
+            ProjectGroupAction::Config { directory, force } => {
+                let path = fcs::workspace::write_project_config(directory.as_ref(), force)?;
+                println!("Wrote project config: {}", path.display());
             }
-            IndexAction::ShardStatus { directory, format } => {
-                handle_index_shard_status(directory.as_ref(), &format)?;
+            ProjectGroupAction::ConfigMigrate { directory, dry_run } => {
+                handle_workspace_config_migrate(directory.as_ref(), dry_run)?;
             }
-            IndexAction::ShardQuery {
-                query,
-                directory,
-                kind,
-                limit,
-                timing,
-                warn_ms,
-            } => {
-                handle_index_shard_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
+            ProjectGroupAction::Profile { action } => {
+                handle_workspace_profile(action)?;
             }
-            IndexAction::Build { directory, option } => {
-                handle_index_build(directory.as_ref(), &option, &config)?;
+            ProjectGroupAction::ConfigDoctor { directory, strict } => {
+                handle_workspace_config_doctor(directory.as_ref(), strict, &config)?;
             }
-            IndexAction::List { directory, kind, limit } => {
-                handle_index_list(directory.as_ref(), &kind, limit)?;
+            ProjectGroupAction::ConfigSchema { format } => {
+                handle_workspace_config_schema(&format)?;
             }
-            IndexAction::Query {
-                query,
-                directory,
-                kind,
-                limit,
-                timing,
-                warn_ms,
-            } => {
-                handle_index_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
+            ProjectGroupAction::Advise { directory } => {
+                handle_workspace_advise(directory.as_ref(), &config)?;
             }
-            IndexAction::Profile {
-                query,
-                directory,
-                kind,
-                limit,
-                format,
-                warn_ms,
-            } => {
-                handle_index_profile(directory.as_ref(), &kind, &query, limit, &format, warn_ms)?;
+            ProjectGroupAction::Plan { directory } => {
+                handle_workspace_plan(directory.as_ref(), &config)?;
             }
-            IndexAction::Compact { directory, dry_run } => {
-                handle_index_compact(directory.as_ref(), dry_run)?;
+            ProjectGroupAction::Detect { directory } => {
+                handle_workspace_detect(directory.as_ref())?;
             }
-            IndexAction::Prewarm { directory } => {
-                handle_index_prewarm(directory.as_ref())?;
+            ProjectGroupAction::Doctor { directory } => {
+                handle_workspace_advise(directory.as_ref(), &config)?;
             }
-            IndexAction::Refresh { directory, option } => {
-                handle_index_refresh(directory.as_ref(), &option, &config)?;
+            ProjectGroupAction::DoctorBundle { directory, format, out } => {
+                handle_workspace_doctor_bundle(directory.as_ref(), &format, out.as_ref(), &config)?;
             }
-            IndexAction::Daemon {
-                directory,
-                interval_ms,
-                max_cycles,
-                foreground,
-                option,
-            } => {
-                handle_index_daemon(
-                    directory.as_ref(),
+            ProjectGroupAction::Workflows { directory, format } => {
+                handle_workspace_workflows(directory.as_ref(), &format, &config)?;
+            }
+            ProjectGroupAction::Service { action } => match action {
+                ServiceAction::Start {
+                    directory,
                     interval_ms,
                     max_cycles,
                     foreground,
-                    &option,
-                    &config,
-                )?;
-            }
-            IndexAction::DaemonStatus { directory } => {
-                handle_index_daemon_status(directory.as_ref())?;
-            }
-            IndexAction::Doctor { directory } => {
-                handle_index_doctor(directory.as_ref())?;
-            }
-            IndexAction::Repair {
-                directory,
-                option,
-                force,
-            } => {
-                handle_index_repair(directory.as_ref(), &option, force, &config)?;
-            }
-            IndexAction::Verify { directory, format } => {
-                handle_index_verify(directory.as_ref(), &format)?;
-            }
-            IndexAction::Bench {
-                directory,
-                build,
-                limit,
-                query,
-                option,
-            } => {
-                handle_index_bench(directory.as_ref(), build, limit, &query, &option, &config)?;
-            }
-        },
-        Commands::Query {
-            expression,
-            directory,
-            source,
-            mode,
-            macros,
-            limit,
-            format,
-            explain,
-            timing,
-            warn_ms,
-            save,
-            use_query,
-            list_saved,
-            delete_saved,
-            score_explain,
-            profile,
-        } => {
-            handle_query(
-                QueryRequest {
-                    expression: expression.as_deref(),
-                    directory: directory.as_ref(),
-                    source: source.as_ref(),
-                    mode: mode.as_ref(),
-                    macros: &macros,
+                    option,
+                } => {
+                    handle_service_start(
+                        directory.as_ref(),
+                        interval_ms,
+                        max_cycles,
+                        foreground,
+                        &option,
+                        &config,
+                    )?;
+                }
+                ServiceAction::Status { directory } => {
+                    handle_service_status(directory.as_ref())?;
+                }
+                ServiceAction::Snapshot { directory, format } => {
+                    handle_service_snapshot(directory.as_ref(), &format, &config)?;
+                }
+                ServiceAction::Query {
+                    expression,
+                    directory,
+                    source,
+                    mode,
+                    macros,
                     limit,
-                    format: &format,
+                    format,
                     explain,
                     timing,
                     warn_ms,
-                    save: save.as_ref(),
-                    use_query: use_query.as_ref(),
-                    list_saved,
-                    delete_saved: delete_saved.as_ref(),
                     score_explain,
-                    profile,
-                },
-                &config,
-            )?;
-        }
-        Commands::Bench { action } => match action {
+                } => {
+                    handle_query(
+                        QueryRequest {
+                            expression: Some(&expression),
+                            directory: directory.as_ref(),
+                            source: Some(&source),
+                            mode: Some(&mode),
+                            macros: &macros,
+                            limit,
+                            format: &format,
+                            explain,
+                            timing,
+                            warn_ms,
+                            save: None,
+                            use_query: None,
+                            list_saved: false,
+                            delete_saved: None,
+                            score_explain,
+                            profile: false,
+                        },
+                        &config,
+                    )?;
+                }
+                ServiceAction::Stop { directory } => {
+                    handle_service_stop(directory.as_ref())?;
+                }
+            },
+            ProjectGroupAction::Index { action } => match action {
+                IndexAction::Status { directory } => {
+                    handle_index_status(directory.as_ref())?;
+                }
+                IndexAction::Stats { directory } => {
+                    handle_index_stats(directory.as_ref())?;
+                }
+                IndexAction::Shards {
+                    directory,
+                    target_symbols,
+                    format,
+                    write,
+                } => {
+                    handle_index_shards(directory.as_ref(), target_symbols, &format, write)?;
+                }
+                IndexAction::ShardStatus { directory, format } => {
+                    handle_index_shard_status(directory.as_ref(), &format)?;
+                }
+                IndexAction::ShardQuery {
+                    query,
+                    directory,
+                    kind,
+                    limit,
+                    timing,
+                    warn_ms,
+                } => {
+                    handle_index_shard_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
+                }
+                IndexAction::Build { directory, option } => {
+                    handle_index_build(directory.as_ref(), &option, &config)?;
+                }
+                IndexAction::List { directory, kind, limit } => {
+                    handle_index_list(directory.as_ref(), &kind, limit)?;
+                }
+                IndexAction::Query {
+                    query,
+                    directory,
+                    kind,
+                    limit,
+                    timing,
+                    warn_ms,
+                } => {
+                    handle_index_query(directory.as_ref(), &kind, &query, limit, timing, warn_ms)?;
+                }
+                IndexAction::Profile {
+                    query,
+                    directory,
+                    kind,
+                    limit,
+                    format,
+                    warn_ms,
+                } => {
+                    handle_index_profile(directory.as_ref(), &kind, &query, limit, &format, warn_ms)?;
+                }
+                IndexAction::Compact { directory, dry_run } => {
+                    handle_index_compact(directory.as_ref(), dry_run)?;
+                }
+                IndexAction::Prewarm { directory } => {
+                    handle_index_prewarm(directory.as_ref())?;
+                }
+                IndexAction::Refresh { directory, option } => {
+                    handle_index_refresh(directory.as_ref(), &option, &config)?;
+                }
+                IndexAction::Daemon {
+                    directory,
+                    interval_ms,
+                    max_cycles,
+                    foreground,
+                    option,
+                } => {
+                    handle_index_daemon(
+                        directory.as_ref(),
+                        interval_ms,
+                        max_cycles,
+                        foreground,
+                        &option,
+                        &config,
+                    )?;
+                }
+                IndexAction::DaemonStatus { directory } => {
+                    handle_index_daemon_status(directory.as_ref())?;
+                }
+                IndexAction::Doctor { directory } => {
+                    handle_index_doctor(directory.as_ref())?;
+                }
+                IndexAction::Repair {
+                    directory,
+                    option,
+                    force,
+                } => {
+                    handle_index_repair(directory.as_ref(), &option, force, &config)?;
+                }
+                IndexAction::Verify { directory, format } => {
+                    handle_index_verify(directory.as_ref(), &format)?;
+                }
+                IndexAction::Bench {
+                    directory,
+                    build,
+                    limit,
+                    query,
+                    option,
+                } => {
+                    handle_index_bench(directory.as_ref(), build, limit, &query, &option, &config)?;
+                }
+            },
+            ProjectGroupAction::Ignore { action, directory } => {
+                let ignore_path = resolve_ignore_file(directory.as_ref());
+                let ignore_file = IgnoreFile::new(ignore_path.clone());
+                match action {
+                    IgnoreAction::Init => {
+                        ignore_file.init(true)?;
+                        println!("Initialized ignore file at: {}", ignore_path.display());
+                    }
+                    IgnoreAction::Add { patterns } => {
+                        if patterns.is_empty() {
+                            return Err(AppError::General("No patterns specified to add".to_string()));
+                        }
+                        ignore_file.add(&patterns)?;
+                        println!("Added patterns to ignore file at: {}", ignore_path.display());
+                    }
+                    IgnoreAction::Remove { patterns } => {
+                        if patterns.is_empty() {
+                            return Err(AppError::General("No patterns specified to remove".to_string()));
+                        }
+                        ignore_file.remove(&patterns)?;
+                        println!("Removed patterns from ignore file at: {}", ignore_path.display());
+                    }
+                    IgnoreAction::List => {
+                        let patterns = ignore_file.list()?;
+                        if patterns.is_empty() {
+                            println!("No ignore patterns in: {}", ignore_path.display());
+                        } else {
+                            for p in &patterns {
+                                println!("{p}");
+                            }
+                        }
+                    }
+                }
+            }
+            ProjectGroupAction::Action { action } => match action {
+                ProjectAction::List { directory } => {
+                    handle_project_actions_list(directory.as_ref(), &config)?;
+                }
+                ProjectAction::Run {
+                    name,
+                    directory,
+                    file,
+                    line,
+                    symbol,
+                    dry_run,
+                    args,
+                } => {
+                    handle_project_actions_run(ProjectActionRunInput {
+                        name: &name,
+                        directory: directory.as_ref(),
+                        file: file.as_ref(),
+                        line,
+                        symbol: symbol.as_ref(),
+                        dry_run,
+                        args: &args,
+                        config: &config,
+                    })?;
+                }
+                ProjectAction::Templates => {
+                    handle_project_action_templates();
+                }
+                ProjectAction::Init {
+                    template,
+                    directory,
+                    force,
+                    dry_run,
+                } => {
+                    handle_project_actions_init(&template, directory.as_ref(), force, dry_run)?;
+                }
+                ProjectAction::Doctor { directory } => {
+                    handle_project_actions_doctor(directory.as_ref(), &config)?;
+                }
+            },
+        },
+        Commands::Dev {
+            action: DevAction::Bench { action },
+        } => match action {
             BenchAction::All {
                 directory,
                 format,
@@ -4751,102 +4818,159 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 handle_bench_compare(directory.as_ref(), &format, threshold_ms, threshold_percent, strict)?;
             }
         },
-        Commands::Graph { action } => match action {
-            GraphAction::Semantic {
-                target,
-                relation,
-                format,
-                depth,
-                fanout,
-                exclude,
-                fallback,
-                cache,
-                refresh_cache,
+        Commands::Code { action } => match action {
+            CodeAction::Def { target, directory } => {
+                handle_definition(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Refs { target, directory } => {
+                handle_references(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Type { target, directory } => {
+                handle_type_definition(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Impl { target, directory } => {
+                handle_implementation(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::DocSymbols { target, directory } => {
+                handle_document_symbols(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Incoming { target, directory } => {
+                handle_incoming_calls(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Outgoing { target, directory } => {
+                handle_outgoing_calls(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Diag { target, directory } => {
+                handle_diagnostics(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Hover { target, directory } => {
+                handle_hover(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::WorkspaceSymbols {
+                query,
                 directory,
+                limit,
             } => {
-                handle_graph_semantic(GraphSemanticInput {
-                    target: &target,
-                    relation: &relation,
-                    format: &format,
+                handle_workspace_symbols(&query, directory.as_ref(), limit, &config)?;
+            }
+            CodeAction::Health { directory, file } => {
+                handle_lsp_health(directory.as_ref(), file.as_ref(), &config)?;
+            }
+            CodeAction::Highlights { target, directory } => {
+                handle_lsp_highlights(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::GroupedRefs { target, directory } => {
+                handle_lsp_grouped_refs(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Rename {
+                target,
+                new_name,
+                directory,
+                apply,
+                dry_run,
+            } => {
+                handle_lsp_rename(&target, &new_name, directory.as_ref(), apply, dry_run, &config)?;
+            }
+            CodeAction::Actions {
+                target,
+                directory,
+                format,
+                apply,
+                dry_run,
+            } => {
+                handle_lsp_code_actions(&target, directory.as_ref(), &format, apply, dry_run, &config)?;
+            }
+            CodeAction::OrganizeImports {
+                target,
+                directory,
+                apply,
+                dry_run,
+            } => {
+                handle_lsp_organize_imports(&target, directory.as_ref(), apply, dry_run, &config)?;
+            }
+            CodeAction::Outline {
+                target,
+                directory,
+                format,
+            } => {
+                handle_lsp_outline(&target, directory.as_ref(), &format, &config)?;
+            }
+            CodeAction::Breadcrumbs {
+                target,
+                directory,
+                format,
+            } => {
+                handle_lsp_breadcrumbs(&target, directory.as_ref(), &format, &config)?;
+            }
+            CodeAction::Tokens {
+                target,
+                directory,
+                line,
+                format,
+            } => {
+                handle_lsp_semantic_tokens(&target, directory.as_ref(), line, &format, &config)?;
+            }
+            CodeAction::Calls { target, directory } => {
+                handle_lsp_call_tree(&target, directory.as_ref(), &config)?;
+            }
+            CodeAction::Graph { action } => match action {
+                GraphAction::Semantic {
+                    target,
+                    relation,
+                    format,
                     depth,
                     fanout,
-                    exclude: &exclude,
-                    fallback: &fallback,
+                    exclude,
+                    fallback,
                     cache,
                     refresh_cache,
-                    directory: directory.as_ref(),
-                    config: &config,
-                })?;
-            }
-            GraphAction::Imports {
-                directory,
-                limit,
-                format,
-                depth,
-                fanout,
-                exclude,
-            } => {
-                handle_graph_imports(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
-            }
-            GraphAction::Modules {
-                directory,
-                limit,
-                format,
-                depth,
-                fanout,
-                exclude,
-            } => {
-                handle_graph_modules(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
-            }
-            GraphAction::Calls {
-                directory,
-                limit,
-                format,
-                depth,
-                fanout,
-                exclude,
-            } => {
-                handle_graph_calls(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
-            }
-        },
-        Commands::Actions { action } => match action {
-            ProjectAction::List { directory } => {
-                handle_project_actions_list(directory.as_ref(), &config)?;
-            }
-            ProjectAction::Run {
-                name,
-                directory,
-                file,
-                line,
-                symbol,
-                dry_run,
-                args,
-            } => {
-                handle_project_actions_run(ProjectActionRunInput {
-                    name: &name,
-                    directory: directory.as_ref(),
-                    file: file.as_ref(),
-                    line,
-                    symbol: symbol.as_ref(),
-                    dry_run,
-                    args: &args,
-                    config: &config,
-                })?;
-            }
-            ProjectAction::Templates => {
-                handle_project_action_templates();
-            }
-            ProjectAction::Init {
-                template,
-                directory,
-                force,
-                dry_run,
-            } => {
-                handle_project_actions_init(&template, directory.as_ref(), force, dry_run)?;
-            }
-            ProjectAction::Doctor { directory } => {
-                handle_project_actions_doctor(directory.as_ref(), &config)?;
-            }
+                    directory,
+                } => {
+                    handle_graph_semantic(GraphSemanticInput {
+                        target: &target,
+                        relation: &relation,
+                        format: &format,
+                        depth,
+                        fanout,
+                        exclude: &exclude,
+                        fallback: &fallback,
+                        cache,
+                        refresh_cache,
+                        directory: directory.as_ref(),
+                        config: &config,
+                    })?;
+                }
+                GraphAction::Imports {
+                    directory,
+                    limit,
+                    format,
+                    depth,
+                    fanout,
+                    exclude,
+                } => {
+                    handle_graph_imports(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
+                }
+                GraphAction::Modules {
+                    directory,
+                    limit,
+                    format,
+                    depth,
+                    fanout,
+                    exclude,
+                } => {
+                    handle_graph_modules(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
+                }
+                GraphAction::Calls {
+                    directory,
+                    limit,
+                    format,
+                    depth,
+                    fanout,
+                    exclude,
+                } => {
+                    handle_graph_calls(directory.as_ref(), limit, &format, depth, fanout, &exclude, &config)?;
+                }
+            },
         },
         Commands::Plugin { action } => match action {
             PluginAction::List { directory } => {
@@ -4915,102 +5039,6 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                     vars: &vars,
                     args: &args,
                 })?;
-            }
-        },
-        Commands::Def { target, directory } => {
-            handle_definition(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Refs { target, directory } => {
-            handle_references(&target, directory.as_ref(), &config)?;
-        }
-        Commands::TypeDef { target, directory } => {
-            handle_type_definition(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Implementation { target, directory } => {
-            handle_implementation(&target, directory.as_ref(), &config)?;
-        }
-        Commands::DocSymbols { target, directory } => {
-            handle_document_symbols(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Incoming { target, directory } => {
-            handle_incoming_calls(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Outgoing { target, directory } => {
-            handle_outgoing_calls(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Diag { target, directory } => {
-            handle_diagnostics(&target, directory.as_ref(), &config)?;
-        }
-        Commands::Hover { target, directory } => {
-            handle_hover(&target, directory.as_ref(), &config)?;
-        }
-        Commands::WorkspaceSymbols {
-            query,
-            directory,
-            limit,
-        } => {
-            handle_workspace_symbols(&query, directory.as_ref(), limit, &config)?;
-        }
-        Commands::Lsp { action } => match action {
-            LspAction::Health { directory, file } => {
-                handle_lsp_health(directory.as_ref(), file.as_ref(), &config)?;
-            }
-            LspAction::Highlights { target, directory } => {
-                handle_lsp_highlights(&target, directory.as_ref(), &config)?;
-            }
-            LspAction::Refs { target, directory } => {
-                handle_lsp_grouped_refs(&target, directory.as_ref(), &config)?;
-            }
-            LspAction::Rename {
-                target,
-                new_name,
-                directory,
-                apply,
-                dry_run,
-            } => {
-                handle_lsp_rename(&target, &new_name, directory.as_ref(), apply, dry_run, &config)?;
-            }
-            LspAction::CodeActions {
-                target,
-                directory,
-                format,
-                apply,
-                dry_run,
-            } => {
-                handle_lsp_code_actions(&target, directory.as_ref(), &format, apply, dry_run, &config)?;
-            }
-            LspAction::OrganizeImports {
-                target,
-                directory,
-                apply,
-                dry_run,
-            } => {
-                handle_lsp_organize_imports(&target, directory.as_ref(), apply, dry_run, &config)?;
-            }
-            LspAction::Outline {
-                target,
-                directory,
-                format,
-            } => {
-                handle_lsp_outline(&target, directory.as_ref(), &format, &config)?;
-            }
-            LspAction::Breadcrumbs {
-                target,
-                directory,
-                format,
-            } => {
-                handle_lsp_breadcrumbs(&target, directory.as_ref(), &format, &config)?;
-            }
-            LspAction::SemanticTokens {
-                target,
-                directory,
-                line,
-                format,
-            } => {
-                handle_lsp_semantic_tokens(&target, directory.as_ref(), line, &format, &config)?;
-            }
-            LspAction::CallTree { target, directory } => {
-                handle_lsp_call_tree(&target, directory.as_ref(), &config)?;
             }
         },
         Commands::Trace { action } => match action {
@@ -5249,7 +5277,9 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                 );
             }
         },
-        Commands::History { action } => match action {
+        Commands::Dev {
+            action: DevAction::History { action },
+        } => match action {
             HistoryAction::List => {
                 handle_history_list()?;
             }
@@ -5339,191 +5369,150 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             DebugAction::RunProfile { name, directory, run } => {
                 handle_debug_run_profile(&name, directory.as_ref(), run)?;
             }
-        },
-        Commands::Dap { action } => match action {
-            DapAction::Adapters { format } => {
-                handle_dap_adapters(&format)?;
-            }
-            DapAction::Templates { format } => {
-                handle_dap_templates(&format)?;
-            }
-            DapAction::Launch {
-                program,
-                adapter,
-                request,
-                process_id,
-                name,
-                breakpoints,
-                break_conditions,
-                break_hits,
-                break_logs,
-                cwd,
-                env,
-                stop_on_entry,
-                bundle,
-                args,
-            } => {
-                handle_dap_launch(
-                    DapProfileInput {
-                        name: name.as_ref(),
-                        program: &program,
-                        adapter: &adapter,
-                        request: &request,
-                        process_id,
-                        breakpoints: &breakpoints,
-                        break_conditions: &break_conditions,
-                        break_hits: &break_hits,
-                        break_logs: &break_logs,
-                        cwd: cwd.as_ref(),
-                        env: &env,
-                        stop_on_entry,
-                        args: &args,
-                    },
+            DebugAction::Dap { action } => match action {
+                DapAction::Adapters { format } => {
+                    handle_dap_adapters(&format)?;
+                }
+                DapAction::Templates { format } => {
+                    handle_dap_templates(&format)?;
+                }
+                DapAction::Launch {
+                    program,
+                    adapter,
+                    request,
+                    process_id,
+                    name,
+                    breakpoints,
+                    break_conditions,
+                    break_hits,
+                    break_logs,
+                    cwd,
+                    env,
+                    stop_on_entry,
                     bundle,
-                )?;
-            }
-            DapAction::SaveProfile {
-                name,
-                program,
-                adapter,
-                request,
-                process_id,
-                breakpoints,
-                break_conditions,
-                break_hits,
-                break_logs,
-                directory,
-                cwd,
-                env,
-                stop_on_entry,
-                args,
-            } => {
-                handle_dap_save_profile(
-                    DapProfileInput {
-                        name: Some(&name),
+                    args,
+                } => {
+                    handle_dap_launch(
+                        DapProfileInput {
+                            name: name.as_ref(),
+                            program: &program,
+                            adapter: &adapter,
+                            request: &request,
+                            process_id,
+                            breakpoints: &breakpoints,
+                            break_conditions: &break_conditions,
+                            break_hits: &break_hits,
+                            break_logs: &break_logs,
+                            cwd: cwd.as_ref(),
+                            env: &env,
+                            stop_on_entry,
+                            args: &args,
+                        },
+                        bundle,
+                    )?;
+                }
+                DapAction::SaveProfile {
+                    name,
+                    program,
+                    adapter,
+                    request,
+                    process_id,
+                    breakpoints,
+                    break_conditions,
+                    break_hits,
+                    break_logs,
+                    directory,
+                    cwd,
+                    env,
+                    stop_on_entry,
+                    args,
+                } => {
+                    handle_dap_save_profile(
+                        DapProfileInput {
+                            name: Some(&name),
+                            program: &program,
+                            adapter: &adapter,
+                            request: &request,
+                            process_id,
+                            breakpoints: &breakpoints,
+                            break_conditions: &break_conditions,
+                            break_hits: &break_hits,
+                            break_logs: &break_logs,
+                            cwd: cwd.as_ref(),
+                            env: &env,
+                            stop_on_entry,
+                            args: &args,
+                        },
+                        directory.as_ref(),
+                    )?;
+                }
+                DapAction::Profiles { directory } => {
+                    handle_dap_profiles(directory.as_ref())?;
+                }
+                DapAction::Doctor {
+                    directory,
+                    name,
+                    format,
+                } => {
+                    handle_dap_doctor(directory.as_ref(), name.as_ref(), &format)?;
+                }
+                DapAction::FromTrace {
+                    session,
+                    program,
+                    name,
+                    adapter,
+                    request,
+                    process_id,
+                    directory,
+                    cwd,
+                    env,
+                    stop_on_entry,
+                    args,
+                } => {
+                    handle_dap_from_trace(DapFromTraceInput {
+                        session: &session,
                         program: &program,
+                        name: name.as_ref(),
                         adapter: &adapter,
                         request: &request,
                         process_id,
-                        breakpoints: &breakpoints,
-                        break_conditions: &break_conditions,
-                        break_hits: &break_hits,
-                        break_logs: &break_logs,
+                        directory: directory.as_ref(),
                         cwd: cwd.as_ref(),
                         env: &env,
                         stop_on_entry,
                         args: &args,
-                    },
-                    directory.as_ref(),
-                )?;
-            }
-            DapAction::Profiles { directory } => {
-                handle_dap_profiles(directory.as_ref())?;
-            }
-            DapAction::Doctor {
-                directory,
-                name,
-                format,
-            } => {
-                handle_dap_doctor(directory.as_ref(), name.as_ref(), &format)?;
-            }
-            DapAction::FromTrace {
-                session,
-                program,
-                name,
-                adapter,
-                request,
-                process_id,
-                directory,
-                cwd,
-                env,
-                stop_on_entry,
-                args,
-            } => {
-                handle_dap_from_trace(DapFromTraceInput {
-                    session: &session,
-                    program: &program,
-                    name: name.as_ref(),
-                    adapter: &adapter,
-                    request: &request,
+                    })?;
+                }
+                DapAction::RequestProfile {
+                    name,
+                    directory,
+                    bundle,
+                } => {
+                    handle_dap_request_profile(&name, directory.as_ref(), bundle)?;
+                }
+                DapAction::Transcript {
+                    name,
+                    directory,
+                    format,
+                } => {
+                    handle_dap_transcript(&name, directory.as_ref(), &format)?;
+                }
+                DapAction::SessionSmoke {
+                    program,
+                    adapter,
+                    request,
                     process_id,
-                    directory: directory.as_ref(),
-                    cwd: cwd.as_ref(),
-                    env: &env,
+                    name,
+                    breakpoints,
+                    break_conditions,
+                    break_hits,
+                    break_logs,
+                    cwd,
+                    env,
                     stop_on_entry,
-                    args: &args,
-                })?;
-            }
-            DapAction::RequestProfile {
-                name,
-                directory,
-                bundle,
-            } => {
-                handle_dap_request_profile(&name, directory.as_ref(), bundle)?;
-            }
-            DapAction::Transcript {
-                name,
-                directory,
-                format,
-            } => {
-                handle_dap_transcript(&name, directory.as_ref(), &format)?;
-            }
-            DapAction::SessionSmoke {
-                program,
-                adapter,
-                request,
-                process_id,
-                name,
-                breakpoints,
-                break_conditions,
-                break_hits,
-                break_logs,
-                cwd,
-                env,
-                stop_on_entry,
-                args,
-            } => {
-                handle_dap_session_smoke(DapProfileInput {
-                    name: name.as_ref(),
-                    program: &program,
-                    adapter: &adapter,
-                    request: &request,
-                    process_id,
-                    breakpoints: &breakpoints,
-                    break_conditions: &break_conditions,
-                    break_hits: &break_hits,
-                    break_logs: &break_logs,
-                    cwd: cwd.as_ref(),
-                    env: &env,
-                    stop_on_entry,
-                    args: &args,
-                })?;
-            }
-            DapAction::AdapterSession {
-                adapter_command,
-                program,
-                adapter,
-                request,
-                process_id,
-                name,
-                breakpoints,
-                break_conditions,
-                break_hits,
-                break_logs,
-                cwd,
-                adapter_env,
-                format,
-                request_timeout_ms,
-                event_timeout_ms,
-                max_read_frames,
-                env,
-                stop_on_entry,
-                args,
-            } => {
-                handle_dap_adapter_session(
-                    &adapter_command,
-                    &adapter_env,
-                    DapProfileInput {
+                    args,
+                } => {
+                    handle_dap_session_smoke(DapProfileInput {
                         name: name.as_ref(),
                         program: &program,
                         adapter: &adapter,
@@ -5537,37 +5526,65 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
                         env: &env,
                         stop_on_entry,
                         args: &args,
-                    },
-                    &format,
+                    })?;
+                }
+                DapAction::AdapterSession {
+                    adapter_command,
+                    program,
+                    adapter,
+                    request,
+                    process_id,
+                    name,
+                    breakpoints,
+                    break_conditions,
+                    break_hits,
+                    break_logs,
+                    cwd,
+                    adapter_env,
+                    format,
                     request_timeout_ms,
                     event_timeout_ms,
                     max_read_frames,
-                )?;
-            }
+                    env,
+                    stop_on_entry,
+                    args,
+                } => {
+                    handle_dap_adapter_session(
+                        &adapter_command,
+                        &adapter_env,
+                        DapProfileInput {
+                            name: name.as_ref(),
+                            program: &program,
+                            adapter: &adapter,
+                            request: &request,
+                            process_id,
+                            breakpoints: &breakpoints,
+                            break_conditions: &break_conditions,
+                            break_hits: &break_hits,
+                            break_logs: &break_logs,
+                            cwd: cwd.as_ref(),
+                            env: &env,
+                            stop_on_entry,
+                            args: &args,
+                        },
+                        &format,
+                        request_timeout_ms,
+                        event_timeout_ms,
+                        max_read_frames,
+                    )?;
+                }
+            },
         },
-        Commands::Files {
-            directory,
-            query,
-            option,
+        Commands::Dev {
+            action: DevAction::Complete { shell },
         } => {
-            handle_files(directory.as_ref(), query.as_ref(), &option, &config)?;
-        }
-        Commands::Symbol {
-            directory,
-            query,
-            option,
-        } => {
-            handle_symbols(directory.as_ref(), query.as_ref(), &option, &config)?;
-        }
-        Commands::Search { pattern, paths, option } => {
-            handle_search(&pattern, &paths, &option, &config)?;
-        }
-        Commands::Complete { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
-        Commands::Man { stdout, out_dir } => {
+        Commands::Dev {
+            action: DevAction::Man { stdout, out_dir },
+        } => {
             handle_man(stdout, out_dir.as_ref())?;
         }
     }

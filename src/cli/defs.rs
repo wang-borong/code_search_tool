@@ -9,24 +9,59 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Manage ignore patterns
-    Ignore {
+    /// Open or script the ratatui code tracing workspace
+    Ui {
         #[command(subcommand)]
-        action: IgnoreAction,
-
-        /// Target directory (default: current directory)
-        #[arg(short, long)]
-        directory: Option<String>,
+        action: UiAction,
     },
 
-    /// Preview a file at a specific line
-    Preview {
-        /// Format: "path:line" or "path:line:height"
-        target: String,
+    /// Find text, files, symbols, previews, and saved queries
+    Find {
+        #[command(subcommand)]
+        action: FindAction,
     },
 
+    /// Navigate and edit code with LSP, outlines, and graphs
+    Code {
+        #[command(subcommand)]
+        action: CodeAction,
+    },
+
+    /// Manage trace history and investigation sessions
+    Trace {
+        #[command(subcommand)]
+        action: TraceAction,
+    },
+
+    /// Generate debugger commands and DAP sessions
+    Debug {
+        #[command(subcommand)]
+        action: DebugAction,
+    },
+
+    /// Manage workspace, index, service, ignore rules, and project actions
+    Project {
+        #[command(subcommand)]
+        action: ProjectGroupAction,
+    },
+
+    /// Discover and run declarative fcs plugins
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
+    /// Developer utilities: benchmarks, history, completions, and man page
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UiAction {
     /// Open the ratatui code tracing workspace
-    Tui {
+    Open {
         /// Target directory
         directory: Option<String>,
 
@@ -44,7 +79,7 @@ pub enum Commands {
     },
 
     /// Replay a TUI command script without opening an interactive terminal
-    TuiScript {
+    Script {
         /// Script file; blank lines and lines starting with # are ignored
         script: String,
 
@@ -75,23 +110,50 @@ pub enum Commands {
         #[arg(long)]
         persist: bool,
     },
+}
 
-    /// Inspect or initialize workspace metadata
-    Workspace {
-        #[command(subcommand)]
-        action: WorkspaceAction,
+#[derive(Subcommand, Debug)]
+pub enum FindAction {
+    /// Search patterns in files
+    Text {
+        /// Search pattern (regex)
+        pattern: String,
+
+        /// Target paths to search in
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+
+        /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
     },
 
-    /// Run or inspect the unified fcs background service snapshot
-    Service {
-        #[command(subcommand)]
-        action: ServiceAction,
+    /// Fuzzy-find files in a project
+    Files {
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Initial skim query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// File search options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
     },
 
-    /// Build and inspect the workspace code index cache
-    Index {
-        #[command(subcommand)]
-        action: IndexAction,
+    /// Fuzzy-find coarse symbols without requiring an LSP server
+    Symbols {
+        /// Target directory to search in
+        directory: Option<String>,
+
+        /// Initial skim query
+        #[arg(short, long)]
+        query: Option<String>,
+
+        /// Symbol search file options (e.g. --hidden, --no-ignore, -L, -d 2)
+        #[arg(short, long, allow_hyphen_values = true)]
+        option: Vec<String>,
     },
 
     /// Query index and trace data with field filters
@@ -159,30 +221,15 @@ pub enum Commands {
         profile: bool,
     },
 
-    /// Measure search, index, trace, and preview latency
-    Bench {
-        #[command(subcommand)]
-        action: BenchAction,
+    /// Preview a file at a specific line
+    Preview {
+        /// Format: "path:line" or "path:line:height"
+        target: String,
     },
+}
 
-    /// Build semantic, call, and import graph views
-    Graph {
-        #[command(subcommand)]
-        action: GraphAction,
-    },
-
-    /// List and run configured project actions
-    Actions {
-        #[command(subcommand)]
-        action: ProjectAction,
-    },
-
-    /// Discover and run declarative fcs plugins
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
-
+#[derive(Subcommand, Debug)]
+pub enum CodeAction {
     /// Jump to LSP definition for path:line[:column]
     Def {
         /// Format: "path:line" or "path:line:column"
@@ -204,7 +251,7 @@ pub enum Commands {
     },
 
     /// Jump to LSP type definition for path:line[:column]
-    TypeDef {
+    Type {
         /// Format: "path:line" or "path:line:column"
         target: String,
 
@@ -214,7 +261,7 @@ pub enum Commands {
     },
 
     /// Show LSP implementations for path:line[:column]
-    Implementation {
+    Impl {
         /// Format: "path:line" or "path:line:column"
         target: String,
 
@@ -287,76 +334,306 @@ pub enum Commands {
         limit: usize,
     },
 
-    /// Inspect LSP provider health
-    Lsp {
-        #[command(subcommand)]
-        action: LspAction,
+    /// Show provider availability for a workspace or file
+    Health {
+        /// Target workspace directory
+        directory: Option<String>,
+
+        /// Optional source file to select a provider by file type
+        #[arg(short, long)]
+        file: Option<String>,
     },
 
-    /// Manage trace history and bookmarks
-    Trace {
+    /// Show document highlights for path:line[:column]
+    Highlights {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Show grouped references for path:line[:column]
+    GroupedRefs {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Preview LSP rename edits without applying them
+    Rename {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Replacement symbol name
+        new_name: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Apply the rename edits instead of printing a preview
+        #[arg(long)]
+        apply: bool,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List or apply code actions for path:line[:column]
+    Actions {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Apply a 1-based code action index
+        #[arg(long)]
+        apply: Option<usize>,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Run source.organizeImports code action for a file
+    OrganizeImports {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Apply the first organize-imports edit
+        #[arg(long)]
+        apply: bool,
+
+        /// With --apply, show the apply report without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show a nested document outline
+    Outline {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: tree or json
+        #[arg(short, long, default_value = "tree")]
+        format: String,
+    },
+
+    /// Show symbol breadcrumbs for path:line[:column]
+    Breadcrumbs {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show semantic tokens for a file
+    Tokens {
+        /// Source file
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+
+        /// Optional 1-based line filter
+        #[arg(long)]
+        line: Option<usize>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show incoming and outgoing calls grouped around path:line[:column]
+    Calls {
+        /// Format: "path:line" or "path:line:column"
+        target: String,
+
+        /// Workspace directory override
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// Build semantic, call, and import graph views
+    Graph {
         #[command(subcommand)]
-        action: TraceAction,
+        action: GraphAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProjectGroupAction {
+    /// Show workspace readiness for semantic navigation
+    Status {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Create non-intrusive fcs project cache metadata
+    Init {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Write a project-level .fcs.toml template
+    Config {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Overwrite existing .fcs.toml
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Migrate an existing .fcs.toml by adding missing supported keys
+    ConfigMigrate {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Print the migration report without writing the file
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Manage named workspace profiles for monorepos and repeated roots
+    Profile {
+        #[command(subcommand)]
+        action: WorkspaceProfileAction,
+    },
+
+    /// Validate project-level .fcs.toml configuration
+    ConfigDoctor {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Exit with an error when warnings are found
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Print the supported project .fcs.toml schema example
+    ConfigSchema {
+        /// Output format: toml, text, or json
+        #[arg(short, long, default_value = "toml")]
+        format: String,
+    },
+
+    /// Print project detection and actionable setup advice
+    Advise {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Print the non-blocking startup plan used by the TUI activity panel
+    Plan {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Print detected project profile without advice text
+    Detect {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Run workspace readiness, cache, config, and release health checks
+    Doctor {
+        /// Target directory
+        directory: Option<String>,
+    },
+
+    /// Build a support bundle with workspace, index, LSP, DAP, workflow, and query diagnostics
+    DoctorBundle {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+
+        /// Write the bundle to this path instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+
+    /// Print diagnostic workflow templates for this workspace
+    Workflows {
+        /// Target directory
+        directory: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Build and inspect the workspace code index cache
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
+
+    /// Run or inspect the unified fcs background service snapshot
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
+    /// Manage ignore patterns
+    Ignore {
+        #[command(subcommand)]
+        action: IgnoreAction,
+
+        /// Target directory (default: current directory)
+        #[arg(short, long)]
+        directory: Option<String>,
+    },
+
+    /// List and run configured project actions
+    Action {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DevAction {
+    /// Measure search, index, trace, and preview latency
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
     },
 
     /// Show or clear query history
     History {
         #[command(subcommand)]
         action: HistoryAction,
-    },
-
-    /// Generate or launch debugger sessions from trace locations
-    Debug {
-        #[command(subcommand)]
-        action: DebugAction,
-    },
-
-    /// Generate and store basic Debug Adapter Protocol launch requests
-    Dap {
-        #[command(subcommand)]
-        action: DapAction,
-    },
-
-    /// Fuzzy-find files in a project
-    Files {
-        /// Target directory to search in
-        directory: Option<String>,
-
-        /// Initial skim query
-        #[arg(short, long)]
-        query: Option<String>,
-
-        /// File search options (e.g. --hidden, --no-ignore, -L, -d 2)
-        #[arg(short, long, allow_hyphen_values = true)]
-        option: Vec<String>,
-    },
-
-    /// Fuzzy-find coarse symbols without requiring an LSP server
-    Symbol {
-        /// Target directory to search in
-        directory: Option<String>,
-
-        /// Initial skim query
-        #[arg(short, long)]
-        query: Option<String>,
-
-        /// Symbol search file options (e.g. --hidden, --no-ignore, -L, -d 2)
-        #[arg(short, long, allow_hyphen_values = true)]
-        option: Vec<String>,
-    },
-
-    /// Search patterns in files
-    Search {
-        /// Search pattern (regex)
-        pattern: String,
-
-        /// Target paths to search in
-        #[arg(value_name = "PATH")]
-        paths: Vec<String>,
-
-        /// Ripgrep-compatible search options (e.g. -i/--ignore-case or --no-ignore)
-        #[arg(short, long, allow_hyphen_values = true)]
-        option: Vec<String>,
     },
 
     /// Generate shell completion script
@@ -992,156 +1269,6 @@ pub enum PluginAction {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum LspAction {
-    /// Show provider availability for a workspace or file
-    Health {
-        /// Target workspace directory
-        directory: Option<String>,
-
-        /// Optional source file to select a provider by file type
-        #[arg(short, long)]
-        file: Option<String>,
-    },
-
-    /// Show document highlights for path:line[:column]
-    Highlights {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-    },
-
-    /// Show grouped references for path:line[:column]
-    Refs {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-    },
-
-    /// Preview LSP rename edits without applying them
-    Rename {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Replacement symbol name
-        new_name: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Apply the rename edits instead of printing a preview
-        #[arg(long)]
-        apply: bool,
-
-        /// With --apply, show the apply report without writing files
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// List or apply code actions for path:line[:column]
-    CodeActions {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Output format: text or json
-        #[arg(short, long, default_value = "text")]
-        format: String,
-
-        /// Apply a 1-based code action index
-        #[arg(long)]
-        apply: Option<usize>,
-
-        /// With --apply, show the apply report without writing files
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Run source.organizeImports code action for a file
-    OrganizeImports {
-        /// Source file
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Apply the first organize-imports edit
-        #[arg(long)]
-        apply: bool,
-
-        /// With --apply, show the apply report without writing files
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Show a nested document outline
-    Outline {
-        /// Source file
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Output format: tree or json
-        #[arg(short, long, default_value = "tree")]
-        format: String,
-    },
-
-    /// Show symbol breadcrumbs for path:line[:column]
-    Breadcrumbs {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Output format: text or json
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
-
-    /// Show semantic tokens for a file
-    SemanticTokens {
-        /// Source file
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-
-        /// Optional 1-based line filter
-        #[arg(long)]
-        line: Option<usize>,
-
-        /// Output format: text or json
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
-
-    /// Show incoming and outgoing calls grouped around path:line[:column]
-    CallTree {
-        /// Format: "path:line" or "path:line:column"
-        target: String,
-
-        /// Workspace directory override
-        #[arg(short, long)]
-        directory: Option<String>,
-    },
-}
-
-#[derive(Subcommand, Debug)]
 pub enum DapAction {
     /// List known DAP adapter commands and availability
     Adapters {
@@ -1508,6 +1635,12 @@ pub enum HistoryAction {
 
 #[derive(Subcommand, Debug)]
 pub enum DebugAction {
+    /// Generate and store Debug Adapter Protocol launch requests
+    Dap {
+        #[command(subcommand)]
+        action: DapAction,
+    },
+
     /// Build a debugger command with explicit breakpoints
     Command {
         /// Program binary to debug
@@ -1688,112 +1821,6 @@ pub enum DebugAction {
         /// Launch the debugger instead of printing the command
         #[arg(long)]
         run: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum WorkspaceAction {
-    /// Show workspace readiness for semantic navigation
-    Status {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Create non-intrusive fcs workspace cache metadata
-    Init {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Write a project-level .fcs.toml template
-    Config {
-        /// Target directory
-        directory: Option<String>,
-
-        /// Overwrite existing .fcs.toml
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Migrate an existing .fcs.toml by adding missing supported keys
-    ConfigMigrate {
-        /// Target directory
-        directory: Option<String>,
-
-        /// Print the migration report without writing the file
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Manage named workspace profiles for monorepos and repeated roots
-    Profile {
-        #[command(subcommand)]
-        action: WorkspaceProfileAction,
-    },
-
-    /// Validate project-level .fcs.toml configuration
-    ConfigDoctor {
-        /// Target directory
-        directory: Option<String>,
-
-        /// Exit with an error when warnings are found
-        #[arg(long)]
-        strict: bool,
-    },
-
-    /// Print the supported project .fcs.toml schema example
-    ConfigSchema {
-        /// Output format: toml, text, or json
-        #[arg(short, long, default_value = "toml")]
-        format: String,
-    },
-
-    /// Print project detection and actionable setup advice
-    Advise {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Print the non-blocking startup plan used by the TUI activity panel
-    Plan {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Print detected project profile without advice text
-    Detect {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Run workspace readiness, cache, config, and release health checks
-    Doctor {
-        /// Target directory
-        directory: Option<String>,
-    },
-
-    /// Build a support bundle with workspace, index, LSP, DAP, workflow, and query diagnostics
-    DoctorBundle {
-        /// Target directory
-        directory: Option<String>,
-
-        /// Output format: text or json
-        #[arg(short, long, default_value = "text")]
-        format: String,
-
-        /// Write the bundle to this path instead of stdout
-        #[arg(long)]
-        out: Option<String>,
-    },
-
-    /// Print diagnostic workflow templates for this workspace
-    Workflows {
-        /// Target directory
-        directory: Option<String>,
-
-        /// Output format: text or json
-        #[arg(short, long, default_value = "text")]
-        format: String,
     },
 }
 
@@ -2482,7 +2509,7 @@ pub enum IgnoreAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
+    use super::{Cli, Commands, FindAction};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -2491,26 +2518,28 @@ mod tests {
     }
 
     #[test]
-    fn search_accepts_multiple_paths() {
-        let cli = Cli::try_parse_from(["fcs", "search", "main", "install.sh", "README.md"]).unwrap();
+    fn find_text_accepts_multiple_paths() {
+        let cli = Cli::try_parse_from(["fcs", "find", "text", "main", "install.sh", "README.md"]).unwrap();
 
         match *cli.command {
-            Commands::Search { pattern, paths, .. } => {
+            Commands::Find {
+                action: FindAction::Text { pattern, paths, .. },
+            } => {
                 assert_eq!(pattern, "main");
                 assert_eq!(paths, vec!["install.sh".to_string(), "README.md".to_string()]);
             }
-            command => panic!("expected search command, got {command:?}"),
+            command => panic!("expected find text command, got {command:?}"),
         }
     }
 
     #[test]
-    fn release_smoke_commands_parse() {
+    fn grouped_release_smoke_commands_parse() {
         let cases: &[&[&str]] = &[
-            &["fcs", "search", "main", "install.sh", "README.md"],
-            &["fcs", "tui", "--mode", "files", "--query", "main"],
+            &["fcs", "ui", "open", "--mode", "files", "--query", "main"],
             &[
                 "fcs",
-                "tui-script",
+                "ui",
+                "script",
                 "script.fcs",
                 ".",
                 "--mode",
@@ -2522,15 +2551,33 @@ mod tests {
                 "--step-timeout-ms",
                 "100",
             ],
-            &["fcs", "workspace", "status", "."],
-            &["fcs", "workspace", "detect", "."],
-            &["fcs", "workspace", "doctor", "."],
-            &["fcs", "workspace", "doctor-bundle", ".", "--format", "json"],
-            &["fcs", "workspace", "config-doctor", ".", "--strict"],
-            &["fcs", "workspace", "config-schema", "--format", "json"],
+            &["fcs", "find", "text", "main", "install.sh", "README.md"],
+            &["fcs", "find", "files", ".", "--query", "main"],
+            &["fcs", "find", "symbols", ".", "--query", "parse_config"],
+            &["fcs", "find", "preview", "src/main.rs:1:20"],
             &[
                 "fcs",
-                "workspace",
+                "find",
+                "query",
+                "kind:function lang:rust text:main",
+                ".",
+                "--source",
+                "all",
+                "--format",
+                "json",
+            ],
+            &["fcs", "find", "query", "--use", "main", "--source", "index"],
+            &["fcs", "find", "query", "--list-saved"],
+            &["fcs", "find", "query", "--delete-saved", "main"],
+            &["fcs", "project", "status", "."],
+            &["fcs", "project", "detect", "."],
+            &["fcs", "project", "doctor", "."],
+            &["fcs", "project", "doctor-bundle", ".", "--format", "json"],
+            &["fcs", "project", "config-doctor", ".", "--strict"],
+            &["fcs", "project", "config-schema", "--format", "json"],
+            &[
+                "fcs",
+                "project",
                 "profile",
                 "save",
                 "main",
@@ -2540,15 +2587,11 @@ mod tests {
                 "--index-root",
                 "src",
             ],
-            &["fcs", "workspace", "profile", "list"],
-            &["fcs", "workspace", "profile", "show", "main"],
-            &["fcs", "workspace", "profile", "use", "main"],
-            &["fcs", "workspace", "profile", "current"],
-            &["fcs", "workspace", "profile", "delete", "main"],
-            &["fcs", "service", "snapshot", ".", "--format", "json"],
-            &["fcs", "service", "status", "."],
+            &["fcs", "project", "profile", "list"],
+            &["fcs", "project", "service", "snapshot", ".", "--format", "json"],
             &[
                 "fcs",
+                "project",
                 "service",
                 "start",
                 ".",
@@ -2558,227 +2601,38 @@ mod tests {
                 "1",
                 "--foreground",
             ],
+            &["fcs", "project", "service", "stop", "."],
+            &["fcs", "project", "index", "doctor", "."],
+            &["fcs", "project", "index", "verify", ".", "--format", "json"],
             &[
                 "fcs",
-                "service",
+                "project",
+                "index",
+                "shards",
+                ".",
+                "--target-symbols",
+                "1000",
+                "--format",
+                "json",
+            ],
+            &[
+                "fcs",
+                "project",
+                "index",
                 "query",
-                "kind:function text:main",
-                ".",
-                "--source",
-                "index",
-                "--mode",
-                "exact",
-                "--score-explain",
-            ],
-            &["fcs", "service", "stop", "."],
-            &["fcs", "index", "doctor", "."],
-            &["fcs", "index", "verify", ".", "--format", "json"],
-            &["fcs", "index", "stats", "."],
-            &[
-                "fcs",
-                "index",
-                "shards",
-                ".",
-                "--target-symbols",
-                "1000",
-                "--format",
-                "json",
-            ],
-            &[
-                "fcs",
-                "index",
-                "shards",
-                ".",
-                "--target-symbols",
-                "1000",
-                "--format",
-                "json",
-                "--write",
-            ],
-            &["fcs", "index", "shard-status", ".", "--format", "json"],
-            &[
-                "fcs",
-                "index",
-                "shard-query",
                 "main",
                 ".",
-                "--kind",
-                "symbols",
-                "--limit",
-                "5",
                 "--timing",
-            ],
-            &["fcs", "index", "compact", ".", "--dry-run"],
-            &["fcs", "index", "prewarm", "."],
-            &["fcs", "index", "refresh", "."],
-            &[
-                "fcs",
-                "index",
-                "daemon",
-                ".",
-                "--interval-ms",
-                "0",
-                "--max-cycles",
-                "1",
-                "--foreground",
-            ],
-            &["fcs", "index", "daemon-status", "."],
-            &["fcs", "index", "query", "main", ".", "--timing", "--warn-ms", "1000"],
-            &[
-                "fcs",
-                "index",
-                "profile",
-                "main",
-                ".",
-                "--kind",
-                "symbols",
-                "--format",
-                "json",
                 "--warn-ms",
                 "1000",
             ],
-            &["fcs", "index", "bench", ".", "--query", "main"],
+            &["fcs", "project", "index", "bench", ".", "--query", "main"],
+            &["fcs", "project", "ignore", "--directory", ".", "list"],
+            &["fcs", "project", "action", "list", "."],
             &[
                 "fcs",
-                "query",
-                "kind:function lang:rust text:main",
-                ".",
-                "--source",
-                "all",
-                "--format",
-                "json",
-            ],
-            &[
-                "fcs",
-                "query",
-                "name:smoke_.*",
-                ".",
-                "--source",
-                "index",
-                "--mode",
-                "regex",
-                "--macro",
-                "functions",
-                "--score-explain",
-            ],
-            &[
-                "fcs",
-                "query",
-                "kind:function text:main",
-                ".",
-                "--source",
-                "index",
-                "--profile",
-                "--format",
-                "json",
-            ],
-            &[
-                "fcs",
-                "query",
-                "kind:function name:main",
-                ".",
-                "--source",
-                "index",
-                "--mode",
-                "exact",
-                "--save",
-                "main",
-            ],
-            &["fcs", "query", "--use", "main", "--source", "index"],
-            &["fcs", "query", "--list-saved"],
-            &["fcs", "query", "--delete-saved", "main"],
-            &[
-                "fcs",
-                "query",
-                "kind:function (name:main or name:init) not path:target",
-                ".",
-                "--source",
-                "semantic",
-                "--explain",
-            ],
-            &["fcs", "bench", "all", ".", "--format", "json", "--warn-ms", "10000"],
-            &["fcs", "bench", "search", "main", ".", "--format", "json"],
-            &["fcs", "bench", "index", ".", "--query", "main", "--format", "json"],
-            &["fcs", "bench", "tui", ".", "--query", "main", "--format", "json"],
-            &["fcs", "bench", "trace", "--format", "json"],
-            &["fcs", "bench", "preview", "src/main.rs:1", "--format", "json"],
-            &["fcs", "trace", "export", "--format", "json"],
-            &["fcs", "trace", "graph", "--directory", ".", "--format", "mermaid"],
-            &["fcs", "trace", "use", "smoke"],
-            &["fcs", "trace", "current"],
-            &[
-                "fcs",
-                "trace",
-                "semantic",
-                "src/main.rs:1:1",
-                "--relation",
-                "outgoing",
-                "--session",
-                "smoke-semantic",
-                "--tag",
-                "smoke",
-                "--fallback",
-                "index",
-                "--cache",
-                "--format",
-                "json",
-            ],
-            &[
-                "fcs",
-                "trace",
-                "semantic",
-                "--from-query",
-                "kind:function name:main",
-                "--query-source",
-                "index",
-                "--query-limit",
-                "3",
-                "--directory",
-                ".",
-            ],
-            &[
-                "fcs",
-                "trace",
-                "semantic",
-                "--targets-file",
-                "targets.txt",
-                "--relation",
-                "references",
-                "--session",
-                "batch",
-            ],
-            &["fcs", "trace", "note", "latest", "checked"],
-            &["fcs", "trace", "status", "latest", "open"],
-            &["fcs", "trace", "priority", "latest", "high"],
-            &["fcs", "trace", "timeline", "smoke", "--format", "json"],
-            &["fcs", "trace", "replay", "smoke", "--format", "json"],
-            &[
-                "fcs",
-                "trace",
-                "replay-plan",
-                "smoke",
-                "--format",
-                "json",
-                "--program",
-                "target/debug/fcs",
-                "--name",
-                "smoke-replay",
-            ],
-            &["fcs", "trace", "diff", "smoke-a", "smoke-b", "--format", "json"],
-            &[
-                "fcs",
-                "trace",
-                "insights",
-                "smoke",
-                "--directory",
-                ".",
-                "--format",
-                "json",
-            ],
-            &["fcs", "actions", "list", "."],
-            &[
-                "fcs",
-                "actions",
+                "project",
+                "action",
                 "run",
                 "test",
                 "--directory",
@@ -2793,22 +2647,61 @@ mod tests {
                 "--",
                 "--exact",
             ],
-            &["fcs", "plugin", "list", "."],
-            &["fcs", "plugin", "show", "builtin-dev", "--directory", "."],
-            &["fcs", "plugin", "doctor", "."],
-            &["fcs", "plugin", "doctor", ".", "--strict"],
-            &["fcs", "plugin", "schema", "--format", "toml"],
-            &["fcs", "plugin", "templates", "."],
-            &["fcs", "plugin", "commands", "."],
+            &["fcs", "code", "def", "src/main.rs:1:1"],
+            &["fcs", "code", "refs", "src/main.rs:1:1"],
+            &["fcs", "code", "type", "src/main.rs:1:1"],
+            &["fcs", "code", "impl", "src/main.rs:1:1"],
+            &["fcs", "code", "doc-symbols", "src/main.rs"],
+            &["fcs", "code", "outgoing", "src/main.rs:1:1"],
+            &["fcs", "code", "health", "."],
+            &["fcs", "code", "highlights", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "code", "grouped-refs", "src/main.rs:1:1", "--directory", "."],
             &[
                 "fcs",
-                "plugin",
-                "init",
-                "builtin-dev:rust-debug",
+                "code",
+                "rename",
+                "src/main.rs:1:1",
+                "renamed",
                 "--directory",
                 ".",
-                "--dry-run",
             ],
+            &["fcs", "code", "actions", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "code", "organize-imports", "src/main.rs", "--directory", "."],
+            &["fcs", "code", "outline", "src/main.rs", "--format", "json"],
+            &["fcs", "code", "breadcrumbs", "src/main.rs:1:1", "--directory", "."],
+            &[
+                "fcs",
+                "code",
+                "tokens",
+                "src/main.rs",
+                "--line",
+                "1",
+                "--format",
+                "json",
+            ],
+            &["fcs", "code", "calls", "src/main.rs:1:1", "--directory", "."],
+            &["fcs", "code", "graph", "imports", ".", "--format", "mermaid"],
+            &[
+                "fcs",
+                "code",
+                "graph",
+                "semantic",
+                "src/main.rs:1:1",
+                "--relation",
+                "references",
+            ],
+            &["fcs", "trace", "export", "--format", "json"],
+            &["fcs", "trace", "graph", "--directory", ".", "--format", "mermaid"],
+            &["fcs", "trace", "use", "smoke"],
+            &["fcs", "trace", "current"],
+            &["fcs", "trace", "semantic", "src/main.rs:1:1", "--relation", "outgoing"],
+            &["fcs", "trace", "note", "latest", "checked"],
+            &["fcs", "trace", "timeline", "smoke", "--format", "json"],
+            &["fcs", "plugin", "list", "."],
+            &["fcs", "plugin", "show", "builtin-dev", "--directory", "."],
+            &["fcs", "plugin", "doctor", ".", "--strict"],
+            &["fcs", "plugin", "schema", "--format", "toml"],
+            &["fcs", "plugin", "commands", "."],
             &[
                 "fcs",
                 "plugin",
@@ -2817,128 +2710,8 @@ mod tests {
                 "--directory",
                 ".",
                 "--dry-run",
-                "--var",
-                "mode=debug",
-                "--",
-                "--locked",
             ],
-            &[
-                "fcs",
-                "plugin",
-                "plan",
-                "builtin-dev:cargo-check",
-                "--directory",
-                ".",
-                "--var",
-                "mode=debug",
-                "--",
-                "--locked",
-            ],
-            &[
-                "fcs",
-                "graph",
-                "imports",
-                ".",
-                "--format",
-                "mermaid",
-                "--depth",
-                "2",
-                "--fanout",
-                "4",
-                "--exclude",
-                "target",
-            ],
-            &[
-                "fcs", "graph", "modules", ".", "--format", "dot", "--depth", "2", "--fanout", "4",
-            ],
-            &[
-                "fcs", "graph", "calls", ".", "--format", "json", "--depth", "1", "--fanout", "8",
-            ],
-            &[
-                "fcs",
-                "graph",
-                "semantic",
-                "src/main.rs:1:1",
-                "--relation",
-                "references",
-                "--format",
-                "dot",
-                "--depth",
-                "1",
-                "--fanout",
-                "8",
-                "--fallback",
-                "index",
-                "--cache",
-                "--refresh-cache",
-            ],
-            &["fcs", "type-def", "src/main.rs:1:1"],
-            &["fcs", "doc-symbols", "src/main.rs"],
-            &["fcs", "outgoing", "src/main.rs:1:1"],
-            &["fcs", "lsp", "highlights", "src/main.rs:1:1", "--directory", "."],
-            &["fcs", "lsp", "refs", "src/main.rs:1:1", "--directory", "."],
-            &["fcs", "lsp", "rename", "src/main.rs:1:1", "renamed", "--directory", "."],
-            &[
-                "fcs",
-                "lsp",
-                "rename",
-                "src/main.rs:1:1",
-                "renamed",
-                "--directory",
-                ".",
-                "--apply",
-                "--dry-run",
-            ],
-            &["fcs", "lsp", "code-actions", "src/main.rs:1:1", "--directory", "."],
-            &[
-                "fcs",
-                "lsp",
-                "code-actions",
-                "src/main.rs:1:1",
-                "--directory",
-                ".",
-                "--format",
-                "json",
-                "--apply",
-                "1",
-                "--dry-run",
-            ],
-            &["fcs", "lsp", "organize-imports", "src/main.rs", "--directory", "."],
-            &[
-                "fcs",
-                "lsp",
-                "organize-imports",
-                "src/main.rs",
-                "--directory",
-                ".",
-                "--apply",
-                "--dry-run",
-            ],
-            &["fcs", "lsp", "outline", "src/main.rs", "--format", "json"],
-            &["fcs", "lsp", "breadcrumbs", "src/main.rs:1:1", "--directory", "."],
-            &[
-                "fcs",
-                "lsp",
-                "semantic-tokens",
-                "src/main.rs",
-                "--line",
-                "1",
-                "--format",
-                "json",
-            ],
-            &["fcs", "lsp", "call-tree", "src/main.rs:1:1", "--directory", "."],
-            &[
-                "fcs",
-                "debug",
-                "command",
-                "target/debug/fcs",
-                "-b",
-                "src/main.rs:1",
-                "--cwd",
-                ".",
-                "--env",
-                "FCS_SMOKE=1",
-            ],
+            &["fcs", "debug", "command", "target/debug/fcs", "-b", "src/main.rs:1"],
             &[
                 "fcs",
                 "debug",
@@ -2947,40 +2720,15 @@ mod tests {
                 "target/debug/fcs",
                 "-b",
                 "src/main.rs:1",
-                "--directory",
-                ".",
-                "--cwd",
-                ".",
-                "--env",
-                "FCS_SMOKE=1",
-                "--",
-                "--help",
             ],
-            &["fcs", "debug", "disable-breakpoint", "smoke", "1", "--directory", "."],
-            &["fcs", "debug", "enable-breakpoint", "smoke", "1", "--directory", "."],
             &["fcs", "debug", "run-profile", "smoke", "--directory", "."],
+            &["fcs", "debug", "dap", "templates", "--format", "json"],
+            &[
+                "fcs", "debug", "dap", "doctor", ".", "--name", "smoke", "--format", "json",
+            ],
             &[
                 "fcs",
                 "debug",
-                "from-trace",
-                "smoke",
-                "target/debug/fcs",
-                "--name",
-                "smoke-trace",
-                "--directory",
-                ".",
-                "--cwd",
-                ".",
-                "--env",
-                "FCS_SMOKE=1",
-                "--",
-                "--help",
-            ],
-            &["fcs", "debug", "delete-profile", "smoke", "--directory", "."],
-            &["fcs", "dap", "templates", "--format", "json"],
-            &["fcs", "dap", "doctor", ".", "--name", "smoke", "--format", "json"],
-            &[
-                "fcs",
                 "dap",
                 "launch",
                 "target/debug/fcs",
@@ -2992,22 +2740,19 @@ mod tests {
             ],
             &[
                 "fcs",
+                "debug",
                 "dap",
                 "session-smoke",
                 "target/debug/fcs",
                 "-b",
                 "src/main.rs:1",
-                "--cwd",
-                ".",
-                "--env",
-                "FCS_SMOKE=1",
-                "--",
-                "--help",
             ],
             &[
                 "fcs",
+                "debug",
                 "dap",
-                "session-smoke",
+                "adapter-session",
+                "mock-adapter",
                 "target/debug/fcs",
                 "--request",
                 "attach",
@@ -3016,60 +2761,19 @@ mod tests {
             ],
             &[
                 "fcs",
-                "dap",
-                "from-trace",
-                "smoke",
-                "target/debug/fcs",
-                "--name",
-                "smoke-dap",
-                "--directory",
+                "dev",
+                "bench",
+                "all",
                 ".",
-                "--cwd",
-                ".",
-                "--env",
-                "FCS_SMOKE=1",
-                "--",
-                "--help",
-            ],
-            &[
-                "fcs",
-                "dap",
-                "adapter-session",
-                "mock-adapter",
-                "target/debug/fcs",
-                "-b",
-                "src/main.rs:1",
-                "--cwd",
-                ".",
-                "--adapter-env",
-                "FCS_ADAPTER=1",
                 "--format",
                 "json",
-                "--request-timeout-ms",
-                "1000",
-                "--event-timeout-ms",
-                "500",
-                "--max-read-frames",
-                "16",
-                "--env",
-                "FCS_SMOKE=1",
-                "--",
-                "--help",
+                "--warn-ms",
+                "10000",
             ],
-            &[
-                "fcs",
-                "dap",
-                "adapter-session",
-                "mock-adapter",
-                "target/debug/fcs",
-                "--request",
-                "attach",
-                "--process-id",
-                "1234",
-            ],
-            &["fcs", "complete", "bash"],
-            &["fcs", "man", "--stdout"],
-            &["fcs", "man", "--out-dir", "target/man"],
+            &["fcs", "dev", "bench", "preview", "src/main.rs:1", "--format", "json"],
+            &["fcs", "dev", "history", "list"],
+            &["fcs", "dev", "complete", "bash"],
+            &["fcs", "dev", "man", "--stdout"],
         ];
 
         for args in cases {
@@ -3078,27 +2782,36 @@ mod tests {
     }
 
     #[test]
+    fn old_top_level_commands_do_not_parse() {
+        let old_cases: &[&[&str]] = &[
+            &["fcs", "search", "main"],
+            &["fcs", "files"],
+            &["fcs", "symbol"],
+            &["fcs", "tui"],
+            &["fcs", "workspace", "status"],
+            &["fcs", "index", "status"],
+            &["fcs", "query", "--list-saved"],
+            &["fcs", "bench", "all"],
+            &["fcs", "graph", "imports"],
+            &["fcs", "actions", "list"],
+            &["fcs", "dap", "templates"],
+            &["fcs", "complete", "bash"],
+            &["fcs", "man", "--stdout"],
+        ];
+
+        for args in old_cases {
+            assert!(
+                Cli::try_parse_from(*args).is_err(),
+                "old command should not parse: {args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn release_help_lists_core_workflows() {
         let help = Cli::command().render_long_help().to_string();
 
-        for command in [
-            "tui",
-            "tui-script",
-            "workspace",
-            "service",
-            "index",
-            "query",
-            "bench",
-            "graph",
-            "trace",
-            "actions",
-            "plugin",
-            "debug",
-            "dap",
-            "type-def",
-            "doc-symbols",
-            "outgoing",
-        ] {
+        for command in ["ui", "find", "code", "trace", "debug", "project", "plugin", "dev"] {
             assert!(help.contains(command), "help output should mention {command}");
         }
     }

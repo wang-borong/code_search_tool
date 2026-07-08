@@ -7,7 +7,7 @@
 ## ✨ 核心特性
 
 - 🚀 **极速搜索**：底层直接集成 `ripgrep` 系列库（`grep-searcher`, `grep-regex`, `ignore`），在数百万行代码中瞬间检索。
-- 🖥️ **Ratatui 工作台**：`fcs tui` 提供常驻多面板界面，可循环搜索、切换 source、查看 preview、trace 和 debug 命令。
+- 🖥️ **Ratatui 工作台**：`fcs ui open` 提供常驻多面板界面，可循环搜索、切换 source、查看 preview、trace 和 debug 命令。
 - 🎨 **实时预览**：采用 `bat` 库提供带有行号、网格和语法高亮的实时代码预览。
 - ⌨️ **交互式过滤**：强大的模糊匹配过滤（支持 exact 模式、智能大小写、反向匹配等）。
 - 🔌 **编辑器集成**：在交互界面按下回车键，可直接调用你配置的编辑器（如 `nvim`, `vim`）并**自动定位到匹配的行数**。
@@ -56,8 +56,8 @@ cp target/release/fcs ~/.local/bin/
 scripts/install-local.sh --prefix "$HOME/.local"
 
 # 生成 man page
-fcs man --stdout
-fcs man --out-dir ~/.local/share/man/man1
+fcs dev man --stdout
+fcs dev man --out-dir ~/.local/share/man/man1
 ```
 
 ### 4. 验证安装
@@ -76,25 +76,25 @@ fcs --version
 
 完整操作手册见 [docs/USER_MANUAL.md](docs/USER_MANUAL.md)，其中按工作流详细说明了 TUI、CLI、LSP、trace、debug/DAP、配置、插件、大仓库性能和排障步骤。
 
-### 1. Ratatui 工作台 (`tui`)
+### 1. Ratatui 工作台 (`ui open`)
 
-`fcs tui` 是新的主工作流入口。默认采用搜索优先界面：宽屏左侧显示结果、右侧显示语法高亮预览，窄终端自动上下堆叠；输入 query 时会实时刷新，空结果、空预览和空 Trace/Debug 面板会提示下一步操作，trace/debug/semantic 等高级 layout 会把左侧栏切成对应任务引导，Sources 会显示各 source 的数据量或 loading 状态，底部快捷提示会随当前工作流切换。Results 会在选中项下方显示 kind/location/path 元信息和可执行动作提示，Preview 标题显示目标位置和窗口命中数，长行会用 `.. |` gutter 显式续行，Trace 列表会标出记录状态和类型，Debug Session 会显示 profile/断点/watch 摘要和下一步提示；命令面板会按上下文和命令类别组织候选项。
+`fcs ui open` 是新的主工作流入口。默认采用搜索优先界面：宽屏左侧显示结果、右侧显示语法高亮预览，窄终端自动上下堆叠；输入 query 时会实时刷新，空结果、空预览和空 Trace/Debug 面板会提示下一步操作，trace/debug/semantic 等高级 layout 会把左侧栏切成对应任务引导，Sources 会显示各 source 的数据量或 loading 状态，底部快捷提示会随当前工作流切换。Results 会在选中项下方显示 kind/location/path 元信息和可执行动作提示，Preview 标题显示目标位置和窗口命中数，长行会用 `.. |` gutter 显式续行，Trace 列表会标出记录状态和类型，Debug Session 会显示 profile/断点/watch 摘要和下一步提示；命令面板会按上下文和命令类别组织候选项。
 
 ```bash
 # 默认进入 files source，首屏可直接浏览文件
-fcs tui
+fcs ui open
 
 # 指定初始查询
-fcs tui --mode files --query main
+fcs ui open --mode files --query main
 
 # 进入符号模式
-fcs tui --mode symbols --query handle
+fcs ui open --mode symbols --query handle
 
 # 指定 debug 面板使用的二进制
-fcs tui --debug-binary target/debug/app
+fcs ui open --debug-binary target/debug/app
 
 # 非交互回放 TUI 命令脚本，适合回归测试和录制追踪流程
-fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
+fcs ui script trace-loop.fcs . --mode symbols --query main --format json
 ```
 
 `tui-script` 逐行执行 TUI 命令面板语法，也支持 `select <n>`、`move <delta>`、`wait <ms>` 和 `assert ...` 断言。常用断言包括 `assert source files`、`assert query empty`、`assert results >= 1`、`assert status contains traced`、`assert status-level info`、`assert preview-title contains Preview`、`assert trace-session bug-42`、`assert trace-view graph`、`assert layout debug`、`assert filter none`、`assert group path`、`assert pending none`；默认不会持久化 TUI state，确实需要写回 pins/breakpoints/navigation/session/layout/filter/group 时加 `--persist`。
@@ -125,29 +125,29 @@ fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
 - `[` / `]`：在 TUI 内的导航栈中后退/前进。
 - `?`：打开当前布局的上下文帮助。
 
-> `fcs search/files/symbol` 等旧命令仍保留，适合脚本化或一次性选择；`fcs tui` 适合连续搜索、语义追踪、诊断和调试准备。
+> `fcs find text`、`fcs find files`、`fcs find symbols` 适合脚本化或一次性选择；`fcs ui open` 适合连续搜索、语义追踪、诊断和调试准备。
 
 ---
 
-### 2. 代码搜索 (`search`)
+### 2. 代码搜索 (`find text`)
 
 模糊搜索是 `fcs` 最核心的功能。它会在指定目录中通过 Regex 预筛选文件，然后进入交互式模糊过滤界面。
 
 ```bash
 # 格式
-fcs search <search_pattern> [path ...] [options]
+fcs find text <search_pattern> [path ...] [options]
 
 # 示例 1：在当前目录下搜索 "fn main"
-fcs search "fn main"
+fcs find text "fn main"
 
 # 示例 2：在指定目录 "/path/to/project" 下搜索 "struct Config"
-fcs search "struct Config" /path/to/project
+fcs find text "struct Config" /path/to/project
 
 # 示例 3：在多个文件或目录中搜索 "main"
-fcs search main install.sh README.md src
+fcs find text main install.sh README.md src
 
 # 示例 4：传入额外的 Ripgrep 选项（例如不忽略任何文件、忽略大小写）
-fcs search "TODO" -o --no-ignore -o -i
+fcs find text "TODO" -o --no-ignore -o -i
 ```
 
 #### 支持的 Ripgrep 搜索选项 (`-o` / `--option`)
@@ -176,19 +176,19 @@ fcs search "TODO" -o --no-ignore -o -i
 
 ---
 
-### 3. 文件查找 (`files`)
+### 3. 文件查找 (`find files`)
 
 快速枚举项目文件并进入交互式模糊选择界面，回车后用配置的编辑器打开文件。
 
 ```bash
 # 在当前目录下查找文件
-fcs files
+fcs find files
 
 # 在指定目录下查找文件，并设置初始查询
-fcs files /path/to/project -q main
+fcs find files /path/to/project -q main
 
 # 传入文件遍历选项
-fcs files -o --hidden -o --no-ignore
+fcs find files -o --hidden -o --no-ignore
 ```
 
 支持的文件遍历选项包括：
@@ -199,7 +199,7 @@ fcs files -o --hidden -o --no-ignore
 
 ---
 
-### 4. 符号查找 (`symbol`)
+### 4. 符号查找 (`find symbols`)
 
 无需 clangd 即可进行轻量级符号查找。当前支持 Rust、C/C++、Python、JavaScript/TypeScript 中的常见函数、结构体、类、枚举、trait、宏等粗粒度符号。
 
@@ -207,150 +207,150 @@ fcs files -o --hidden -o --no-ignore
 
 ```bash
 # 在当前目录查找符号
-fcs symbol
+fcs find symbols
 
 # 在指定目录查找符号，并设置初始查询
-fcs symbol /path/to/project -q parse_config
+fcs find symbols /path/to/project -q parse_config
 
 # 限制扫描深度
-fcs symbol -o --max-depth=3
+fcs find symbols -o --max-depth=3
 ```
 
 > **说明**：`symbol` 当前是轻量 ripgrep + 正则索引，适合快速追踪；精确语义跳转请使用下方 clangd 命令。
 
 ---
 
-### 5. 代码索引 (`index`)
+### 5. 代码索引 (`project index`)
 
-`fcs index` 会把项目文件列表和轻量符号结果持久化到 workspace cache，适合后续做高性能浏览、状态检查和增量判断。
+`fcs project index` 会把项目文件列表和轻量符号结果持久化到 workspace cache，适合后续做高性能浏览、状态检查和增量判断。
 
 ```bash
 # 查看索引版本、缓存位置、tracked file 是否变更
-fcs index status
+fcs project index status
 
 # 构建索引；二次执行时只重新抽取新增/变更文件的 symbol，未变文件复用缓存
-fcs index build
+fcs project index build
 
 # 查看缓存中的符号或文件
-fcs index list --kind symbols --limit 50
-fcs index list --kind files --limit 50
+fcs project index list --kind symbols --limit 50
+fcs project index list --kind files --limit 50
 
 # 查看缓存大小、语言分布、symbol kind 分布
-fcs index stats
+fcs project index stats
 
 # 为大型 workspace 估算 shard 拆分建议
-fcs index shards . --target-symbols 5000 --format json
+fcs project index shards . --target-symbols 5000 --format json
 
 # 写入 shard cache、检查新鲜度，并在 shard 上查询；stale 时自动回退主索引
-fcs index shards . --target-symbols 5000 --write
-fcs index shard-status .
-fcs index shard-query parse_config . --kind symbols --limit 20
+fcs project index shards . --target-symbols 5000 --write
+fcs project index shard-status .
+fcs project index shard-query parse_config . --kind symbols --limit 20
 
 # 查询缓存索引，不重新扫描项目
-fcs index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
+fcs project index query parse_config --kind symbols --limit 20 --timing --warn-ms 200
 
 # 只检查主索引、sidecar/mmap 和 shard cache 健康状态，不做重建
-fcs index verify . --format json
+fcs project index verify . --format json
 
 # 记录 status/stats/list/query/shard-query 各阶段延迟
-fcs index profile parse_config . --kind symbols --limit 20 --format json --warn-ms 200
+fcs project index profile parse_config . --kind symbols --limit 20 --format json --warn-ms 200
 
 # 修复 stale/corrupt/missing index；--force 可强制重建
-fcs index repair
+fcs project index repair
 
 # 仅在索引 missing/stale/corrupt/schema migrated 时重建
-fcs index refresh
+fcs project index refresh
 
 # 预热/压缩缓存
-fcs index prewarm
-fcs index compact --dry-run
+fcs project index prewarm
+fcs project index compact --dry-run
 
 # 前台轮询刷新索引；常驻模式省略 --max-cycles
-fcs index daemon --interval-ms 2000 --max-cycles 1 --foreground
-fcs index daemon-status
+fcs project index daemon --interval-ms 2000 --max-cycles 1 --foreground
+fcs project index daemon-status
 
 # 记录缓存操作延迟，并写入 workspace cache 的 latency-smoke.tsv
-fcs index bench --limit 50 --query main
+fcs project index bench --limit 50 --query main
 ```
 
-索引当前复用 `files` / `symbol` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。workspace cache 会同时写入主索引 `code_index.toml`、轻量元数据、files TOML、symbols JSONL 和 symbols mmap sidecar；符号 list/query/TUI source 优先走 mmap，mmap 损坏时降级到 JSONL，JSONL 不可用时再降级主索引。`index refresh` 会在主索引新鲜时重建缺失、过期或损坏的 sidecar，不触发完整 symbol 重扫。`index shards --write` 会把大仓库按目录 bucket 写成 shard cache 和 manifest，`shard-query` 在 manifest stale/missing 时自动回退主索引。`index daemon` 是无额外依赖的轮询守护模式，每轮复用 `index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
+索引当前复用 `find files` / `find symbols` 的高速扫描路径，并记录 schema version、文件 language、文件大小、修改时间、内容 hash、每文件 symbol 数量、符号 language、range 和 parent 元数据。二次 `build` 仍会快速扫描文件清单以发现新增/删除，但 symbol 抽取优先依据内容 hash 判断变化，只作用于新增或变化文件，并在 build report 中输出新增/变化/复用数量和样本路径。workspace cache 会同时写入主索引 `code_index.toml`、轻量元数据、files TOML、symbols JSONL 和 symbols mmap sidecar；符号 list/query/TUI source 优先走 mmap，mmap 损坏时降级到 JSONL，JSONL 不可用时再降级主索引。`project index refresh` 会在主索引新鲜时重建缺失、过期或损坏的 sidecar，不触发完整 symbol 重扫。`project index shards --write` 会把大仓库按目录 bucket 写成 shard cache 和 manifest，`shard-query` 在 manifest stale/missing 时自动回退主索引。`project index daemon` 是无额外依赖的轮询守护模式，每轮复用 `project index refresh`，并在 workspace cache 写入 heartbeat，便于 `daemon-status` 检查最后一次刷新状态。
 
 ---
 
 ### 6. 统一查询、Service 与 Benchmark
 
-`fcs query` 提供一个统一的字段化查询入口，可以同时查缓存 index 和 trace 历史。常用字段包括 `kind:`、`lang:` / `language:`、`path:`、`name:`、`text:`、`source:`、`status:`、`priority:`、`session:` 和 `tag:`。
+`fcs find query` 提供一个统一的字段化查询入口，可以同时查缓存 index 和 trace 历史。常用字段包括 `kind:`、`lang:` / `language:`、`path:`、`name:`、`text:`、`source:`、`status:`、`priority:`、`session:` 和 `tag:`。
 
 ```bash
 # 从 index + trace 中查询
-fcs query "kind:function lang:rust text:parse" . --source all --format json
+fcs find query "kind:function lang:rust text:parse" . --source all --format json
 
 # 只查 index，适合脚本化筛选符号
-fcs query "path:src name:main" . --source index --limit 20
+fcs find query "path:src name:main" . --source index --limit 20
 
 # 只查 trace，适合复盘调查状态
-fcs query "session:bug-42 status:open tag:hot" . --source trace
+fcs find query "session:bug-42 status:open tag:hot" . --source trace
 
 # 解释字段解析、source 选择和支持字段，不执行查询
-fcs query "source:index kind:function name:main" . --source all --explain
+fcs find query "source:index kind:function name:main" . --source all --explain
 
 # 支持分组、OR 和 NOT，用于更精确的代码追踪过滤
-fcs query "kind:function (name:parse or name:init) not path:target" . --source all --explain
+fcs find query "kind:function (name:parse or name:init) not path:target" . --source all --explain
 
 # 输出慢查询观测信息
-fcs query "source:index kind:function text:main" . --source all --timing --warn-ms 200
+fcs find query "source:index kind:function text:main" . --source all --timing --warn-ms 200
 
 # 输出聚合 profile 报告，便于定位 source 选择、过滤器和结果分布
-fcs query "source:index kind:function text:main" . --source all --profile --format json --warn-ms 200
+fcs find query "source:index kind:function text:main" . --source all --profile --format json --warn-ms 200
 
 # 切换匹配模式、使用内置 macro，并在结果 detail 中输出 score
-fcs query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
-fcs query "kind:function name:parse_config" . --source index --mode exact
+fcs find query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
+fcs find query "kind:function name:parse_config" . --source index --mode exact
 
 # 保存、复用、列出和删除当前 workspace 的常用查询
-fcs query "kind:function name:parse_config" . --source index --mode exact --save parse-config
-fcs query --use parse-config --source index --mode exact
-fcs query --list-saved
-fcs query --delete-saved parse-config
+fcs find query "kind:function name:parse_config" . --source index --mode exact --save parse-config
+fcs find query --use parse-config --source index --mode exact
+fcs find query --list-saved
+fcs find query --delete-saved parse-config
 
 # 只查 LSP workspace/symbol；LSP 不可用时回退到本地 index 结果
-fcs query "name:parse_config" . --source semantic
+fcs find query "name:parse_config" . --source semantic
 
 # 融合 index + trace + LSP；LSP 不可用时仍返回本地结果和状态项
-fcs query "kind:function text:main" . --source auto
+fcs find query "kind:function text:main" . --source auto
 ```
 
-`fcs query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--profile` 会执行查询并输出 source/kind 分布、实际 execution plan、filters、macro 和耗时，适合给慢查询或复杂过滤做回归基线。`--mode fuzzy|exact|regex` 可在快速模糊匹配、严格 token 匹配和正则匹配之间切换；`--macro functions|tests|todo|rust|c|debug` 用于把常见过滤器拼进表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
+`fcs find query --explain` 会打印执行计划、字段过滤器和候选数据源，适合调试复杂表达式。`--profile` 会执行查询并输出 source/kind 分布、实际 execution plan、filters、macro 和耗时，适合给慢查询或复杂过滤做回归基线。`--mode fuzzy|exact|regex` 可在快速模糊匹配、严格 token 匹配和正则匹配之间切换；`--macro functions|tests|todo|rust|c|debug` 用于把常见过滤器拼进表达式。`--source semantic` 会优先使用 LSP workspace/symbol；当 LSP 配置缺失或 adapter 查询失败时，会返回带 `fallback:index:*` 来源前缀的本地 index 结果，避免追踪链路因为语义服务不可用而完全中断。
 
-`fcs service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
+`fcs project service` 是无额外依赖的前台轮询服务，用于把 index、LSP provider 健康、trace、plugin 诊断和当前 workspace profile 汇总成 workspace cache 中的快照文件。它不会后台 fork；需要常驻时建议由 shell、systemd、tmux 或任务编排器托管。
 
 ```bash
 # 跑一轮刷新并写入 heartbeat/snapshot
-fcs service start . --interval-ms 2000 --max-cycles 1 --foreground
+fcs project service start . --interval-ms 2000 --max-cycles 1 --foreground
 
 # 查看最近 heartbeat 和 snapshot 摘要
-fcs service status .
-fcs service snapshot . --format json
+fcs project service status .
+fcs project service snapshot . --format json
 
 # 复用统一查询引擎
-fcs service query "kind:function text:main" . --source index --format json
-fcs service query "source:index kind:function text:main" . --source all --explain
+fcs project service query "kind:function text:main" . --source index --format json
+fcs project service query "source:index kind:function text:main" . --source all --explain
 
 # 请求常驻前台 service 在下一轮停止
-fcs service stop .
+fcs project service stop .
 ```
 
-`fcs bench` 用于给搜索、索引、TUI source、trace store 和 preview 读取建立本地延迟基线；`bench all` 会把 `benchmark-report.json` 写入 workspace cache。
+`fcs dev bench` 用于给搜索、索引、TUI source、trace store 和 preview 读取建立本地延迟基线；`bench all` 会把 `benchmark-report.json` 写入 workspace cache。
 
 ```bash
-fcs bench search main . --format json --warn-ms 200
-fcs bench index . --limit 50 --query main --warn-ms 200
-fcs bench tui . --query main --format json
-fcs bench trace --format json
-fcs bench preview src/main.rs:20 --warn-ms 20
-fcs bench all . --query main --limit 50
-fcs bench baseline .
-fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
+fcs dev bench search main . --format json --warn-ms 200
+fcs dev bench index . --limit 50 --query main --warn-ms 200
+fcs dev bench tui . --query main --format json
+fcs dev bench trace --format json
+fcs dev bench preview src/main.rs:20 --warn-ms 20
+fcs dev bench all . --query main --limit 50
+fcs dev bench baseline .
+fcs dev bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
 ```
 
 `bench baseline` 会把最近一次 `bench all` 的报告保存为 `benchmark-baseline.json`；`bench compare` 对比当前报告与基线，适合 release smoke 或本地性能回归门禁。每次写入 workspace benchmark report 时也会追加 `benchmark-history.json`，text 输出会在有历史时显示 `trend:`，慢项会显示 `explain:` 建议。
@@ -358,15 +358,15 @@ fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --str
 workspace profile 和配置诊断适合 monorepo 或多根项目：
 
 ```bash
-fcs workspace profile save core . --description "core workspace" --index-root src
-fcs workspace profile list
-fcs workspace profile use core
-fcs workspace profile current
-fcs workspace plan
-fcs workspace workflows . --format text
-fcs workspace config-doctor .
-fcs workspace config-schema --format toml
-fcs workspace config-migrate . --dry-run
+fcs project profile save core . --description "core workspace" --index-root src
+fcs project profile list
+fcs project profile use core
+fcs project profile current
+fcs project plan
+fcs project workflows . --format text
+fcs project config-doctor .
+fcs project config-schema --format toml
+fcs project config-migrate . --dry-run
 ```
 
 ---
@@ -377,84 +377,84 @@ fcs workspace config-migrate . --dry-run
 
 ```bash
 # 检查 workspace 语义导航就绪状态
-fcs workspace status
+fcs project status
 
 # 输出项目识别结果和可执行建议
-fcs workspace advise
+fcs project advise
 
 # 输出 TUI Activity 面板使用的非阻塞启动计划
-fcs workspace plan
+fcs project plan
 
 # 输出面向 crash、symbol、diagnostic、trace->DAP 的诊断 workflow 模板
-fcs workspace workflows
+fcs project workflows
 
 # 只查看项目自动识别结果，或执行更完整健康检查
-fcs workspace detect
-fcs workspace doctor
-fcs workspace doctor-bundle . --format json --out /tmp/fcs-doctor.json
+fcs project detect
+fcs project doctor
+fcs project doctor-bundle . --format json --out /tmp/fcs-doctor.json
 
 # 初始化 fcs 的非侵入式 workspace 缓存元数据
-fcs workspace init
+fcs project init
 
 # 跳转定义
-fcs def src/main.c:42:5
-fcs def src/lib.rs:42:5
+fcs code def src/main.c:42:5
+fcs code def src/lib.rs:42:5
 
 # 查找引用
-fcs refs src/main.c:42:5
+fcs code refs src/main.c:42:5
 
 # 查看单文件诊断
-fcs diag src/main.c
+fcs code diag src/main.c
 
 # 查看 hover 文本和 workspace symbol
-fcs hover src/main.c:42:5
-fcs workspace-symbols parse_config --limit 50
+fcs code hover src/main.c:42:5
+fcs code workspace-symbols parse_config --limit 50
 
 # 更深层的 LSP 调试辅助
-fcs lsp highlights src/main.c:42:5
-fcs lsp refs src/main.c:42:5
-fcs lsp rename src/main.c:42:5 new_name
-fcs lsp rename src/main.c:42:5 new_name --apply --dry-run
-fcs lsp code-actions src/main.c:42:5
-fcs lsp code-actions src/main.c:42:5 --format json
-fcs lsp code-actions src/main.c:42:5 --apply 1 --dry-run
-fcs lsp organize-imports src/main.c --apply --dry-run
-fcs lsp outline src/main.c --format tree
-fcs lsp breadcrumbs src/main.c:42:5
-fcs lsp semantic-tokens src/main.c --line 42
-fcs lsp call-tree src/main.c:42:5
+fcs code highlights src/main.c:42:5
+fcs code grouped-refs src/main.c:42:5
+fcs code rename src/main.c:42:5 new_name
+fcs code rename src/main.c:42:5 new_name --apply --dry-run
+fcs code actions src/main.c:42:5
+fcs code actions src/main.c:42:5 --format json
+fcs code actions src/main.c:42:5 --apply 1 --dry-run
+fcs code organize-imports src/main.c --apply --dry-run
+fcs code outline src/main.c --format tree
+fcs code breadcrumbs src/main.c:42:5
+fcs code tokens src/main.c --line 42
+fcs code calls src/main.c:42:5
 
 # 检查当前 workspace 或指定文件使用的 LSP provider
-fcs lsp health
-fcs lsp health --file src/main.c
+fcs code health
+fcs code health --file src/main.c
 ```
 
-`workspace doctor-bundle` 会把 startup plan、config diagnostics、index status/stats/shards、service snapshot、DAP profiles/adapters/templates、workflow 模板和 saved queries 打包成 text/json，适合提交 issue 或做 release 前环境快照。`workspace workflows` 现在包含 `search-to-debug-loop`，把 query、trace、`graph semantic --fallback index`、DAP profile 和 TUI debug 面板串成一个可重复的追踪循环。
+`project doctor-bundle` 会把 startup plan、config diagnostics、index status/stats/shards、service snapshot、DAP profiles/adapters/templates、workflow 模板和 saved queries 打包成 text/json，适合提交 issue 或做 release 前环境快照。`project workflows` 现在包含 `search-to-debug-loop`，把 query、trace、`code graph semantic --fallback index`、DAP profile 和 TUI debug 面板串成一个可重复的追踪循环。
 
 ### 8. 语义图与导入图 (`graph`)
 
-`fcs graph` 用来把追踪过程中的关系导出成可读边列表、JSON、Mermaid 或 Graphviz DOT。`semantic` 子命令复用 LSP provider，适合定义、引用、类型定义、实现和调用关系；`imports` 子命令使用轻量文件扫描，适合快速观察模块依赖。
+`fcs code graph` 用来把追踪过程中的关系导出成可读边列表、JSON、Mermaid 或 Graphviz DOT。`semantic` 子命令复用 LSP provider，适合定义、引用、类型定义、实现和调用关系；`imports` 子命令使用轻量文件扫描，适合快速观察模块依赖。
 
 ```bash
 # clangd-backed semantic graph
-fcs graph semantic src/main.c:42:5 --relation outgoing --format text
-fcs graph semantic src/main.c:42:5 --relation references --format json
-fcs graph semantic src/main.c:42:5 --relation outgoing --format dot --fanout 20
-fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
-fcs graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache
+fcs code graph semantic src/main.c:42:5 --relation outgoing --format text
+fcs code graph semantic src/main.c:42:5 --relation references --format json
+fcs code graph semantic src/main.c:42:5 --relation outgoing --format dot --fanout 20
+fcs code graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
+fcs code graph semantic src/main.c:42:5 --relation outgoing --format json --fallback index --cache
 
 # Record the same semantic relation into a trace session
 fcs trace semantic src/main.c:42:5 --relation outgoing --session bug-42 --fallback index --cache
 
 # Lightweight import/use/mod graph
-fcs graph imports --limit 100 --format text
-fcs graph imports --format json
-fcs graph imports --limit 100 --depth 2 --fanout 8 --exclude target --format mermaid
-fcs graph imports --limit 100 --format dot
+fcs code graph imports --limit 100 --format text
+fcs code graph imports --format json
+fcs code graph imports --limit 100 --depth 2 --fanout 8 --exclude target --format mermaid
+fcs code graph imports --limit 100 --format dot
 
 # Offline module/call graph without requiring an LSP server
-fcs graph modules --limit 100 --depth 2 --format dot
-fcs graph calls --limit 100 --fanout 8 --format json
+fcs code graph modules --limit 100 --depth 2 --format dot
+fcs code graph calls --limit 100 --fanout 8 --format json
 ```
 
 支持的 semantic relation：`references` / `definition` / `type` / `implementation` / `incoming` / `outgoing`。
@@ -532,47 +532,47 @@ fcs debug command target/debug/app -b src/main.c:42 --run
 
 ### 10. DAP 请求与 Profile (`dap`)
 
-`fcs dap` 面向 VS Code、nvim-dap 等 Debug Adapter Protocol 前端，生成基础 `launch` 请求和 `setBreakpoints` bundle，也可以把 launch profile 保存在 workspace cache 中。
+`fcs debug dap` 面向 VS Code、nvim-dap 等 Debug Adapter Protocol 前端，生成基础 `launch` 请求和 `setBreakpoints` bundle，也可以把 launch profile 保存在 workspace cache 中。
 
 ```bash
 # 只打印 launch request
-fcs dap launch target/debug/app -- --config dev.toml
+fcs debug dap launch target/debug/app -- --config dev.toml
 
 # 打印 attach request；当前 attach 模板需要 process id
-fcs dap launch target/debug/app --request attach --process-id 12345
+fcs debug dap launch target/debug/app --request attach --process-id 12345
 
 # 打印 setBreakpoints + launch 的请求数组
-fcs dap launch target/debug/app -b src/main.c:42 --bundle -- --config dev.toml
-fcs dap launch target/debug/app -b src/main.c:42 --break-condition "argc > 1" --break-hit 3 --break-log "main hit" --bundle
+fcs debug dap launch target/debug/app -b src/main.c:42 --bundle -- --config dev.toml
+fcs debug dap launch target/debug/app -b src/main.c:42 --break-condition "argc > 1" --break-hit 3 --break-log "main hit" --bundle
 
 # 保存、列出、复用 profile
-fcs dap save-profile smoke target/debug/app -b src/main.c:42 --cwd . --env RUST_LOG=debug -- --config dev.toml
-fcs dap profiles
-fcs dap request-profile smoke --bundle
-fcs dap transcript smoke --format json
+fcs debug dap save-profile smoke target/debug/app -b src/main.c:42 --cwd . --env RUST_LOG=debug -- --config dev.toml
+fcs debug dap profiles
+fcs debug dap request-profile smoke --bundle
+fcs debug dap transcript smoke --format json
 
 # 使用 trace session 生成 DAP profile
-fcs dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_LOG=debug -- --config dev.toml
+fcs debug dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_LOG=debug -- --config dev.toml
 
 # 使用 mock adapter 做非交互 DAP 会话 smoke
-fcs dap session-smoke target/debug/app -b src/main.c:42 -- --config dev.toml
+fcs debug dap session-smoke target/debug/app -b src/main.c:42 -- --config dev.toml
 
 # 查看本机可用的 DAP adapter 候选；不会自动安装
-fcs dap adapters
+fcs debug dap adapters
 
 # 检查已保存 DAP profile、断点路径、cwd/program 和本机 adapter 可用性
-fcs dap doctor . --format json
-fcs dap doctor . --name smoke --format text
+fcs debug dap doctor . --format json
+fcs debug dap doctor . --name smoke --format text
 
 # 查看内置 adapter 模板和声明的能力标签
-fcs dap templates
+fcs debug dap templates
 
 # 使用真实 DAP adapter 进程做 initialize/launch/configurationDone 会话
-fcs dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
-fcs dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --config dev.toml
+fcs debug dap adapter-session /path/to/adapter target/debug/app -b src/main.c:42 --cwd . -- --config dev.toml
+fcs debug dap adapter-session auto target/debug/app -b src/main.c:42 --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --config dev.toml
 ```
 
-Arch Linux 上官方 `lldb` 包通常已经提供 `/usr/bin/lldb-dap`，不需要单独的 `lldb-dap` 包；AUR `codelldb` 只是可选 adapter。`fcs dap adapters` 会展示发现到的 adapter，`auto` 会优先使用可用候选。为了避免用户级 `.lldbinit` 干扰自动化 DAP 会话，fcs 启动 `lldb-dap` 时会默认追加 `--no-lldbinit`。真实 DAP 会话需要本机允许调试/ptrace 的普通 shell 环境；容器或受限 sandbox 中的 LLDB handshake/launch 失败通常是环境限制，不代表 mock DAP 或请求生成链路失败。
+Arch Linux 上官方 `lldb` 包通常已经提供 `/usr/bin/lldb-dap`，不需要单独的 `lldb-dap` 包；AUR `codelldb` 只是可选 adapter。`fcs debug dap adapters` 会展示发现到的 adapter，`auto` 会优先使用可用候选。为了避免用户级 `.lldbinit` 干扰自动化 DAP 会话，fcs 启动 `lldb-dap` 时会默认追加 `--no-lldbinit`。真实 DAP 会话需要本机允许调试/ptrace 的普通 shell 环境；容器或受限 sandbox 中的 LLDB handshake/launch 失败通常是环境限制，不代表 mock DAP 或请求生成链路失败。
 
 `dap launch/save-profile/session-smoke/adapter-session` 支持 `--break-condition`、`--break-hit` 和 `--break-log`，一个值会套用到全部断点，多个值会按断点序号对应。`dap launch/save-profile/request-profile/transcript` 仍适合脚本化生成请求；`--request attach --process-id <pid>` 可生成或执行 attach 请求，面向 `lldb-dap` 执行 attach 时会自动映射为 adapter 需要的 `pid` 字段。`dap doctor` 不会启动 adapter，会检查已保存 profile 的 request/processId、program、cwd、断点路径/行号，以及本机可发现 adapter，适合在 TUI 调试前先做环境诊断。`dap templates` 会展示每个内置 adapter 的 launch/attach 字段 schema、注意事项和参数预览，但不会改变真实 DAP request 的序列化。`dap session-smoke` 使用内置 mock adapter 验证 `initialize`、`setBreakpoints`、`launch/attach`、`configurationDone`、线程/栈帧/变量查询和 step/continue 请求链路。`dap adapter-session` 会启动真实 adapter 进程，当前覆盖非交互 launch/attach 编排；`auto` 会从 `lldb-dap`、`codelldb`、`OpenDebugAD7` 等常见命令中选择可用候选，并可用 `--format json`、`--request-timeout-ms`、`--event-timeout-ms` 和 `--max-read-frames` 固化 CI 诊断输出。TUI 的命令面板支持 `dap smoke`、`dap start <profile>`、`dap real <adapter-command>`、`dap sync`、`dap next/continue/pause/step-in/step-out/restart/terminate/disconnect`、`dap thread <id>`、`dap frame <index>`、`var expand <ref>`、`var page <start> <count>` 和 `dap jump/open`；Debug 面板会分区显示 session state、selected thread/frame、variable page/ref、last request/error、capabilities、stack、variables、watches、verified breakpoints、events，并把停止位置、栈顶和变量摘要写入 trace。
 
@@ -607,10 +607,10 @@ fcs ignore list
 
 ```bash
 # 格式
-fcs preview <path>:<line>[:height]
+fcs find preview <path>:<line>[:height]
 
 # 示例：预览 src/main.rs 第 100 行，高度为 20 行的上下文
-fcs preview src/main.rs:100:20
+fcs find preview src/main.rs:100:20
 ```
 
 ---
@@ -621,7 +621,7 @@ fcs preview src/main.rs:100:20
 
 ```bash
 # 生成 Zsh 补全脚本
-fcs complete zsh > ~/.zsh/completion/_fcs
+fcs dev complete zsh > ~/.zsh/completion/_fcs
 
 # 支持的 Shell 包括：bash, elvish, fish, powershell, zsh
 ```
@@ -632,15 +632,15 @@ fcs complete zsh > ~/.zsh/completion/_fcs
 
 ### 异步 TUI 搜索
 
-`fcs tui` 中的 `Search / Files / Symbols` source 使用后台 worker。连续修改 query 时，worker 会丢弃队列中的旧请求，只执行最新请求；UI 主线程保持响应。`gd/gr/e/W/h/c` 等 clangd 请求也通过后台 LSP worker 执行，并复用同一个 clangd 进程。命令面板里的 `dap smoke` 通过 DAP worker 执行，停止位置会写入 trace 的 `debug-stop` 记录。
+`fcs ui open` 中的 `Search / Files / Symbols` source 使用后台 worker。连续修改 query 时，worker 会丢弃队列中的旧请求，只执行最新请求；UI 主线程保持响应。`gd/gr/e/W/h/c` 等 clangd 请求也通过后台 LSP worker 执行，并复用同一个 clangd 进程。命令面板里的 `dap smoke` 通过 DAP worker 执行，停止位置会写入 trace 的 `debug-stop` 记录。
 
 ### 项目级配置
 
 可以在项目根目录生成 `.fcs.toml`：
 
 ```bash
-fcs workspace config
-fcs workspace config --force
+fcs project config
+fcs project config --force
 ```
 
 项目级配置会覆盖 TUI 中的 clangd 命令、默认 debug binary，并扩展默认 ignore：
@@ -662,13 +662,13 @@ cwd = "{workspace}"
 `{workspace}`、`{file}`、`{line}`、`{symbol}`。
 
 ```bash
-fcs actions list
-fcs actions list /path/to/project
-fcs actions templates
-fcs actions init rust-cargo-test --dry-run
-fcs actions doctor
-fcs actions run test-symbol --file src/lib.rs --line 42 --symbol parse_config --dry-run
-fcs actions run test-symbol --directory /path/to/project -- --exact
+fcs project action list
+fcs project action list /path/to/project
+fcs project action templates
+fcs project action init rust-cargo-test --dry-run
+fcs project action doctor
+fcs project action run test-symbol --file src/lib.rs --line 42 --symbol parse_config --dry-run
+fcs project action run test-symbol --directory /path/to/project -- --exact
 ```
 
 `actions templates` 提供内置 `rust-cargo-test`、`cpp-cmake-test`、`make-test`、`pytest`、`npm-test` 等模板；`actions init <template>` 可以生成项目 `.fcs.toml`，`--dry-run` 用于预览，`--force` 才覆盖已有配置。`actions doctor` 会检查模板变量和 action cwd 展开结果。
@@ -741,7 +741,7 @@ TUI 内通过 `a` 加书签，通过 `B` 把当前 workspace trace 批量转换�
 
 - 搜索 worker 会取消队列中的旧请求，并对正在执行的 ripgrep-library 搜索做协作式取消；极短搜索可能在取消信号到达前自然结束。
 - LSP worker 已经避免 UI 主线程阻塞，但 clangd 本身超时仍取决于 `request_timeout_ms`。
-- TUI preview 读取目标行附近窗口并做缓存，内置 Rust/C/C++/Python/Shell/TOML/JSON/Markdown 等常见语法的轻量高亮；脚本化预览仍可使用 bat 风格的 `fcs preview`。
+- TUI preview 读取目标行附近窗口并做缓存，内置 Rust/C/C++/Python/Shell/TOML/JSON/Markdown 等常见语法的轻量高亮；脚本化预览仍可使用 bat 风格的 `fcs find preview`。
 
 ### 内部结构
 
@@ -895,7 +895,7 @@ rtk scripts/release-check.sh full
 
 发布流程的逐项核查见 `RELEASE_CHECKLIST.md`，用户可见变更记录见 `CHANGELOG.md`。
 
-真实 DAP adapter smoke 是显式 opt-in：设置 `FCS_REAL_DAP_SMOKE=1` 后脚本会运行 `dap adapter-session auto`。该检查需要 adapter 已在 `PATH` 中，并且当前环境允许 LLDB/GDB 对子进程执行 ptrace；受限 sandbox 或容器内失败时，优先在普通本机 shell 中复测。
+真实 DAP adapter smoke 是显式 opt-in：设置 `FCS_REAL_DAP_SMOKE=1` 后脚本会运行 `debug dap adapter-session auto`。该检查需要 adapter 已在 `PATH` 中，并且当前环境允许 LLDB/GDB 对子进程执行 ptrace；受限 sandbox 或容器内失败时，优先在普通本机 shell 中复测。
 
 ### 手工 smoke
 
@@ -904,17 +904,17 @@ CLI smoke：
 ```bash
 rtk cargo clippy -- -D warnings
 rtk cargo run -- --help
-rtk cargo run -- workspace status
+rtk cargo run -- project status
 rtk cargo run -- debug command target/debug/fcs -b src/main.rs:1
 ```
 
 TUI smoke 需要真实终端，适合本地手工执行：
 
 ```bash
-rtk cargo run -- tui --help
-rtk cargo run -- tui --mode files --query main
-rtk cargo run -- tui --mode search --query "fn "
-rtk cargo run -- tui --mode symbols --query handle
+rtk cargo run -- ui open --help
+rtk cargo run -- ui open --mode files --query main
+rtk cargo run -- ui open --mode search --query "fn "
+rtk cargo run -- ui open --mode symbols --query handle
 ```
 
 TUI 验收重点：退出后终端恢复正常；`/` 可循环搜索；preview 随选择刷新；`gd/gr/t/i/s/c/C/e` 失败时只在状态栏提示；`a/b/B/D/X` 能更新 trace/debug 面板。

@@ -18,20 +18,20 @@ target/debug/fcs --help
 
 ```bash
 fcs --help
-fcs man --stdout
+fcs dev man --stdout
 ```
 
 生成 shell completion：
 
 ```bash
-fcs complete zsh > ~/.zsh/completion/_fcs
-fcs complete bash > ~/.local/share/bash-completion/completions/fcs
+fcs dev complete zsh > ~/.zsh/completion/_fcs
+fcs dev complete bash > ~/.local/share/bash-completion/completions/fcs
 ```
 
 生成 man page：
 
 ```bash
-fcs man --out-dir ~/.local/share/man/man1
+fcs dev man --out-dir ~/.local/share/man/man1
 man fcs
 ```
 
@@ -40,25 +40,25 @@ man fcs
 建议先在项目根目录执行以下命令：
 
 ```bash
-fcs workspace status .
-fcs workspace advise .
-fcs index refresh .
-fcs index status .
-fcs tui .
+fcs project status .
+fcs project advise .
+fcs project index refresh .
+fcs project index status .
+fcs ui open .
 ```
 
 每条命令的用途：
 
-- `workspace status`：检查 workspace root、缓存目录、LSP 和基础工具是否可用。
-- `workspace advise`：给出项目类型、建议的初始化步骤和健康提示。
-- `index refresh`：在缺失、过期或 schema 迁移时刷新文件与符号索引。
-- `index status`：确认缓存是否新鲜、文件数和符号数是否符合预期。
-- `tui`：进入常驻代码追踪工作台。
+- `project status`：检查 workspace root、缓存目录、LSP 和基础工具是否可用。
+- `project advise`：给出项目类型、建议的初始化步骤和健康提示。
+- `project index refresh`：在缺失、过期或 schema 迁移时刷新文件与符号索引。
+- `project index status`：确认缓存是否新鲜、文件数和符号数是否符合预期。
+- `ui open`：进入常驻代码追踪工作台。
 
 ### 1.3 典型 5 分钟工作流
 
 ```bash
-fcs tui . --mode symbols --query main
+fcs ui open . --mode symbols --query main
 ```
 
 在 TUI 内：
@@ -75,10 +75,10 @@ fcs tui . --mode symbols --query main
 如果只想一次性搜索：
 
 ```bash
-fcs search "fn main" .
-fcs files . --query main
-fcs symbol . --query parse_config
-fcs preview src/main.rs:120:30
+fcs find text "fn main" .
+fcs find files . --query main
+fcs find symbols . --query parse_config
+fcs find preview src/main.rs:120:30
 ```
 
 ## 2. 核心概念
@@ -90,20 +90,20 @@ workspace 是一次代码调查的根目录。`fcs` 会围绕 workspace 保存�
 常用命令：
 
 ```bash
-fcs workspace status .
-fcs workspace init .
-fcs workspace detect .
-fcs workspace doctor .
-fcs workspace doctor-bundle . --format json --out /tmp/fcs-doctor.json
+fcs project status .
+fcs project init .
+fcs project detect .
+fcs project doctor .
+fcs project doctor-bundle . --format json --out /tmp/fcs-doctor.json
 ```
 
 `workspace init` 只写入非侵入式缓存元数据，不会重写源码。需要项目级配置时使用：
 
 ```bash
-fcs workspace config .
-fcs workspace config-doctor .
-fcs workspace config-schema --format toml
-fcs workspace config-migrate . --dry-run
+fcs project config .
+fcs project config-doctor .
+fcs project config-schema --format toml
+fcs project config-migrate . --dry-run
 ```
 
 ### 2.2 Location 格式
@@ -119,8 +119,8 @@ path:line:column
 示例：
 
 ```bash
-fcs preview src/main.rs:42:20
-fcs def src/main.rs:42:5
+fcs find preview src/main.rs:42:20
+fcs code def src/main.rs:42:5
 fcs trace add src/main.rs:42 --session bug-42
 fcs debug command target/debug/app -b src/main.rs:42
 ```
@@ -134,19 +134,19 @@ index 是 workspace 的持久化文件和轻量符号缓存，适合大仓库快
 基础命令：
 
 ```bash
-fcs index refresh .
-fcs index list . --kind symbols --limit 50
-fcs index query parse_config . --kind symbols --limit 20 --timing
-fcs index verify . --format json
+fcs project index refresh .
+fcs project index list . --kind symbols --limit 50
+fcs project index query parse_config . --kind symbols --limit 20 --timing
+fcs project index verify . --format json
 ```
 
 大仓库建议：
 
 ```bash
-fcs index shards . --target-symbols 5000 --format json
-fcs index shards . --target-symbols 5000 --write
-fcs index shard-status . --format json
-fcs index shard-query parse_config . --kind symbols --limit 20 --timing
+fcs project index shards . --target-symbols 5000 --format json
+fcs project index shards . --target-symbols 5000 --write
+fcs project index shard-status . --format json
+fcs project index shard-query parse_config . --kind symbols --limit 20 --timing
 ```
 
 ### 2.4 Trace Session
@@ -168,9 +168,9 @@ LSP 提供 definition、references、type definition、implementation、diagnost
 语义能力不可用时，部分命令可以用 index fallback 降级：
 
 ```bash
-fcs graph semantic src/main.rs:42:5 --relation outgoing --fallback index
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --fallback index
 fcs trace semantic src/main.rs:42:5 --relation references --fallback index
-fcs query "name:parse_config" . --source semantic
+fcs find query "name:parse_config" . --source semantic
 ```
 
 fallback 结果适合继续排查，但它不是完整的编译级语义结果。
@@ -186,11 +186,11 @@ Arch Linux 上官方 `lldb` 包通常提供 `/usr/bin/lldb-dap`。没有单独�
 ### 3.1 启动方式
 
 ```bash
-fcs tui
-fcs tui .
-fcs tui . --mode files --query main
-fcs tui . --mode symbols --query handle
-fcs tui . --debug-binary target/debug/app
+fcs ui open
+fcs ui open .
+fcs ui open . --mode files --query main
+fcs ui open . --mode symbols --query handle
+fcs ui open . --debug-binary target/debug/app
 ```
 
 未显式指定 `--mode` 时，TUI 默认进入 `files` source，让首屏可以直接浏览和打开文件；如果上一轮保存了非空 search 查询，则会恢复对应搜索上下文。
@@ -386,8 +386,8 @@ status health
 `tui-script` 用于无交互回放 TUI 命令，适合回归测试、录制调查步骤和 CI smoke。
 
 ```bash
-fcs tui-script trace-loop.fcs . --mode symbols --query main --format json
-fcs tui-script trace-loop.fcs . --step-timeout-ms 3000 --persist
+fcs ui script trace-loop.fcs . --mode symbols --query main --format json
+fcs ui script trace-loop.fcs . --step-timeout-ms 3000 --persist
 ```
 
 脚本规则：
@@ -424,38 +424,38 @@ assert pending none
 ### 4.1 全文搜索
 
 ```bash
-fcs search "fn main"
-fcs search "struct Config" /path/to/project
-fcs search main install.sh README.md src
-fcs search "TODO" -o --no-ignore -o -i
+fcs find text "fn main"
+fcs find text "struct Config" /path/to/project
+fcs find text main install.sh README.md src
+fcs find text "TODO" -o --no-ignore -o -i
 ```
 
 `search` 的第一个参数是正则 pattern，后续 `PATH` 是搜索范围。`-o` / `--option` 可传递 ripgrep 兼容参数，例如：
 
 ```bash
-fcs search "handle_" src -o -i
-fcs search "unsafe" . -o --hidden -o --no-ignore
-fcs search "main" . -o -g -o "*.rs"
+fcs find text "handle_" src -o -i
+fcs find text "unsafe" . -o --hidden -o --no-ignore
+fcs find text "main" . -o -g -o "*.rs"
 ```
 
 ### 4.2 文件查找
 
 ```bash
-fcs files
-fcs files .
-fcs files /path/to/project --query main
-fcs files . -o --hidden -o --no-ignore
+fcs find files
+fcs find files .
+fcs find files /path/to/project --query main
+fcs find files . -o --hidden -o --no-ignore
 ```
 
-`files` 适合一次性选择文件。需要连续调查时，优先使用 `fcs tui --mode files`。
+`files` 适合一次性选择文件。需要连续调查时，优先使用 `fcs ui open --mode files`。
 
 ### 4.3 符号查找
 
 ```bash
-fcs symbol
-fcs symbol .
-fcs symbol /path/to/project --query parse_config
-fcs symbol . -o --max-depth=3
+fcs find symbols
+fcs find symbols .
+fcs find symbols /path/to/project --query parse_config
+fcs find symbols . -o --max-depth=3
 ```
 
 `symbol` 是轻量符号提取，不依赖 LSP。它适合快速粗定位函数、结构体、类型、宏和测试入口。需要编译级准确跳转时，用 LSP 命令或 TUI 的 `gd` / `gr`。
@@ -463,8 +463,8 @@ fcs symbol . -o --max-depth=3
 ### 4.4 单文件预览
 
 ```bash
-fcs preview src/main.rs:100
-fcs preview src/main.rs:100:30
+fcs find preview src/main.rs:100
+fcs find preview src/main.rs:100:30
 ```
 
 格式为 `path:line[:height]`。`height` 控制展示窗口高度，适合在脚本或终端里快速看上下文。
@@ -491,19 +491,19 @@ fcs history list
 fcs history clear
 ```
 
-history 记录交互查询，便于复用常查表达式。保存复杂字段查询时，优先用 `fcs query --save`。
+history 记录交互查询，便于复用常查表达式。保存复杂字段查询时，优先用 `fcs find query --save`。
 
 ## 5. Workspace、Service 与 Index
 
 ### 5.1 Workspace 健康检查
 
 ```bash
-fcs workspace status .
-fcs workspace advise .
-fcs workspace plan .
-fcs workspace workflows . --format text
-fcs workspace doctor .
-fcs workspace doctor-bundle . --format json --out /tmp/fcs-doctor.json
+fcs project status .
+fcs project advise .
+fcs project plan .
+fcs project workflows . --format text
+fcs project doctor .
+fcs project doctor-bundle . --format json --out /tmp/fcs-doctor.json
 ```
 
 用途建议：
@@ -520,12 +520,12 @@ fcs workspace doctor-bundle . --format json --out /tmp/fcs-doctor.json
 大型 monorepo 常有多个常用根目录。profile 用于保存这些入口。
 
 ```bash
-fcs workspace profile save core . --description "core workspace" --index-root src
-fcs workspace profile list
-fcs workspace profile show core
-fcs workspace profile use core
-fcs workspace profile current
-fcs workspace profile delete core
+fcs project profile save core . --description "core workspace" --index-root src
+fcs project profile list
+fcs project profile show core
+fcs project profile use core
+fcs project profile current
+fcs project profile delete core
 ```
 
 `--index-root` 可重复传入，用于限制或组合索引根。
@@ -535,17 +535,17 @@ fcs workspace profile delete core
 service 用于刷新 index 并写出统一状态快照。
 
 ```bash
-fcs service start . --interval-ms 2000 --foreground
-fcs service start . --interval-ms 2000 --max-cycles 1 --foreground
-fcs service status .
-fcs service snapshot . --format json
-fcs service stop .
+fcs project service start . --interval-ms 2000 --foreground
+fcs project service start . --interval-ms 2000 --max-cycles 1 --foreground
+fcs project service status .
+fcs project service snapshot . --format json
+fcs project service stop .
 ```
 
 通过 service 查询：
 
 ```bash
-fcs service query "kind:function text:main" . --source index --mode exact --score-explain
+fcs project service query "kind:function text:main" . --source index --mode exact --score-explain
 ```
 
 当你希望编辑器、脚本或外部工具读取统一 workspace 状态时，用 service 比反复启动多个命令更稳定。
@@ -553,12 +553,12 @@ fcs service query "kind:function text:main" . --source index --mode exact --scor
 ### 5.4 Index 基础操作
 
 ```bash
-fcs index build .
-fcs index refresh .
-fcs index status .
-fcs index stats .
-fcs index list . --kind files --limit 50
-fcs index list . --kind symbols --limit 50
+fcs project index build .
+fcs project index refresh .
+fcs project index status .
+fcs project index stats .
+fcs project index list . --kind files --limit 50
+fcs project index list . --kind symbols --limit 50
 ```
 
 `build` 总是重建。`refresh` 只在缺失、过期、损坏或 schema 迁移时重建。
@@ -566,14 +566,14 @@ fcs index list . --kind symbols --limit 50
 ### 5.5 Index 查询、诊断与修复
 
 ```bash
-fcs index query main . --kind symbols --limit 20 --timing --warn-ms 200
-fcs index profile main . --kind symbols --limit 20 --format json --warn-ms 200
-fcs index verify . --format json
-fcs index doctor .
-fcs index repair .
-fcs index repair . --force
-fcs index compact . --dry-run
-fcs index prewarm .
+fcs project index query main . --kind symbols --limit 20 --timing --warn-ms 200
+fcs project index profile main . --kind symbols --limit 20 --format json --warn-ms 200
+fcs project index verify . --format json
+fcs project index doctor .
+fcs project index repair .
+fcs project index repair . --force
+fcs project index compact . --dry-run
+fcs project index prewarm .
 ```
 
 建议：
@@ -586,28 +586,28 @@ fcs index prewarm .
 ### 5.6 Shard 与 Daemon
 
 ```bash
-fcs index shards . --target-symbols 5000 --format json
-fcs index shards . --target-symbols 5000 --write
-fcs index shard-status . --format json
-fcs index shard-query parse_config . --kind symbols --limit 20 --timing
-fcs index daemon . --interval-ms 2000 --foreground
-fcs index daemon . --interval-ms 2000 --max-cycles 1 --foreground
-fcs index daemon-status .
+fcs project index shards . --target-symbols 5000 --format json
+fcs project index shards . --target-symbols 5000 --write
+fcs project index shard-status . --format json
+fcs project index shard-query parse_config . --kind symbols --limit 20 --timing
+fcs project index daemon . --interval-ms 2000 --foreground
+fcs project index daemon . --interval-ms 2000 --max-cycles 1 --foreground
+fcs project index daemon-status .
 ```
 
 大仓库推荐流程：
 
-1. `index refresh` 建主索引。
-2. `index shards --format json` 查看建议分片。
-3. `index shards --write` 写入 shard manifest 和缓存。
-4. `index shard-status` 检查新鲜度。
-5. TUI 和 `query` 走 streaming / sidecar backed source 时，可显著降低大结果集的交互压力。
+1. `project index refresh` 建主索引。
+2. `project index shards --format json` 查看建议分片。
+3. `project index shards --write` 写入 shard manifest 和缓存。
+4. `project index shard-status` 检查新鲜度。
+5. TUI 和 `find query` 走 streaming / sidecar backed source 时，可显著降低大结果集的交互压力。
 
 ## 6. 统一查询与 Benchmark
 
 ### 6.1 Query 表达式
 
-`fcs query` 可以同时查询 index、trace 和 semantic source。常用字段：
+`fcs find query` 可以同时查询 index、trace 和 semantic source。常用字段：
 
 - `kind:`：符号种类，例如 `function`、`struct`、`file`。
 - `lang:` / `language:`：语言。
@@ -623,36 +623,36 @@ fcs index daemon-status .
 示例：
 
 ```bash
-fcs query "kind:function lang:rust text:parse" . --source all --format json
-fcs query "path:src name:main" . --source index --limit 20
-fcs query "session:bug-42 status:open tag:hot" . --source trace
-fcs query "source:index kind:function name:main" . --source all --explain
-fcs query "kind:function (name:parse or name:init) not path:target" . --source all --explain
+fcs find query "kind:function lang:rust text:parse" . --source all --format json
+fcs find query "path:src name:main" . --source index --limit 20
+fcs find query "session:bug-42 status:open tag:hot" . --source trace
+fcs find query "source:index kind:function name:main" . --source all --explain
+fcs find query "kind:function (name:parse or name:init) not path:target" . --source all --explain
 ```
 
 ### 6.2 Matching Mode、Macro 与 Saved Query
 
 ```bash
-fcs query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
-fcs query "kind:function name:parse_config" . --source index --mode exact
-fcs query "kind:function text:main" . --source all --timing --warn-ms 200
-fcs query "kind:function text:main" . --source all --profile --format json --warn-ms 200
+fcs find query "name:parse_.*" . --source index --mode regex --macro functions --score-explain
+fcs find query "kind:function name:parse_config" . --source index --mode exact
+fcs find query "kind:function text:main" . --source all --timing --warn-ms 200
+fcs find query "kind:function text:main" . --source all --profile --format json --warn-ms 200
 ```
 
 保存和复用：
 
 ```bash
-fcs query "kind:function name:parse_config" . --source index --mode exact --save parse-config
-fcs query --use parse-config --source index --mode exact
-fcs query --list-saved
-fcs query --delete-saved parse-config
+fcs find query "kind:function name:parse_config" . --source index --mode exact --save parse-config
+fcs find query --use parse-config --source index --mode exact
+fcs find query --list-saved
+fcs find query --delete-saved parse-config
 ```
 
 source 选择：
 
 ```bash
-fcs query "name:parse_config" . --source semantic
-fcs query "kind:function text:main" . --source auto
+fcs find query "name:parse_config" . --source semantic
+fcs find query "kind:function text:main" . --source auto
 ```
 
 `--source semantic` 会优先使用 LSP workspace/symbol。LSP 配置缺失或查询失败时，会返回带 `fallback:index:*` 来源前缀的 index 结果。
@@ -660,19 +660,19 @@ fcs query "kind:function text:main" . --source auto
 ### 6.3 Benchmark
 
 ```bash
-fcs bench search main . --format json --warn-ms 200
-fcs bench index . --limit 50 --query main --warn-ms 200
-fcs bench tui . --query main --format json
-fcs bench trace --format json
-fcs bench preview src/main.rs:20 --warn-ms 20
-fcs bench all . --query main --limit 50
+fcs dev bench search main . --format json --warn-ms 200
+fcs dev bench index . --limit 50 --query main --warn-ms 200
+fcs dev bench tui . --query main --format json
+fcs dev bench trace --format json
+fcs dev bench preview src/main.rs:20 --warn-ms 20
+fcs dev bench all . --query main --limit 50
 ```
 
 保存和比较基线：
 
 ```bash
-fcs bench baseline .
-fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
+fcs dev bench baseline .
+fcs dev bench compare . --format json --threshold-ms 10 --threshold-percent 25 --strict
 ```
 
 建议把 `bench all`、`bench baseline`、`bench compare --strict` 放到性能敏感改动后的验证流程里。
@@ -682,48 +682,48 @@ fcs bench compare . --format json --threshold-ms 10 --threshold-percent 25 --str
 ### 7.1 基础语义命令
 
 ```bash
-fcs def src/main.rs:42:5
-fcs refs src/main.rs:42:5
-fcs type-def src/main.rs:42:5
-fcs implementation src/main.rs:42:5
-fcs incoming src/main.rs:42:5
-fcs outgoing src/main.rs:42:5
-fcs hover src/main.rs:42:5
-fcs diag src/main.rs
-fcs doc-symbols src/main.rs
-fcs workspace-symbols parse_config --limit 50
+fcs code def src/main.rs:42:5
+fcs code refs src/main.rs:42:5
+fcs code type src/main.rs:42:5
+fcs code impl src/main.rs:42:5
+fcs code incoming src/main.rs:42:5
+fcs code outgoing src/main.rs:42:5
+fcs code hover src/main.rs:42:5
+fcs code diag src/main.rs
+fcs code doc-symbols src/main.rs
+fcs code workspace-symbols parse_config --limit 50
 ```
 
 通过 `--directory` 指定 workspace：
 
 ```bash
-fcs def src/main.rs:42:5 --directory /path/to/workspace
+fcs code def src/main.rs:42:5 --directory /path/to/workspace
 ```
 
 ### 7.2 LSP 健康与高级命令
 
 ```bash
-fcs lsp health .
-fcs lsp health . --file src/main.rs
-fcs lsp highlights src/main.rs:42:5
-fcs lsp refs src/main.rs:42:5
-fcs lsp outline src/main.rs
-fcs lsp breadcrumbs src/main.rs:42:5
-fcs lsp semantic-tokens src/main.rs --line 42 --format json
-fcs lsp call-tree src/main.rs:42:5
+fcs code health .
+fcs code health . --file src/main.rs
+fcs code highlights src/main.rs:42:5
+fcs code grouped-refs src/main.rs:42:5
+fcs code outline src/main.rs
+fcs code breadcrumbs src/main.rs:42:5
+fcs code tokens src/main.rs --line 42 --format json
+fcs code calls src/main.rs:42:5
 ```
 
 重命名和 code actions：
 
 ```bash
-fcs lsp rename src/main.rs:42:5 new_symbol
-fcs lsp rename src/main.rs:42:5 new_symbol --apply --dry-run
-fcs lsp rename src/main.rs:42:5 new_symbol --apply
-fcs lsp code-actions src/main.rs:42:5 --format json
-fcs lsp code-actions src/main.rs:42:5 --apply 1 --dry-run
-fcs lsp organize-imports src/main.rs
-fcs lsp organize-imports src/main.rs --apply --dry-run
-fcs lsp organize-imports src/main.rs --apply
+fcs code rename src/main.rs:42:5 new_symbol
+fcs code rename src/main.rs:42:5 new_symbol --apply --dry-run
+fcs code rename src/main.rs:42:5 new_symbol --apply
+fcs code actions src/main.rs:42:5 --format json
+fcs code actions src/main.rs:42:5 --apply 1 --dry-run
+fcs code organize-imports src/main.rs
+fcs code organize-imports src/main.rs --apply --dry-run
+fcs code organize-imports src/main.rs --apply
 ```
 
 涉及写文件的 LSP 操作建议先不加 `--apply` 查看 preview；需要验证写入路径时使用 `--apply --dry-run`；确认后再只加 `--apply` 真正写入。
@@ -733,11 +733,11 @@ fcs lsp organize-imports src/main.rs --apply
 ### 8.1 Semantic Graph
 
 ```bash
-fcs graph semantic src/main.rs:42:5 --relation outgoing --format text
-fcs graph semantic src/main.rs:42:5 --relation references --format json
-fcs graph semantic src/main.rs:42:5 --relation outgoing --format mermaid --fanout 20
-fcs graph semantic src/main.rs:42:5 --relation outgoing --format dot --fallback index --cache
-fcs graph semantic src/main.rs:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --format text
+fcs code graph semantic src/main.rs:42:5 --relation references --format json
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --format mermaid --fanout 20
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --format dot --fallback index --cache
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --format json --fallback index --cache --refresh-cache
 ```
 
 参数说明：
@@ -754,10 +754,10 @@ fcs graph semantic src/main.rs:42:5 --relation outgoing --format json --fallback
 ### 8.2 Import、Module 与 Call Graph
 
 ```bash
-fcs graph imports . --limit 100 --format text
-fcs graph imports . --limit 100 --depth 2 --fanout 8 --exclude target --format mermaid
-fcs graph modules . --limit 100 --depth 2 --format dot
-fcs graph calls . --limit 100 --depth 2 --fanout 8 --format json
+fcs code graph imports . --limit 100 --format text
+fcs code graph imports . --limit 100 --depth 2 --fanout 8 --exclude target --format mermaid
+fcs code graph modules . --limit 100 --depth 2 --format dot
+fcs code graph calls . --limit 100 --depth 2 --fanout 8 --format json
 ```
 
 `imports` 适合 C/C++ include、Rust use/mod 和常见脚本导入关系的轻量扫描。`modules` 偏 Rust 模块关系。`calls` 是离线轻量 call graph，不等同于完整 LSP 调用层级。
@@ -870,60 +870,60 @@ fcs debug from-trace bug-42 target/debug/app --name bug-42-debug --cwd . --env R
 生成 launch 请求：
 
 ```bash
-fcs dap launch target/debug/app -- --config dev.toml
-fcs dap launch target/debug/app -b src/main.rs:42 --bundle -- --config dev.toml
-fcs dap launch target/debug/app -b src/main.rs:42 --break-condition "argc > 1" --break-hit 3 --break-log "main hit" --bundle
+fcs debug dap launch target/debug/app -- --config dev.toml
+fcs debug dap launch target/debug/app -b src/main.rs:42 --bundle -- --config dev.toml
+fcs debug dap launch target/debug/app -b src/main.rs:42 --break-condition "argc > 1" --break-hit 3 --break-log "main hit" --bundle
 ```
 
 生成 attach 请求：
 
 ```bash
-fcs dap launch target/debug/app --request attach --process-id 12345
+fcs debug dap launch target/debug/app --request attach --process-id 12345
 ```
 
 保存 profile：
 
 ```bash
-fcs dap save-profile smoke target/debug/app -b src/main.rs:42 --cwd . --env RUST_LOG=debug -- --config dev.toml
-fcs dap profiles
-fcs dap request-profile smoke --bundle
-fcs dap transcript smoke --format json
+fcs debug dap save-profile smoke target/debug/app -b src/main.rs:42 --cwd . --env RUST_LOG=debug -- --config dev.toml
+fcs debug dap profiles
+fcs debug dap request-profile smoke --bundle
+fcs debug dap transcript smoke --format json
 ```
 
 从 trace 生成 DAP profile：
 
 ```bash
-fcs dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_LOG=debug -- --config dev.toml
+fcs debug dap from-trace bug-42 target/debug/app --name bug-42-dap --cwd . --env RUST_LOG=debug -- --config dev.toml
 ```
 
 ### 9.3 Adapter 发现、诊断与真实 Session
 
 ```bash
-fcs dap adapters
-fcs dap adapters --format json
-fcs dap templates
-fcs dap templates --format json
-fcs dap doctor . --format json
-fcs dap doctor . --name smoke --format text
+fcs debug dap adapters
+fcs debug dap adapters --format json
+fcs debug dap templates
+fcs debug dap templates --format json
+fcs debug dap doctor . --format json
+fcs debug dap doctor . --name smoke --format text
 ```
 
 Mock smoke：
 
 ```bash
-fcs dap session-smoke target/debug/app -b src/main.rs:42 -- --config dev.toml
+fcs debug dap session-smoke target/debug/app -b src/main.rs:42 -- --config dev.toml
 ```
 
 真实 adapter session：
 
 ```bash
-fcs dap adapter-session auto target/debug/app -b src/main.rs:42 --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --config dev.toml
-fcs dap adapter-session /usr/bin/lldb-dap target/debug/app -b src/main.rs:42 --cwd . --format json -- --config dev.toml
+fcs debug dap adapter-session auto target/debug/app -b src/main.rs:42 --cwd . --format json --request-timeout-ms 30000 --event-timeout-ms 15000 --max-read-frames 256 -- --config dev.toml
+fcs debug dap adapter-session /usr/bin/lldb-dap target/debug/app -b src/main.rs:42 --cwd . --format json -- --config dev.toml
 ```
 
 Attach 示例：
 
 ```bash
-fcs dap adapter-session auto /path/to/program --request attach --process-id 12345 --cwd . --format json
+fcs debug dap adapter-session auto /path/to/program --request attach --process-id 12345 --cwd . --format json
 ```
 
 真实 DAP 注意事项：
@@ -941,14 +941,14 @@ fcs dap adapter-session auto /path/to/program --request attach --process-id 1234
 actions 是可配置的项目命令模板，适合把“对当前符号跑测试”“对当前文件跑 lint”接到 TUI 或 CLI 流程里。
 
 ```bash
-fcs actions list
-fcs actions list /path/to/project
-fcs actions templates
-fcs actions init rust-cargo-test --dry-run
-fcs actions init rust-cargo-test --directory . --force
-fcs actions doctor
-fcs actions run test-symbol --file src/lib.rs --line 42 --symbol parse_config --dry-run
-fcs actions run test-symbol --directory /path/to/project -- --exact
+fcs project action list
+fcs project action list /path/to/project
+fcs project action templates
+fcs project action init rust-cargo-test --dry-run
+fcs project action init rust-cargo-test --directory . --force
+fcs project action doctor
+fcs project action run test-symbol --file src/lib.rs --line 42 --symbol parse_config --dry-run
+fcs project action run test-symbol --directory /path/to/project -- --exact
 ```
 
 支持变量：
@@ -1050,11 +1050,11 @@ low_color = false
 生成项目 `.fcs.toml`：
 
 ```bash
-fcs workspace config .
-fcs workspace config . --force
-fcs workspace config-doctor .
-fcs workspace config-schema --format toml
-fcs workspace config-migrate . --dry-run
+fcs project config .
+fcs project config . --force
+fcs project config-doctor .
+fcs project config-schema --format toml
+fcs project config-migrate . --dry-run
 ```
 
 项目配置适合放：
@@ -1072,11 +1072,11 @@ fcs workspace config-migrate . --dry-run
 ### 12.1 首次接入
 
 ```bash
-fcs workspace doctor /path/to/repo
-fcs index refresh /path/to/repo
-fcs index verify /path/to/repo --format json
-fcs index stats /path/to/repo
-fcs bench all /path/to/repo --query main --limit 50
+fcs project doctor /path/to/repo
+fcs project index refresh /path/to/repo
+fcs project index verify /path/to/repo --format json
+fcs project index stats /path/to/repo
+fcs dev bench all /path/to/repo --query main --limit 50
 ```
 
 检查重点：
@@ -1089,10 +1089,10 @@ fcs bench all /path/to/repo --query main --limit 50
 ### 12.2 分片和 sidecar
 
 ```bash
-fcs index shards /path/to/repo --target-symbols 5000 --format json
-fcs index shards /path/to/repo --target-symbols 5000 --write
-fcs index shard-query main /path/to/repo --kind symbols --limit 50 --timing
-fcs bench tui /path/to/repo --query main --format json
+fcs project index shards /path/to/repo --target-symbols 5000 --format json
+fcs project index shards /path/to/repo --target-symbols 5000 --write
+fcs project index shard-query main /path/to/repo --kind symbols --limit 50 --timing
+fcs dev bench tui /path/to/repo --query main --format json
 ```
 
 建议：
@@ -1105,9 +1105,9 @@ fcs bench tui /path/to/repo --query main --format json
 ### 12.3 性能回归基线
 
 ```bash
-fcs bench all . --query main --limit 50
-fcs bench baseline .
-fcs bench compare . --threshold-ms 10 --threshold-percent 25 --strict
+fcs dev bench all . --query main --limit 50
+fcs dev bench baseline .
+fcs dev bench compare . --threshold-ms 10 --threshold-percent 25 --strict
 ```
 
 建议在以下场景保存新基线：
@@ -1124,10 +1124,10 @@ fcs bench compare . --threshold-ms 10 --threshold-percent 25 --strict
 
 ```bash
 fcs ignore list
-fcs files . -o --hidden -o --no-ignore --query target_name
-fcs search target_name . -o --hidden -o --no-ignore
-fcs index refresh .
-fcs index query target_name . --kind symbols --timing
+fcs find files . -o --hidden -o --no-ignore --query target_name
+fcs find text target_name . -o --hidden -o --no-ignore
+fcs project index refresh .
+fcs project index query target_name . --kind symbols --timing
 ```
 
 常见原因：
@@ -1140,10 +1140,10 @@ fcs index query target_name . --kind symbols --timing
 ### 13.2 LSP 无结果或超时
 
 ```bash
-fcs lsp health . --file src/main.rs
-fcs workspace doctor .
-fcs diag src/main.rs
-fcs graph semantic src/main.rs:42:5 --relation references --fallback index
+fcs code health . --file src/main.rs
+fcs project doctor .
+fcs code diag src/main.rs
+fcs code graph semantic src/main.rs:42:5 --relation references --fallback index
 ```
 
 处理建议：
@@ -1156,9 +1156,9 @@ fcs graph semantic src/main.rs:42:5 --relation references --fallback index
 ### 13.3 TUI 卡顿或结果延迟
 
 ```bash
-fcs bench tui . --query main --format json
-fcs index profile main . --kind symbols --format json --warn-ms 200
-fcs index shard-status . --format json
+fcs dev bench tui . --query main --format json
+fcs project index profile main . --kind symbols --format json --warn-ms 200
+fcs project index shard-status . --format json
 ```
 
 处理建议：
@@ -1171,10 +1171,10 @@ fcs index shard-status . --format json
 ### 13.4 DAP 启动失败
 
 ```bash
-fcs dap adapters
-fcs dap doctor . --format json
-fcs dap session-smoke target/debug/app -b src/main.rs:1
-fcs dap adapter-session auto target/debug/app -b src/main.rs:1 --cwd . --format json
+fcs debug dap adapters
+fcs debug dap doctor . --format json
+fcs debug dap session-smoke target/debug/app -b src/main.rs:1
+fcs debug dap adapter-session auto target/debug/app -b src/main.rs:1 --cwd . --format json
 ```
 
 处理建议：
@@ -1191,7 +1191,7 @@ fcs dap adapter-session auto target/debug/app -b src/main.rs:1 --cwd . --format 
 fcs trace verify --directory . --format json
 fcs trace repair --directory . --format text
 fcs trace compact --format json
-fcs workspace doctor .
+fcs project doctor .
 ```
 
 处理建议：
@@ -1226,22 +1226,22 @@ FCS_REAL_DAP_SMOKE=1 scripts/smoke.sh fast
 ## 15. 常用命令速查
 
 ```bash
-fcs tui . --mode symbols --query main
-fcs search "TODO" . -o --hidden
-fcs files . --query main
-fcs symbol . --query parse
-fcs preview src/main.rs:42:20
-fcs workspace doctor .
-fcs index refresh .
-fcs index query main . --kind symbols --timing
-fcs query "kind:function text:main" . --source all --profile
-fcs def src/main.rs:42:5
-fcs refs src/main.rs:42:5
-fcs graph semantic src/main.rs:42:5 --relation outgoing --format mermaid --fallback index
+fcs ui open . --mode symbols --query main
+fcs find text "TODO" . -o --hidden
+fcs find files . --query main
+fcs find symbols . --query parse
+fcs find preview src/main.rs:42:20
+fcs project doctor .
+fcs project index refresh .
+fcs project index query main . --kind symbols --timing
+fcs find query "kind:function text:main" . --source all --profile
+fcs code def src/main.rs:42:5
+fcs code refs src/main.rs:42:5
+fcs code graph semantic src/main.rs:42:5 --relation outgoing --format mermaid --fallback index
 fcs trace add src/main.rs:42 --session bug-42 --tag hot
 fcs trace report bug-42 --format markdown
 fcs debug command target/debug/app -b src/main.rs:42
-fcs dap adapters
-fcs dap adapter-session auto target/debug/app -b src/main.rs:42 --cwd . --format json
-fcs bench all . --query main --limit 50
+fcs debug dap adapters
+fcs debug dap adapter-session auto target/debug/app -b src/main.rs:42 --cwd . --format json
+fcs dev bench all . --query main --limit 50
 ```

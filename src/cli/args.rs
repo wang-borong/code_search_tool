@@ -34,7 +34,7 @@ pub(super) fn parse_preview_arg(value: &str) -> Result<(String, usize, usize), A
     let parts: Vec<&str> = value.splitn(3, ':').collect();
     if parts.len() < 2 {
         return Err(AppError::InvalidPreview(
-            "Usage: fcs preview <path>:<line>[:height]".to_string(),
+            "Usage: fcs find preview <path>:<line>[:height]".to_string(),
         ));
     }
 

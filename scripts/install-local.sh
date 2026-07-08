@@ -41,6 +41,6 @@ run() {
 run cargo build --release
 run mkdir -p "$BIN_DIR" "$MAN_DIR"
 run cp target/release/fcs "$BIN_DIR/fcs"
-run target/release/fcs man --out-dir "$MAN_DIR"
+run target/release/fcs dev man --out-dir "$MAN_DIR"
 
 echo "Installed fcs to $BIN_DIR/fcs"

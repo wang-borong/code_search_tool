@@ -42,7 +42,7 @@ run_full() {
 	rtk cargo build --release
 	rtk target/release/fcs --version
 	rtk target/release/fcs --help
-	rtk target/release/fcs man --stdout >/dev/null
+	rtk target/release/fcs dev man --stdout >/dev/null
 	rtk scripts/install-local.sh --dry-run --prefix /tmp/fcs-release-install
 	rtk cargo package --list --allow-dirty
 }

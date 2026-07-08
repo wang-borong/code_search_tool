@@ -1218,12 +1218,13 @@ fn insight_next_steps(
     let mut steps = Vec::new();
     if root.is_some() && index.is_none() {
         steps.push(
-            "Build the workspace index with `fcs index build` to connect trace entries to nearby symbols".to_string(),
+            "Build the workspace index with `fcs project index build` to connect trace entries to nearby symbols"
+                .to_string(),
         );
     }
     if debug_events.is_empty() {
         steps.push(format!(
-            "Create a debug profile from this session with `fcs dap from-trace {} <program>`",
+            "Create a debug profile from this session with `fcs debug dap from-trace {} <program>`",
             report.summary.name
         ));
     }
@@ -2431,7 +2432,7 @@ fn build_replay_plan(
         .collect::<Vec<TraceReplayCommand>>();
     let debug_command = program.map(|program| {
         let mut command = format!(
-            "fcs dap from-trace {} {}",
+            "fcs debug dap from-trace {} {}",
             shell_quote(&report.summary.name),
             shell_quote(program)
         );
@@ -2469,7 +2470,7 @@ fn replay_command_for_entry(report: &TraceSessionReport, entry: &TraceEntry, tar
         );
     }
     if entry.kind == "search" {
-        return format!("fcs search {}", shell_quote(&entry.label));
+        return format!("fcs find text {}", shell_quote(&entry.label));
     }
     if is_debug_trace_entry(entry) {
         return format!(
@@ -2479,7 +2480,7 @@ fn replay_command_for_entry(report: &TraceSessionReport, entry: &TraceEntry, tar
             shell_quote(&report.summary.name)
         );
     }
-    format!("fcs preview {}", shell_quote(&format!("{target}:20")))
+    format!("fcs find preview {}", shell_quote(&format!("{target}:20")))
 }
 
 fn replay_plan_to_markdown(plan: &TraceReplayPlan) -> String {
