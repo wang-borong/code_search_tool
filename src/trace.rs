@@ -1,6 +1,5 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{CodeItem, Location};
 use crate::errors::{AppError, Result};
+
+mod storage;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEntry {
@@ -356,13 +357,10 @@ pub struct TraceSessionEditReport {
     pub created_session: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TraceStore {
-    #[serde(default)]
     entries: Vec<TraceEntry>,
-    #[serde(default)]
     archived_sessions: Vec<ArchivedTraceSession>,
-    #[serde(default)]
     active_session: Option<String>,
 }
 
@@ -432,28 +430,7 @@ fn record_location_with_workspace_and_metadata(
     kind: &str,
     metadata: TraceMetadata,
 ) -> Result<String> {
-    let mut store = load_store()?;
-    let timestamp = now_secs();
-    let id = format!("{}-{}", timestamp, store.entries.len() + 1);
-    store.entries.push(TraceEntry {
-        id: id.clone(),
-        timestamp,
-        workspace: root.map(Path::to_path_buf),
-        kind: kind.to_string(),
-        label: label.to_string(),
-        path: location.path.clone(),
-        line: location.line,
-        column: location.column,
-        note: metadata.note,
-        status: metadata.status,
-        priority: metadata.priority,
-        session: metadata.session,
-        parent: metadata.parent,
-        branch: metadata.branch,
-        tags: metadata.tags,
-    });
-    save_store(&store)?;
-    Ok(id)
+    storage::record(root, location, label, kind, metadata, now_secs(), false).map(|result| result.id)
 }
 
 fn record_location_with_workspace_and_metadata_dedup(
@@ -463,74 +440,33 @@ fn record_location_with_workspace_and_metadata_dedup(
     kind: &str,
     metadata: TraceMetadata,
 ) -> Result<TraceRecordResult> {
-    let mut store = load_store()?;
-    if let Some(existing) = duplicate_entry_id(&store.entries, root, location, label, kind, &metadata) {
-        return Ok(TraceRecordResult {
-            id: existing,
-            inserted: false,
-        });
-    }
-
-    let timestamp = now_secs();
-    let id = format!("{}-{}", timestamp, store.entries.len() + 1);
-    store.entries.push(TraceEntry {
-        id: id.clone(),
-        timestamp,
-        workspace: root.map(Path::to_path_buf),
-        kind: kind.to_string(),
-        label: label.to_string(),
-        path: location.path.clone(),
-        line: location.line,
-        column: location.column,
-        note: metadata.note,
-        status: metadata.status,
-        priority: metadata.priority,
-        session: metadata.session,
-        parent: metadata.parent,
-        branch: metadata.branch,
-        tags: metadata.tags,
-    });
-    save_store(&store)?;
-    Ok(TraceRecordResult { id, inserted: true })
+    storage::record(root, location, label, kind, metadata, now_secs(), true)
 }
 
 pub fn list() -> Result<Vec<TraceEntry>> {
-    sorted_entries(load_store()?.entries)
+    storage::list(None, &TraceEntryFilter::default())
 }
 
 pub fn list_for_workspace(root: &Path) -> Result<Vec<TraceEntry>> {
-    entries_for_workspace(load_store()?.entries, root)
+    storage::list(Some(root), &TraceEntryFilter::default())
 }
 
 pub fn list_filtered(root: Option<&Path>, filter: &TraceEntryFilter) -> Result<Vec<TraceEntry>> {
-    let entries = match root {
-        Some(root) => list_for_workspace(root)?,
-        None => list()?,
-    };
-    Ok(entries
-        .into_iter()
-        .filter(|entry| trace_entry_matches_filter(entry, filter))
-        .collect())
+    storage::list(root, filter)
 }
 
 pub fn list_sessions(include_archived: bool) -> Result<Vec<TraceSessionSummary>> {
-    let store = load_store()?;
-    Ok(summarize_sessions(&store.entries, &store.archived_sessions)
-        .into_iter()
-        .filter(|summary| include_archived || !summary.is_archived())
-        .collect())
+    storage::list_sessions(include_archived)
 }
 
 pub fn active_session() -> Result<Option<String>> {
-    Ok(load_store()?.active_session)
+    storage::active_session()
 }
 
 pub fn set_active_session(name: &str) -> Result<()> {
     let name = normalize_session_value(name)
         .ok_or_else(|| AppError::General("Trace session name cannot be empty".to_string()))?;
-    let mut store = load_store()?;
-    store.active_session = Some(name);
-    save_store(&store)
+    storage::set_active_session(&name)
 }
 
 pub fn resolve_session(session: Option<String>) -> Result<Option<String>> {
@@ -541,52 +477,17 @@ pub fn resolve_session(session: Option<String>) -> Result<Option<String>> {
 }
 
 pub fn archive_session(name: &str) -> Result<TraceSessionChange> {
-    let mut store = load_store()?;
-    let change = archive_session_in_store(&mut store, name, now_secs());
-    if change == TraceSessionChange::Changed {
-        save_store(&store)?;
-    }
-    Ok(change)
+    storage::archive_session(name, now_secs())
 }
 
 pub fn unarchive_session(name: &str) -> Result<TraceSessionChange> {
-    let mut store = load_store()?;
-    let change = unarchive_session_in_store(&mut store, name);
-    if change == TraceSessionChange::Changed {
-        save_store(&store)?;
-    }
-    Ok(change)
+    storage::unarchive_session(name)
 }
 
 pub fn rename_session(from: &str, to: &str) -> Result<TraceSessionEditReport> {
     let to = normalize_session_value(to)
         .ok_or_else(|| AppError::General("Trace session name cannot be empty".to_string()))?;
-    let mut store = load_store()?;
-    let mut changed_entries = 0;
-    for entry in &mut store.entries {
-        if session_name(entry) == from {
-            entry.session = Some(to.clone());
-            changed_entries += 1;
-        }
-    }
-    if changed_entries == 0 {
-        return Err(AppError::General(format!("Trace session not found: {from}")));
-    }
-    for archived in &mut store.archived_sessions {
-        if archived.name == from {
-            archived.name = to.clone();
-        }
-    }
-    dedupe_archived_sessions(&mut store.archived_sessions);
-    if store.active_session.as_deref() == Some(from) {
-        store.active_session = Some(to.clone());
-    }
-    save_store(&store)?;
-    Ok(TraceSessionEditReport {
-        changed_entries,
-        removed_entries: 0,
-        created_session: Some(to),
-    })
+    storage::rename_session(from, &to)
 }
 
 pub fn merge_sessions(from: &str, to: &str) -> Result<TraceSessionEditReport> {
@@ -601,25 +502,7 @@ pub fn split_session_by_tag(from: &str, tag: &str, to: &str) -> Result<TraceSess
         return Err(AppError::General("Trace split tag cannot be empty".to_string()));
     }
 
-    let mut store = load_store()?;
-    let mut changed_entries = 0;
-    for entry in &mut store.entries {
-        if session_name(entry) == from && entry.tags.iter().any(|entry_tag| entry_tag == tag) {
-            entry.session = Some(to.clone());
-            changed_entries += 1;
-        }
-    }
-    if changed_entries == 0 {
-        return Err(AppError::General(format!(
-            "No entries in session {from} matched tag {tag}"
-        )));
-    }
-    save_store(&store)?;
-    Ok(TraceSessionEditReport {
-        changed_entries,
-        removed_entries: 0,
-        created_session: Some(to),
-    })
+    storage::split_session_by_tag(from, tag, &to)
 }
 
 pub fn verify_store(root: Option<&Path>) -> Result<TraceStoreCheck> {
@@ -721,25 +604,19 @@ pub fn compact_store() -> Result<TraceStoreRepairReport> {
 }
 
 pub fn update_entry_note(selector: &str, note: &str) -> Result<TraceEntryChange> {
-    update_entry_field(selector, |entry| {
-        entry.note = normalized_optional_value(note);
-    })
+    storage::update_entry_value(selector, "note", normalized_optional_value(note).as_deref())
 }
 
 pub fn update_entry_status(selector: &str, status: &str) -> Result<TraceEntryChange> {
-    update_entry_field(selector, |entry| {
-        entry.status = normalized_optional_value(status);
-    })
+    storage::update_entry_value(selector, "status", normalized_optional_value(status).as_deref())
 }
 
 pub fn update_entry_priority(selector: &str, priority: &str) -> Result<TraceEntryChange> {
-    update_entry_field(selector, |entry| {
-        entry.priority = normalized_optional_value(priority);
-    })
+    storage::update_entry_value(selector, "priority", normalized_optional_value(priority).as_deref())
 }
 
 pub fn clear() -> Result<()> {
-    save_store(&TraceStore::default())
+    storage::clear()
 }
 
 pub fn export_markdown(root: Option<&Path>) -> Result<String> {
@@ -1600,58 +1477,11 @@ pub fn format_session(summary: &TraceSessionSummary) -> String {
 }
 
 fn load_store() -> Result<TraceStore> {
-    let path = trace_path()?;
-    load_store_from_path(&path)
-}
-
-fn load_store_from_path(path: &Path) -> Result<TraceStore> {
-    if !path.exists() {
-        return Ok(TraceStore::default());
-    }
-
-    let contents = fs::read_to_string(path)?;
-    toml::from_str(&contents).map_err(|e| AppError::General(e.to_string()))
+    storage::load_store()
 }
 
 fn save_store(store: &TraceStore) -> Result<()> {
-    let path = trace_path()?;
-    save_store_to_path(&path, store)
-}
-
-fn save_store_to_path(path: &Path, store: &TraceStore) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let contents = toml::to_string_pretty(store).map_err(|e| AppError::General(e.to_string()))?;
-    fs::write(path, contents)?;
-    Ok(())
-}
-
-fn duplicate_entry_id(
-    entries: &[TraceEntry],
-    root: Option<&Path>,
-    location: &Location,
-    label: &str,
-    kind: &str,
-    metadata: &TraceMetadata,
-) -> Option<String> {
-    let workspace = root.map(Path::to_path_buf);
-    entries
-        .iter()
-        .find(|entry| {
-            entry.workspace == workspace
-                && entry.kind == kind
-                && entry.label == label
-                && entry.path == location.path
-                && entry.line == location.line
-                && entry.column == location.column
-                && entry.session == metadata.session
-                && entry.parent == metadata.parent
-                && entry.branch == metadata.branch
-                && entry.tags == metadata.tags
-        })
-        .map(|entry| entry.id.clone())
+    storage::replace_store(store)
 }
 
 fn compact_key(entry: &TraceEntry) -> String {
@@ -1739,18 +1569,7 @@ fn dedupe_archived_sessions(sessions: &mut Vec<ArchivedTraceSession>) {
     sessions.dedup_by(|left, right| left.name == right.name);
 }
 
-fn update_entry_field<F>(selector: &str, update: F) -> Result<TraceEntryChange>
-where
-    F: FnOnce(&mut TraceEntry),
-{
-    let mut store = load_store()?;
-    let change = update_entry_field_in_store(&mut store, selector, update);
-    if change == TraceEntryChange::Changed {
-        save_store(&store)?;
-    }
-    Ok(change)
-}
-
+#[cfg(test)]
 fn update_entry_field_in_store<F>(store: &mut TraceStore, selector: &str, update: F) -> TraceEntryChange
 where
     F: FnOnce(&mut TraceEntry),
@@ -1763,6 +1582,7 @@ where
     TraceEntryChange::Changed
 }
 
+#[cfg(test)]
 fn find_entry_mut<'a>(store: &'a mut TraceStore, selector: &str) -> Option<&'a mut TraceEntry> {
     if selector == "latest" {
         return store.entries.iter_mut().max_by_key(|entry| entry.timestamp);
@@ -1789,14 +1609,6 @@ fn normalize_session_value(value: &str) -> Option<String> {
     }
 }
 
-fn trace_path() -> Result<PathBuf> {
-    Ok(cache_dir()?.join("trace.toml"))
-}
-
-fn cache_dir() -> Result<PathBuf> {
-    crate::cache::user_cache_dir()
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1804,34 +1616,15 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn sorted_entries(mut entries: Vec<TraceEntry>) -> Result<Vec<TraceEntry>> {
-    entries.sort_by_key(|entry| Reverse(entry.timestamp));
-    Ok(entries)
-}
-
-fn entries_for_workspace(entries: Vec<TraceEntry>, root: &Path) -> Result<Vec<TraceEntry>> {
-    sorted_entries(
-        entries
-            .into_iter()
-            .filter(|entry| entry.workspace.as_deref() == Some(root) || entry.workspace.is_none())
-            .collect(),
-    )
-}
-
 fn session_report(name: &str, root: Option<&Path>) -> Result<TraceSessionReport> {
-    let store = load_store()?;
-    let filtered_entries = match root {
-        Some(root) => entries_for_workspace(store.entries.clone(), root)?,
-        None => sorted_entries(store.entries.clone())?,
+    let filter = TraceEntryFilter {
+        session: Some(name.to_string()),
+        ..TraceEntryFilter::default()
     };
-    let mut session_entries = filtered_entries
-        .iter()
-        .filter(|entry| session_name(entry) == name)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut session_entries = storage::list(root, &filter)?;
     session_entries.sort_by_key(|entry| entry.timestamp);
 
-    let summary = summarize_sessions(&filtered_entries, &store.archived_sessions)
+    let summary = summarize_sessions(&session_entries, &storage::archived_sessions()?)
         .into_iter()
         .find(|summary| summary.name == name)
         .ok_or_else(|| AppError::General(format!("Trace session not found: {name}")))?;
@@ -2112,6 +1905,7 @@ pub fn location_from_path(path: impl AsRef<Path>, line: Option<usize>, column: O
     Location::new(path.as_ref().to_path_buf(), line, column)
 }
 
+#[cfg(test)]
 fn archive_session_in_store(store: &mut TraceStore, name: &str, archived_at: u64) -> TraceSessionChange {
     if !store.entries.iter().any(|entry| session_name(entry) == name) {
         return TraceSessionChange::NotFound;
@@ -2130,6 +1924,7 @@ fn archive_session_in_store(store: &mut TraceStore, name: &str, archived_at: u64
     TraceSessionChange::Changed
 }
 
+#[cfg(test)]
 fn unarchive_session_in_store(store: &mut TraceStore, name: &str) -> TraceSessionChange {
     if !store.entries.iter().any(|entry| session_name(entry) == name) {
         return TraceSessionChange::NotFound;
@@ -2629,7 +2424,7 @@ mod tests {
     fn temp_trace_path(name: &str) -> PathBuf {
         std::env::temp_dir()
             .join(format!("fcs_trace_{name}_{}", std::process::id()))
-            .join("trace.toml")
+            .join("state.sqlite3")
     }
 
     fn test_entry(id: &str, session: &str, label: &str, line: usize) -> TraceEntry {
@@ -2683,7 +2478,8 @@ mod tests {
     #[test]
     fn persists_trace_store_and_filters_workspace_entries() {
         let path = temp_trace_path("workspace_filter");
-        let _ = fs::remove_file(&path);
+        let root = path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(root);
         let root_a = PathBuf::from("/tmp/fcs-a");
         let root_b = PathBuf::from("/tmp/fcs-b");
         let store = TraceStore {
@@ -2744,15 +2540,16 @@ mod tests {
             active_session: None,
         };
 
-        save_store_to_path(&path, &store).unwrap();
-        let loaded = load_store_from_path(&path).unwrap();
-        let entries = entries_for_workspace(loaded.entries, &root_a).unwrap();
+        storage::replace_store_at(&path, &store).unwrap();
+        let loaded = storage::load_store_at(&path).unwrap();
+        assert_eq!(loaded, store);
+        let entries = storage::list_at(&path, Some(&root_a), &TraceEntryFilter::default()).unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].label, "workspace a");
         assert_eq!(entries[1].label, "global entry");
 
-        let _ = fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2829,28 +2626,6 @@ mod tests {
         assert!(graph.contains("root -> child"));
         assert!(graph.contains("src/child.rs:7:2 - child node"));
         assert!(graph.contains("branch=fix"));
-    }
-
-    #[test]
-    fn old_trace_entries_can_omit_new_metadata() {
-        let contents = r#"
-[[entries]]
-timestamp = 7
-kind = "bookmark"
-label = "legacy"
-path = "src/main.rs"
-line = 3
-"#;
-
-        let store: TraceStore = toml::from_str(contents).unwrap();
-
-        assert_eq!(store.entries.len(), 1);
-        assert!(store.entries[0].id.is_empty());
-        assert!(store.entries[0].status.is_none());
-        assert!(store.entries[0].priority.is_none());
-        assert!(store.entries[0].session.is_none());
-        assert!(store.entries[0].tags.is_empty());
-        assert!(store.archived_sessions.is_empty());
     }
 
     #[test]

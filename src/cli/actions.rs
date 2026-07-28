@@ -2777,10 +2777,17 @@ struct TraceListFilter<'a> {
 }
 
 fn handle_trace_list(filter: TraceListFilter<'_>) -> Result<(), AppError> {
-    let entries = fcs::trace::list()?
-        .into_iter()
-        .filter(|entry| trace_entry_matches(entry, &filter))
-        .collect::<Vec<fcs::trace::TraceEntry>>();
+    let entries = fcs::trace::list_filtered(
+        None,
+        &fcs::trace::TraceEntryFilter {
+            session: filter.session.cloned(),
+            tag: filter.tag.cloned(),
+            kind: filter.kind.cloned(),
+            status: filter.status.cloned(),
+            priority: filter.priority.cloned(),
+            relation: None,
+        },
+    )?;
     if entries.is_empty() {
         println!("Trace history is empty");
         return Ok(());
@@ -2790,36 +2797,6 @@ fn handle_trace_list(filter: TraceListFilter<'_>) -> Result<(), AppError> {
         println!("{}", fcs::trace::format_entry(&entry));
     }
     Ok(())
-}
-
-fn trace_entry_matches(entry: &fcs::trace::TraceEntry, filter: &TraceListFilter<'_>) -> bool {
-    if let Some(session) = filter.session {
-        let entry_session = entry.session.as_deref().unwrap_or("default");
-        if entry_session != session.as_str() {
-            return false;
-        }
-    }
-    if let Some(tag) = filter.tag {
-        if !entry.tags.iter().any(|entry_tag| entry_tag == tag) {
-            return false;
-        }
-    }
-    if let Some(kind) = filter.kind {
-        if entry.kind != *kind {
-            return false;
-        }
-    }
-    if let Some(status) = filter.status {
-        if entry.status.as_deref() != Some(status.as_str()) {
-            return false;
-        }
-    }
-    if let Some(priority) = filter.priority {
-        if entry.priority.as_deref() != Some(priority.as_str()) {
-            return false;
-        }
-    }
-    true
 }
 
 fn handle_trace_entry_change(selector: &str, change: fcs::trace::TraceEntryChange, field: &str) {

@@ -506,11 +506,13 @@ fcs ignore --directory /path/to/project list
 ### 4.6 Query History
 
 ```bash
-fcs history list
-fcs history clear
+fcs dev history list
+fcs dev history clear
 ```
 
 history 记录交互查询，便于复用常查表达式。保存复杂字段查询时，优先用 `fcs find query --save`。
+
+History 和 Trace 共用操作系统本地数据目录下的 `fcs/state.sqlite3`（Linux 通常为 `~/.local/share/fcs/state.sqlite3`）。旧的 `history.toml`、`trace.toml` 不会自动导入。
 
 ## 5. Workspace、Service 与 Index
 
@@ -793,6 +795,8 @@ fcs trace priority latest high
 ```
 
 `note`、`status`、`priority` 的 id 可以是 trace id，也可以是 `latest`。传入 `-` 可清空字段。
+
+Trace 的新增、筛选、字段更新和 session 操作直接使用 SQLite 事务与索引，不再重写完整 TOML 文件。
 
 Session：
 

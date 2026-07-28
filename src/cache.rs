@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::Result;
 
-pub(crate) fn user_cache_dir() -> Result<PathBuf> {
-    let preferred = dirs::cache_dir().map(|path| path.join("fcs"));
-    let fallback = std::env::current_dir()?.join(".fcs-cache");
+pub(crate) fn user_data_dir() -> Result<PathBuf> {
+    let preferred = dirs::data_local_dir().map(|path| path.join("fcs"));
+    let fallback = std::env::current_dir()?.join(".fcs-data");
     writable_dir_or_fallback(preferred.as_deref(), &fallback)
 }
 

@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("Ignore error: {0}")]
     Ignore(#[from] ignore::Error),
 
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("File not found: {0}")]
     FileNotFound(String),
 
@@ -30,6 +33,7 @@ impl AppError {
             Self::Io(_) => "FCS-IO",
             Self::Regex(_) => "FCS-REGEX",
             Self::Ignore(_) => "FCS-IGNORE",
+            Self::Sqlite(_) => "FCS-SQLITE",
             Self::FileNotFound(_) => "FCS-NOT-FOUND",
             Self::InvalidPreview(_) => "FCS-INVALID-PREVIEW",
             Self::Skim(_) => "FCS-PICKER",

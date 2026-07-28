@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-28
+
+### Changed
+
+- Replaced `history.toml` and `trace.toml` with a unified, indexed SQLite state database using WAL transactions. Existing TOML history and trace files are not imported.
+
 ### Added
 
 - Added traversal-time filename filtering to `find files` through `-p` / `--pattern`, with regex, glob, fixed-string, relative-path, case-insensitive, and fd-style smart-case modes while preserving skim `--query` filtering.

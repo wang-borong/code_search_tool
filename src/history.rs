@@ -1,8 +1,6 @@
-use std::cmp::Reverse;
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, Result};
@@ -15,34 +13,24 @@ pub struct HistoryEntry {
     pub directory: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct HistoryStore {
-    entries: Vec<HistoryEntry>,
-}
-
 pub fn record(command: &str, query: &str, directory: Option<&String>) -> Result<()> {
     if query.trim().is_empty() {
         return Ok(());
     }
 
-    let mut store = load_store()?;
-    store.entries.push(HistoryEntry {
-        timestamp: now_secs(),
-        command: command.to_string(),
-        query: query.to_string(),
-        directory: directory.cloned(),
-    });
-    save_store(&store)
+    let connection = crate::state_db::open()?;
+    record_with_connection(&connection, now_secs(), command, query, directory.map(String::as_str))
 }
 
 pub fn list() -> Result<Vec<HistoryEntry>> {
-    let mut entries = load_store()?.entries;
-    entries.sort_by_key(|entry| Reverse(entry.timestamp));
-    Ok(entries)
+    let connection = crate::state_db::open()?;
+    list_with_connection(&connection)
 }
 
 pub fn clear() -> Result<()> {
-    save_store(&HistoryStore::default())
+    let connection = crate::state_db::open()?;
+    connection.execute("DELETE FROM history", [])?;
+    Ok(())
 }
 
 pub fn format_entry(entry: &HistoryEntry) -> String {
@@ -50,29 +38,46 @@ pub fn format_entry(entry: &HistoryEntry) -> String {
     format!("{} [{}] {} {}", entry.timestamp, entry.command, directory, entry.query)
 }
 
-fn load_store() -> Result<HistoryStore> {
-    let path = history_path()?;
-    if !path.exists() {
-        return Ok(HistoryStore::default());
-    }
-
-    let contents = fs::read_to_string(path)?;
-    toml::from_str(&contents).map_err(|e| AppError::General(e.to_string()))
-}
-
-fn save_store(store: &HistoryStore) -> Result<()> {
-    let path = history_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let contents = toml::to_string_pretty(store).map_err(|e| AppError::General(e.to_string()))?;
-    fs::write(path, contents)?;
+fn record_with_connection(
+    connection: &Connection,
+    timestamp: u64,
+    command: &str,
+    query: &str,
+    directory: Option<&str>,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO history (timestamp, command, query, directory) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            sqlite_integer(timestamp, "history timestamp")?,
+            command,
+            query,
+            directory
+        ],
+    )?;
     Ok(())
 }
 
-fn history_path() -> Result<PathBuf> {
-    Ok(crate::cache::user_cache_dir()?.join("history.toml"))
+fn list_with_connection(connection: &Connection) -> Result<Vec<HistoryEntry>> {
+    let mut statement = connection.prepare(
+        "SELECT timestamp, command, query, directory
+         FROM history
+         ORDER BY timestamp DESC, id DESC",
+    )?;
+    let entries = statement
+        .query_map([], |row| {
+            Ok(HistoryEntry {
+                timestamp: row.get::<_, i64>(0)? as u64,
+                command: row.get(1)?,
+                query: row.get(2)?,
+                directory: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(entries)
+}
+
+fn sqlite_integer(value: u64, field: &str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| AppError::General(format!("{field} exceeds SQLite INTEGER range")))
 }
 
 fn now_secs() -> u64 {
@@ -86,6 +91,11 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    fn temp_database(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("fcs_history_{name}_{}", std::process::id()));
+        (root.join("state.sqlite3"), root)
+    }
+
     #[test]
     fn formats_history_entry() {
         let entry = HistoryEntry {
@@ -96,5 +106,25 @@ mod tests {
         };
 
         assert_eq!(format_entry(&entry), "1 [search] src main");
+    }
+
+    #[test]
+    fn persists_lists_and_clears_history_in_sqlite() {
+        let (path, root) = temp_database("persistence");
+        let _ = std::fs::remove_dir_all(&root);
+        let connection = crate::state_db::open_at(&path).unwrap();
+
+        record_with_connection(&connection, 1, "search", "first", Some("src")).unwrap();
+        record_with_connection(&connection, 2, "files", "second", None).unwrap();
+
+        let entries = list_with_connection(&connection).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].query, "second");
+        assert_eq!(entries[1].directory.as_deref(), Some("src"));
+
+        connection.execute("DELETE FROM history", []).unwrap();
+        assert!(list_with_connection(&connection).unwrap().is_empty());
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

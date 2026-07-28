@@ -529,7 +529,7 @@ fcs trace semantic --from-query "kind:function name:init" --query-source index -
 fcs trace graph --format mermaid --session bug-42 --tag hot --collapse-threshold 8
 
 # 查看查询历史
-fcs history list
+fcs dev history list
 
 # 基于显式断点生成 gdb 命令
 fcs debug command target/debug/app -b src/main.c:42 --cwd . --env RUST_LOG=debug
@@ -547,6 +547,8 @@ fcs debug command target/debug/app -b src/main.c:42 --run
 `debug` 默认只打印命令，不会擅自进入交互式调试器。加 `--run` 后才启动 `gdb` 或 `lldb`。
 
 `trace graph` 可按 `--session`、`--tag`、`--kind`、`--status`、`--priority` 和 `--relation` 过滤，并可用 `--collapse-threshold` 把大批同 session/kind/path 的节点折叠成 summary。`trace insights` 会在普通 session report 之上汇总 kind/status/priority、热点文件、debug/DAP 事件和未关闭条目；提供 `--directory` 且存在 index 时，还会把 trace 位置关联到最近的索引符号。`trace verify/repair/compact` 用于发布前或长时间使用后的 trace store 健康检查和去重维护。
+
+查询历史和 Trace 记录统一保存在操作系统本地数据目录下的 `fcs/state.sqlite3`（Linux 通常为 `~/.local/share/fcs/state.sqlite3`）。数据库使用 WAL、事务和索引支持持续追加及并发读取；旧的 `history.toml`、`trace.toml` 不会自动导入。
 
 ---
 
