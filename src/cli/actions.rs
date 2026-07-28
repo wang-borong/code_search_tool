@@ -118,6 +118,7 @@ fn handle_search(
 fn handle_files(
     directory: Option<&String>,
     query: Option<&String>,
+    file_pattern: Option<&fcs::files::FilePattern>,
     options: &[String],
     config: &fcs::config::Config,
 ) -> Result<(), AppError> {
@@ -125,7 +126,8 @@ fn handle_files(
         fcs::history::record("files", query, directory)?;
     }
     let ignore_path = resolve_ignore_file(directory);
-    let items = fcs::files::find_files(directory, options, &config.search.ignore, &ignore_path)?;
+    let items =
+        fcs::files::find_files_with_pattern(directory, options, &config.search.ignore, &ignore_path, file_pattern)?;
 
     if items.is_empty() {
         println!("No files found");
@@ -133,6 +135,38 @@ fn handle_files(
     }
 
     run_code_item_picker(&items, query, config)
+}
+
+fn file_pattern_from_cli(
+    pattern: Option<String>,
+    glob: bool,
+    full_path: bool,
+    ignore_case: bool,
+    smart_case: bool,
+    fixed_strings: bool,
+) -> Option<fcs::files::FilePattern> {
+    pattern.map(|pattern| {
+        let syntax = if glob {
+            fcs::files::FilePatternSyntax::Glob
+        } else if fixed_strings {
+            fcs::files::FilePatternSyntax::FixedStrings
+        } else {
+            fcs::files::FilePatternSyntax::Regex
+        };
+        let target = if full_path {
+            fcs::files::FilePatternTarget::RelativePath
+        } else {
+            fcs::files::FilePatternTarget::FileName
+        };
+        let case = if ignore_case {
+            fcs::files::FilePatternCase::Insensitive
+        } else if smart_case {
+            fcs::files::FilePatternCase::Smart
+        } else {
+            fcs::files::FilePatternCase::Sensitive
+        };
+        fcs::files::FilePattern::new(pattern, syntax, target, case)
+    })
 }
 
 fn handle_symbols(
@@ -4405,9 +4439,23 @@ pub(super) fn execute(command: Commands, config: fcs::config::Config) -> Result<
             FindAction::Files {
                 directory,
                 query,
+                pattern,
+                glob,
+                full_path,
+                ignore_case,
+                smart_case,
+                fixed_strings,
                 option,
             } => {
-                handle_files(directory.as_ref(), query.as_ref(), &option, &config)?;
+                let file_pattern =
+                    file_pattern_from_cli(pattern, glob, full_path, ignore_case, smart_case, fixed_strings);
+                handle_files(
+                    directory.as_ref(),
+                    query.as_ref(),
+                    file_pattern.as_ref(),
+                    &option,
+                    &config,
+                )?;
             }
             FindAction::Symbols {
                 directory,

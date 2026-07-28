@@ -1122,8 +1122,7 @@ pub fn migrate_index_contents(contents: &str) -> Result<CodeIndex> {
 }
 
 pub fn needs_schema_migration(contents: &str) -> Result<bool> {
-    let value = contents
-        .parse::<toml::Value>()
+    let value = toml::from_str::<toml::Value>(contents)
         .map_err(|err| AppError::General(format!("Corrupt index TOML: {err}")))?;
     let version = value.get("version").and_then(toml::Value::as_integer).unwrap_or(1);
 

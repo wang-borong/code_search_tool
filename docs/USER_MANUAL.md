@@ -445,9 +445,28 @@ fcs find files
 fcs find files .
 fcs find files /path/to/project --query main
 fcs find files . -o --hidden -o --no-ignore
+fcs find files . -p '\.(rs|toml)$'
+fcs find files . --pattern '*.rs' --glob --query parser
+fcs find files . --pattern '^tests/.+_test\.rs$' --full-path
 ```
 
 `files` 适合一次性选择文件。需要连续调查时，优先使用 `fcs ui open --mode files`。
+
+`-p` / `--pattern` 会在并行遍历目录时预先筛选候选文件，默认把 pattern 作为区分大小写的 Rust 正则表达式并只匹配文件名。常用控制参数如下：
+
+- `-g`, `--glob`：改用 glob；例如 `--pattern '*.rs' --glob`。
+- `--full-path`：匹配以 `/` 分隔的相对路径，而不是单独的文件名。
+- `-i`, `--ignore-case`：忽略大小写。
+- `--smart-case`：pattern 全为小写时忽略大小写，包含大写时区分大小写。
+- `-F`, `--fixed-strings`：把 pattern 当作普通子字符串。
+
+`--query` 仍然是进入 skim 后的初始模糊查询，因此可以先用 pattern 缩小扫描结果，再用 query 交互筛选：
+
+```bash
+fcs find files . --pattern '\.rs$' --query parser
+```
+
+正则支持常见分组、交替、量词、字符类和锚点，但不是 GNU `find -regex` 方言的逐字兼容实现，也不支持反向引用或 look-around。GNU `find -regex` 默认针对完整路径；在 fcs 中可使用 `--full-path` 和 `^...$` 获得相近的完整相对路径匹配语义。
 
 ### 4.3 符号查找
 

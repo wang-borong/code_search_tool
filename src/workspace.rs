@@ -920,8 +920,7 @@ pub fn migrate_project_config(directory: Option<&String>, dry_run: bool) -> Resu
     }
 
     let original = fs::read_to_string(&path)?;
-    let mut value = original
-        .parse::<toml::Value>()
+    let mut value = toml::from_str::<toml::Value>(&original)
         .map_err(|err| AppError::General(format!("Invalid project config TOML: {err}")))?;
     let defaults = toml::Value::try_from(ProjectConfig::for_workspace(&root)?)
         .map_err(|err| AppError::General(format!("Failed to build project config defaults: {err}")))?;

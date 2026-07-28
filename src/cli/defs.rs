@@ -137,6 +137,30 @@ pub enum FindAction {
         #[arg(short, long)]
         query: Option<String>,
 
+        /// Pre-filter files by a regular expression matched against the file name
+        #[arg(short = 'p', long, value_name = "PATTERN", allow_hyphen_values = true)]
+        pattern: Option<String>,
+
+        /// Interpret --pattern as a glob instead of a regular expression
+        #[arg(short = 'g', long, requires = "pattern", conflicts_with = "fixed_strings")]
+        glob: bool,
+
+        /// Match --pattern against the normalized relative path instead of the file name
+        #[arg(long, requires = "pattern")]
+        full_path: bool,
+
+        /// Match --pattern without regard to case
+        #[arg(short = 'i', long, requires = "pattern", conflicts_with = "smart_case")]
+        ignore_case: bool,
+
+        /// Use fd-style smart case for --pattern
+        #[arg(long, requires = "pattern", conflicts_with = "ignore_case")]
+        smart_case: bool,
+
+        /// Treat --pattern as a literal substring instead of a regular expression
+        #[arg(short = 'F', long, requires = "pattern", conflicts_with = "glob")]
+        fixed_strings: bool,
+
         /// File search options (e.g. --hidden, --no-ignore, -L, -d 2)
         #[arg(short, long, allow_hyphen_values = true)]
         option: Vec<String>,
@@ -2530,6 +2554,67 @@ mod tests {
             }
             command => panic!("expected find text command, got {command:?}"),
         }
+    }
+
+    #[test]
+    fn find_files_accepts_pattern_matching_options() {
+        let cli = Cli::try_parse_from([
+            "fcs",
+            "find",
+            "files",
+            ".",
+            "-p",
+            r"^src/.+\.rs$",
+            "--full-path",
+            "--smart-case",
+            "--query",
+            "parser",
+        ])
+        .unwrap();
+
+        match *cli.command {
+            Commands::Find {
+                action:
+                    FindAction::Files {
+                        directory,
+                        query,
+                        pattern,
+                        glob,
+                        full_path,
+                        ignore_case,
+                        smart_case,
+                        fixed_strings,
+                        ..
+                    },
+            } => {
+                assert_eq!(directory.as_deref(), Some("."));
+                assert_eq!(query.as_deref(), Some("parser"));
+                assert_eq!(pattern.as_deref(), Some(r"^src/.+\.rs$"));
+                assert!(!glob);
+                assert!(full_path);
+                assert!(!ignore_case);
+                assert!(smart_case);
+                assert!(!fixed_strings);
+            }
+            command => panic!("expected find files command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn find_files_rejects_conflicting_pattern_modes() {
+        assert!(Cli::try_parse_from(["fcs", "find", "files", ".", "--pattern", "*.rs", "--glob", "-F"]).is_err());
+        assert!(Cli::try_parse_from([
+            "fcs",
+            "find",
+            "files",
+            ".",
+            "--pattern",
+            "main",
+            "--ignore-case",
+            "--smart-case",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["fcs", "find", "files", ".", "--glob"]).is_err());
     }
 
     #[test]

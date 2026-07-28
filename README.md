@@ -189,6 +189,15 @@ fcs find files /path/to/project -q main
 
 # 传入文件遍历选项
 fcs find files -o --hidden -o --no-ignore
+
+# 使用正则表达式预先筛选文件名
+fcs find files . -p '\.(rs|toml)$'
+
+# 使用 glob 匹配，并在候选文件中继续进行 skim 模糊查询
+fcs find files . --pattern '*.rs' --glob --query parser
+
+# 对规范化的相对路径进行匹配
+fcs find files . --pattern '^tests/.+_test\.rs$' --full-path
 ```
 
 支持的文件遍历选项包括：
@@ -196,6 +205,17 @@ fcs find files -o --hidden -o --no-ignore
 - `--no-ignore`：忽略 `.gitignore`、`.ignore` 和默认 ignore 配置。
 - `-L`, `--follow`：跟随符号链接。
 - `-d`, `--max-depth <NUM>`：限制目录遍历深度。
+
+文件名 pattern 选项包括：
+
+- `-p`, `--pattern <PATTERN>`：在目录遍历期间筛选文件，默认按区分大小写的正则表达式匹配文件名。
+- `-g`, `--glob`：将 pattern 解释为 glob；例如 `--pattern '*.rs' --glob`。建议使用引号避免 shell 提前展开。
+- `--full-path`：匹配以 `/` 分隔的相对路径，例如 `src/main.rs`；默认只匹配文件名。
+- `-i`, `--ignore-case`：忽略大小写。
+- `--smart-case`：fd 风格智能大小写；pattern 全为小写时忽略大小写，出现大写时区分大小写。
+- `-F`, `--fixed-strings`：将 pattern 作为普通子字符串，而不是正则表达式。
+
+`--pattern` 在并行目录遍历期间减少候选文件，`--query` 则保留为 skim 的初始模糊查询，两者可以组合使用。正则使用 Rust `regex` 语法，支持常见的分组、交替、量词、字符类和锚点，但不支持反向引用或 look-around。它不是 GNU `find -regex` 方言的逐字兼容实现；需要模拟完整路径匹配时，请组合 `--full-path` 与 `^...$`。
 
 ---
 

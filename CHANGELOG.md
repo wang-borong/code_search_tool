@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added traversal-time filename filtering to `find files` through `-p` / `--pattern`, with regex, glob, fixed-string, relative-path, case-insensitive, and fd-style smart-case modes while preserving skim `--query` filtering.
 - Added TUI layout presets, trace session/timeline/graph views, result filtering/grouping commands, health summaries, persistent layout/filter state, and matching `tui-script` assertions.
 - Added trace graph filters/collapse controls, filtered session diffs, session rename/merge/split commands, and trace store verify/repair/compact maintenance commands.
 - Added DAP advanced breakpoint metadata for CLI launch/profile/session smoke/adapter sessions plus saved-profile transcript export.
@@ -95,6 +96,10 @@
 - Added `graph semantic --fallback index` so semantic graph commands can still return index-derived edges when LSP is unavailable or empty.
 - Added `workspace doctor-bundle` text/json support bundles with workspace, config, index, service, DAP, workflow, and saved-query diagnostics.
 - Added P89-P96 unit and smoke coverage for DAP template/state metadata, Query v2, shard cache query/status, graph fallback, diagnostic workflows, and doctor bundles.
+
+### Changed
+
+- Updated all direct Cargo dependencies to their latest crates.io releases, including `skim 5.6.1`, `toml 1.1.3`, `dirs 6.0.0`, `ignore 0.4.31`, and `regex 1.13.1`, and refreshed compatible transitive dependencies.
 
 ### Verification
 
